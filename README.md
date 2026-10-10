@@ -46,22 +46,22 @@ PowerShell 示例，在仓库根目录执行：
 $env:JAVA_HOME = 'C:/Program Files/Java/jdk-21' # 替换为本机 JDK 21 路径
 $env:ANDROID_HOME = 'C:/Android/Sdk'            # 替换为本机 SDK 路径
 Set-Location android
-./gradlew.bat -g ../.gradle-home testDebugUnitTest lintDebug assembleDebug
-./gradlew.bat --stop -g ../.gradle-home
+./gradlew.bat -g .gradle-home testDebugUnitTest lintDebug assembleDebug
+./gradlew.bat --stop -g .gradle-home
 ```
 
 **debug 构建默认使用本地模拟数据接口。连接真实后端须显式附加 `-PPLANLOCK_USE_MOCK=false`**；例如连接自建服务：
 
 ```powershell
-./gradlew.bat -g ../.gradle-home assembleDebug -PPLANLOCK_USE_MOCK=false -PPLANLOCK_API_BASE_URL=https://your-server.example/api/v1/
-./gradlew.bat --stop -g ../.gradle-home
+./gradlew.bat -g .gradle-home assembleDebug -PPLANLOCK_USE_MOCK=false -PPLANLOCK_API_BASE_URL=https://your-server.example/api/v1/
+./gradlew.bat --stop -g .gradle-home
 ```
 
-默认模拟器地址可直接用于本机联调；真机须配置可访问的主机名或局域网地址。部署时优先使用 HTTPS。`release` 构建强制使用真实接口，生成 unsigned APK：
+默认模拟器地址可直接用于本机联调；真机须配置可访问的主机名或局域网地址。release 仅为默认模拟器主机 `10.0.2.2` 放行 HTTP，其他地址须使用 HTTPS；debug 可用于局域网 HTTP 联调。部署时优先使用 HTTPS。`release` 构建强制使用真实接口，生成 unsigned APK：
 
 ```powershell
-./gradlew.bat -g ../.gradle-home clean testReleaseUnitTest lintRelease :app:assembleRelease -PPLANLOCK_USE_MOCK=false
-./gradlew.bat --stop -g ../.gradle-home
+./gradlew.bat -g .gradle-home clean testReleaseUnitTest lintRelease :app:assembleRelease -PPLANLOCK_USE_MOCK=false
+./gradlew.bat --stop -g .gradle-home
 ```
 
 产物位于 `android/app/build/outputs/apk/release/app-release-unsigned.apk`。发布者使用自有 keystore，通过 Android SDK 的 `zipalign` 和 `apksigner` 签名；本仓库不分发 APK 或插件的私钥及口令。自行签名生成的 APK 与官方发布证书不同，不能覆盖官方版本。
