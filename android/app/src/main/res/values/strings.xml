@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">知序</string>
+    <string name="brand_motto">知所想，序所行</string>
+    <string name="accessibility_desc">用于在计划执行时段识别前台应用、记录应用使用区间。</string>
+</resources>

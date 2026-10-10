@@ -1,0 +1,44 @@
+pluginManagement {
+    repositories {
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+        maven { url = uri("https://repo.huaweicloud.com/repository/maven/google") }
+        maven { url = uri("https://repo.huaweicloud.com/repository/maven/central") }
+        maven { url = uri("https://repo.huaweicloud.com/repository/maven/public") }
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/central") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        maven { url = uri("https://repo.huaweicloud.com/repository/maven/google") }
+        maven { url = uri("https://repo.huaweicloud.com/repository/maven/central") }
+        maven { url = uri("https://repo.huaweicloud.com/repository/maven/public") }
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "planlock-android"
+include(
+    ":app",
+    ":core-api",
+    ":core-engine",
+    ":core-dnd",
+    ":core-security",
+    ":core-record",
+    ":core-sync",
+    ":core-design",
+    ":core-plugin",
+    ":plugin-force-blocker",
+    ":feature-plan",
+    ":feature-guide",
+    ":feature-stats",
+    ":feature-settings"
+)

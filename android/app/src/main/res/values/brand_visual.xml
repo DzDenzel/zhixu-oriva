@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Approved launcher palette; intentionally independent of the app's UI brand token. -->
+    <color name="zhixu_icon_sage">#E2EBDF</color>
+    <color name="zhixu_icon_ivory">#FFFAF1</color>
+    <color name="zhixu_icon_champagne">#FDE7C8</color>
+    <color name="zhixu_icon_arc">#779985</color>
+    <color name="zhixu_icon_jade_top">#85AD93</color>
+    <color name="zhixu_icon_jade_bottom">#3F765A</color>
+    <color name="zhixu_splash_jade_top">@color/zhixu_icon_jade_top</color>
+    <color name="zhixu_splash_jade_bottom">@color/zhixu_icon_jade_bottom</color>
+</resources>

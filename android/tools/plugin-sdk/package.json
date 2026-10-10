@@ -1,0 +1,19 @@
+{
+  "name": "@oriva/plugin-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Official ORIVA contract-v2 JS/TS authoring SDK and signed-package template",
+  "type": "module",
+  "types": "./index.d.ts",
+  "exports": { ".": { "types": "./index.d.ts", "import": "./index.js" } },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "build": "node tools/build.mjs",
+    "validate": "node tools/validate.mjs",
+    "preview": "node tools/preview.mjs",
+    "verify": "node tools/verify.mjs"
+  },
+  "devDependencies": { "esbuild": "0.25.12", "jszip": "3.10.1", "typescript": "5.9.3" }
+}

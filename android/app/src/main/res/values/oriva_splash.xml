@@ -1,0 +1,5 @@
+<resources>
+    <!-- Matches V2Tokens.light.surface and V2Tokens.brand, no new brand color. -->
+    <color name="oriva_splash_background">#FBFDF9</color>
+    <color name="oriva_splash_ink">@color/oriva_brand</color>
+</resources>

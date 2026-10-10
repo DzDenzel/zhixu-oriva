@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Lift the same jade family on the dark backdrop; launcher remains light. -->
+    <color name="zhixu_splash_jade_top">#ADCDB7</color>
+    <color name="zhixu_splash_jade_bottom">#80AB92</color>
+</resources>

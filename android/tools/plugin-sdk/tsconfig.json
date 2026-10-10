@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2020", "module": "ESNext", "moduleResolution": "Bundler",
+    "strict": true, "noEmit": true, "types": [], "lib": ["ES2020"],
+    "baseUrl": ".", "paths": { "@oriva/plugin-sdk": ["index.d.ts"] }
+  },
+  "include": ["index.d.ts", "examples/**/*.ts", "test/types.ts"]
+}

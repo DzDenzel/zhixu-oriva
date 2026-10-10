@@ -1,0 +1,33 @@
+{
+  "plugins": [
+    {
+      "artifact": "force-blocker-1.0.0.plp",
+      "id": "force-blocker",
+      "name": "强制拦截",
+      "version": "1.0.0",
+      "contractVersion": 1,
+      "entryPoint": "com.planlock.plugin.forceblocker.ForceBlockPlugin",
+      "requiredCapabilities": [
+        "OVERLAY",
+        "HOME",
+        "HAPTIC",
+        "FEEDBACK",
+        "ACCESSIBILITY"
+      ],
+      "description": "根据主应用的观测判定显示拦截反馈；插件故障时主应用继续运行。"
+    },
+    {
+      "artifact": "plugin-focus-advice-0.1.0.pljs",
+      "id": "focus-advice",
+      "name": "专注建议",
+      "version": "0.1.0",
+      "contractVersion": 2,
+      "entryPoint": "entryPoint",
+      "requiredCapabilities": [
+        "QUERY_TODAY",
+        "FEEDBACK"
+      ],
+      "description": "读取宿主今日缓存生成专注建议；计划编辑页可切换建议、选择风格及修改提示语，变更由宿主保存并给出反馈。"
+    }
+  ]
+}

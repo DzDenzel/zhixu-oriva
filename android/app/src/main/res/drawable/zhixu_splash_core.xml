@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="58dp" android:height="66dp"
+    android:viewportWidth="46" android:viewportHeight="52">
+    <!-- Same launcher inner silhouette, with tight bounds for the brand lockup. -->
+    <group android:translateX="-31" android:translateY="-29">
+        <path android:pathData="M54,29 C43,29 43,45 49,51 C40,45 31,50 33,59 C35,67 46,66 51,61 C45,70 49,81 57,79 C67,77 65,65 59,58 C69,64 77,59 75,51 C73,43 63,45 60,39 C59,33 58,29 54,29 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear" android:startX="54" android:startY="29"
+                    android:endX="54" android:endY="79"
+                    android:startColor="@color/zhixu_splash_jade_top"
+                    android:endColor="@color/zhixu_splash_jade_bottom" />
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

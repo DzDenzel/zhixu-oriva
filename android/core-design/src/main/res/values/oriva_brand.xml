@@ -1,0 +1,4 @@
+<resources>
+    <!-- Same sampled brand token as V2Tokens.brand; checked by asset verification. -->
+    <color name="oriva_brand">#182F20</color>
+</resources>

@@ -1,0 +1,39 @@
+server:
+  address: 0.0.0.0
+  port: 8080
+
+spring:
+  application:
+    name: planlock-backend
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false # 存量 v2 库首次接入仅以一次性命令行参数覆盖
+    validate-on-migrate: true
+    clean-disabled: true
+  datasource:
+    url: jdbc:mysql://localhost:3306/planlock?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${PLANLOCK_DB_USER:root}
+    password: ${PLANLOCK_DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${PLANLOCK_REDIS_HOST:localhost}
+      port: ${PLANLOCK_REDIS_PORT:6379}
+      password: ${PLANLOCK_REDIS_PASSWORD}
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+  type-aliases-package: com.planlock
+
+planlock:
+  plugins:
+    directory: ${PLANLOCK_PLUGIN_DIRECTORY:plugins}
+  jwt:
+    secret: ${PLANLOCK_JWT_SECRET}
+    expire-minutes: ${PLANLOCK_JWT_EXPIRE_MINUTES:10080}
+
+logging:
+  level:
+    com.planlock: debug

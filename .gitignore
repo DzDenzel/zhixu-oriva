@@ -1,0 +1,51 @@
+# Public repository boundary: product source plus these three root files.
+/*
+!/android/
+!/backend/
+!/README.md
+!/LICENSE
+!/.gitignore
+
+# Generated Android/Java builds and compiler state.
+**/build/
+**/target/
+**/.gradle/
+**/.gradle-home/
+**/.android-home/
+**/.kotlin/
+**/.cxx/
+**/node_modules/
+**/dist/
+**/*.class
+**/*.pyc
+**/__pycache__/
+**/*.log
+**/*.lastUpdated
+/backend/org/
+
+# Local IDE, machine paths and credentials; never publish signing keys.
+**/.idea/
+**/.vscode/
+**/local.properties
+**/.env
+**/.env.*
+**/.plugin-signing/
+**/.secrets/
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pfx
+**/*.key
+**/*.pem
+
+# Private governance, requirements, evidence, delivery assets and scratch data.
+/AGENTS.md
+/Obsidian/
+/work/
+/release/
+/.claude/
+/.superpowers/
+/.android/
+/.secrets/
+**/work/
+**/tmp/

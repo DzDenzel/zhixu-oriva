@@ -1,0 +1,27 @@
+{
+  "id": "focus-advice",
+  "name": "专注建议",
+  "version": "0.1.0",
+  "contractVersion": 2,
+  "type": "js",
+  "entryPoint": "entryPoint",
+  "sourceId": "official",
+  "sourceType": "OFFICIAL",
+  "requiredCapabilities": ["QUERY_TODAY", "FEEDBACK"],
+  "description": "读取宿主今日缓存生成专注建议；计划编辑页可切换建议、选择风格及修改提示语，变更由宿主保存并给出反馈。",
+  "contributions": [
+    {
+      "kind": "ActionRow", "id": "run-advice", "slot": "plan.detail.protection",
+      "label": "运行专注建议", "actionId": "advice.run"
+    },
+    {
+      "kind": "FormSection", "id": "focus-settings", "slot": "plan.edit.configuration", "title": "专注建议",
+      "fields": [
+        { "id": "enabled", "kind": "switch", "label": "显示专注建议", "value": true, "onEvent": "advice.enabled.changed" },
+        { "id": "style", "kind": "choice", "label": "建议风格", "value": "brief", "onEvent": "advice.style.changed",
+          "options": [{ "value": "brief", "label": "简短" }, { "value": "gentle", "label": "温和" }] },
+        { "id": "note", "kind": "text", "label": "专注提示语", "value": "先完成一件小事", "onEvent": "advice.note.changed" }
+      ]
+    }
+  ]
+}

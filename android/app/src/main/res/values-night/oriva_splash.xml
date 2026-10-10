@@ -1,0 +1,5 @@
+<resources>
+    <!-- Matches V2Tokens.dark.surface and V2Tokens.dark.text. -->
+    <color name="oriva_splash_background">#181F1A</color>
+    <color name="oriva_splash_ink">#E6EAE4</color>
+</resources>

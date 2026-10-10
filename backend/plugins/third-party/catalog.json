@@ -1,0 +1,14 @@
+{
+  "plugins": [
+    {
+      "artifact": "community-force-blocker-1.0.0.plp",
+      "id": "community-force-blocker",
+      "name": "社区强制拦截示例",
+      "version": "1.0.0",
+      "contractVersion": 1,
+      "entryPoint": "com.planlock.plugin.forceblocker.ForceBlockPlugin",
+      "requiredCapabilities": ["OVERLAY", "HOME", "HAPTIC", "FEEDBACK", "ACCESSIBILITY"],
+      "description": "第三方开发证书签名的联调示例；项目不审核、不背书或保证。"
+    }
+  ]
+}

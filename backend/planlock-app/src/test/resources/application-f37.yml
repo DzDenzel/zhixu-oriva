@@ -1,0 +1,5 @@
+# Explicit opt-in tests supply a unique JDBC schema and credentials via command-line properties.
+# No shared database URL, baseline override, or relaxed migration error handling belongs here.
+logging:
+  level:
+    com.planlock: info

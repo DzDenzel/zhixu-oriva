@@ -1,0 +1,81 @@
+{
+  "id": "force-blocker",
+  "name": "强制拦截",
+  "version": "1.0.0",
+  "contractVersion": 1,
+  "entryPoint": "com.planlock.plugin.forceblocker.ForceBlockPlugin",
+  "sourceId": "official",
+  "sourceType": "OFFICIAL",
+  "requiredCapabilities": [
+    "OVERLAY",
+    "HOME",
+    "HAPTIC",
+    "FEEDBACK",
+    "ACCESSIBILITY"
+  ],
+  "description": "计划执行期间拦截宿主已判定为分心的应用。强制锁应用展示全拦说明与状态；放松应用允许选择单一应用限时豁免15分钟，到期或计划结束恢复全拦，使用仍被记录。再次选择替换旧豁免，不提供持久名单配置。",
+  "contributions": [
+    {
+      "kind": "StatusLine",
+      "id": "readiness",
+      "slot": "plan.detail.protection",
+      "text": "强制拦截插件：服务已就绪",
+      "tone": "active",
+      "requiresCapability": "ACCESSIBILITY",
+      "unavailableText": "无障碍服务未开启或未运行，拦截不会生效"
+    },
+    {
+      "kind": "ActionRow",
+      "id": "explain",
+      "slot": "plan.detail.protection",
+      "label": "强制锁应用",
+      "actionId": "explain-blocking"
+    },
+    {
+      "kind": "ActionRow",
+      "id": "relax",
+      "slot": "plan.detail.protection",
+      "label": "放松应用",
+      "actionId": "relax-application",
+      "input": "APPLICATION_SINGLE"
+    },
+    {
+      "kind": "CapabilityRequest",
+      "id": "accessibility",
+      "slot": "plan.detail.protection",
+      "capabilityId": "ACCESSIBILITY",
+      "actionId": "grant-accessibility",
+      "reason": "强制拦截插件需要无障碍服务识别前台应用、显示提示并返回主屏幕；未开启或未运行时拦截不会生效。"
+    },
+    {
+      "kind": "StatusLine",
+      "id": "editor-policy",
+      "slot": "plan.edit.configuration",
+      "text": "强制拦截：计划执行期间全拦分心应用；可选择单一应用限时放松15分钟，计划结束或到期恢复全拦，使用仍会记录。"
+    },
+    {
+      "kind": "StatusLine",
+      "id": "editor-readiness",
+      "slot": "plan.edit.configuration",
+      "text": "无障碍服务已就绪",
+      "tone": "active",
+      "requiresCapability": "ACCESSIBILITY",
+      "unavailableText": "无障碍服务未开启或未运行，拦截不会生效"
+    },
+    {
+      "kind": "ActionRow",
+      "id": "editor-explain",
+      "slot": "plan.edit.configuration",
+      "label": "查看全拦与放松状态",
+      "actionId": "explain-blocking"
+    },
+    {
+      "kind": "ActionRow",
+      "id": "editor-relax",
+      "slot": "plan.edit.configuration",
+      "label": "限时放松应用（15分钟）",
+      "actionId": "relax-application",
+      "input": "APPLICATION_SINGLE"
+    }
+  ]
+}
