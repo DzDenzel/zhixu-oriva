@@ -66,6 +66,14 @@ Set-Location android
 
 产物位于 `android/app/build/outputs/apk/release/app-release-unsigned.apk`。发布者使用自有 keystore，通过 Android SDK 的 `zipalign` 和 `apksigner` 签名；本仓库不分发 APK 或插件的私钥及口令。自行签名生成的 APK 与官方发布证书不同，不能覆盖官方版本。
 
+## 维护者发布
+
+后续版本在同一主仓库开发、提交和构建，复用已有正式签名密钥；发布工具从 Android 配置读取版本，将资产和证据按版本隔离。默认不克隆仓库，接收者克隆验证可按需启用。命令与中断恢复说明见 [可复用发布工具](android/tools/release/README.md)。
+
+```powershell
+python android/tools/release/release.py plan
+```
+
 ## 构建与启动后端
 
 需要 JDK 21、Maven 3.9+、MySQL 8 和 Redis。创建 UTF-8 数据库 `planlock`，准备具备该库权限的用户；在当前终端为环境变量赋值。敏感值请从自己的本地凭据管理方式注入：
