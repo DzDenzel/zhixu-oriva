@@ -13,7 +13,7 @@ class SettingsOverviewStructureTest {
 
         val items = sections.flatMap { it.items }
         assertEquals(SettingsOverviewItem.entries.toList(), items)
-        assertEquals(8, items.distinct().size)
+        assertEquals(9, items.distinct().size)
         assertTrue(sections.all { it.items.isNotEmpty() })
     }
 }

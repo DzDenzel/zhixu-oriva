@@ -1,0 +1,13 @@
+**/target
+**/.env
+**/.env.*
+**/.secrets
+**/*.jks
+**/*.keystore
+**/*.key
+**/*.pem
+**/*.log
+**/__pycache__
+**/work
+**/tmp
+.git

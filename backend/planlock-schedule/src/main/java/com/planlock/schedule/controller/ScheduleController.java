@@ -16,5 +16,5 @@ public class ScheduleController {
     @GetMapping public ApiResponse<List<ScheduleResponse>> list(){return ApiResponse.ok(service.list(UserContext.userId()));}
     @PostMapping public ApiResponse<ScheduleResponse> create(@Valid @RequestBody ScheduleUpsertRequest req){return ApiResponse.ok(service.create(UserContext.userId(),req));}
     @PutMapping("/{id}") public ApiResponse<ScheduleResponse> update(@PathVariable Long id,@RequestParam Long baseVersion,@Valid @RequestBody ScheduleUpsertRequest req){return ApiResponse.ok(service.update(UserContext.userId(),id,baseVersion,req));}
-    @DeleteMapping("/{id}") public ApiResponse<Void> delete(@PathVariable Long id){service.delete(UserContext.userId(),id);return ApiResponse.ok();}
+    @DeleteMapping("/{id}") public ApiResponse<Void> delete(@PathVariable Long id,@RequestParam(required=false) Long baseVersion){service.delete(UserContext.userId(),id,baseVersion);return ApiResponse.ok();}
 }

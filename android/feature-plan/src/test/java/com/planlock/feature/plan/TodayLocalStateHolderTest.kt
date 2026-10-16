@@ -11,6 +11,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -23,6 +24,58 @@ import org.junit.Test
 
 class TodayLocalStateHolderTest {
     private val key = TodayLocalKey(42, "2026-10-04")
+
+    @Test
+    fun `offline local write updates retained today data without a network revision`() = runBlocking {
+        val changes = MutableStateFlow(0L)
+        val calls = AtomicInteger()
+        var saved = localData("before").plans
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val holder = TodayLocalStateHolder(reader = reader {
+                calls.incrementAndGet()
+                saved
+            }, scope = scope, localChanges = changes)
+            holder.prefetch(key)
+            withTimeout(1_000) { holder.state.first { it.phase == TodayLocalPhase.READY } }
+            saved = localData("offline-created").plans
+            changes.value++
+            val updated = withTimeout(1_000) {
+                holder.state.first { it.read?.data?.plans?.single()?.name == "offline-created" }
+            }
+            assertEquals(TodayLocalPhase.READY, updated.phase)
+            holder.prefetch(key)
+            assertEquals(2, calls.get())
+        } finally { scope.cancel() }
+    }
+
+    @Test
+    fun `local refresh keeps visible content and coalesces writes during a read`() = runBlocking {
+        val changes = MutableStateFlow(0L)
+        val calls = AtomicInteger()
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val holder = TodayLocalStateHolder(reader = reader {
+                when (calls.incrementAndGet()) {
+                    1 -> localData("original").plans
+                    2 -> { started.complete(Unit); release.await(); localData("intermediate").plans }
+                    else -> localData("latest").plans
+                }
+            }, scope = scope, localChanges = changes)
+            holder.prefetch(key)
+            withTimeout(1_000) { holder.state.first { it.phase == TodayLocalPhase.READY } }
+            changes.value++
+            withTimeout(1_000) { started.await() }
+            assertEquals("original", holder.state.value.read?.data?.plans?.single()?.name)
+            // Explicit refreshes share the same in-flight queue as a local invalidation.
+            repeat(5) { holder.refresh(key) }
+            release.complete(Unit)
+            withTimeout(1_000) { holder.state.first { it.read?.data?.plans?.single()?.name == "latest" } }
+            assertEquals(3, calls.get())
+        } finally { scope.cancel() }
+    }
 
     @Test
     fun `multiple subscribers share one in-flight preload`() = runBlocking {

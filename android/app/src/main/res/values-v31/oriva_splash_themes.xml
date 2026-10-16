@@ -1,0 +1,26 @@
+<resources>
+    <!-- BUG-103：系统启动窗口跟随所选主题（API 33+ 由 SplashScreen.setSplashScreenTheme 选用）。
+         只改启动底色，图标与动画沿用 Theme.PlanLock；底色 = 各主题页面底色（InkPalettes.*.ground，SplashThemeTest 校验）。
+         墨序「跟随系统」不设启动主题，沿用 Theme.PlanLock 的随系统明暗资源。 -->
+    <style name="Theme.PlanLock.Splash.InkLight" parent="Theme.PlanLock">
+        <item name="android:windowSplashScreenBackground">#F2EDE3</item>
+    </style>
+    <style name="Theme.PlanLock.Splash.InkDark" parent="Theme.PlanLock">
+        <item name="android:windowSplashScreenBackground">#0E1210</item>
+    </style>
+    <style name="Theme.PlanLock.Splash.Celadon" parent="Theme.PlanLock">
+        <item name="android:windowSplashScreenBackground">#D7E3DA</item>
+    </style>
+    <style name="Theme.PlanLock.Splash.Dusk" parent="Theme.PlanLock">
+        <item name="android:windowSplashScreenBackground">#F5DDD2</item>
+    </style>
+    <style name="Theme.PlanLock.Splash.Bauhaus" parent="Theme.PlanLock">
+        <item name="android:windowSplashScreenBackground">#EFE9DA</item>
+    </style>
+    <style name="Theme.PlanLock.Splash.Atlas" parent="Theme.PlanLock">
+        <item name="android:windowSplashScreenBackground">#0B1027</item>
+    </style>
+    <style name="Theme.PlanLock.Splash.Phosphor" parent="Theme.PlanLock">
+        <item name="android:windowSplashScreenBackground">#050A06</item>
+    </style>
+</resources>

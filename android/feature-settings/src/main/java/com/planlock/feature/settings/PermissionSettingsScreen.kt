@@ -49,6 +49,14 @@ import com.planlock.app.security.PermissionIntent
 import com.planlock.app.security.PermissionKind
 import com.planlock.app.security.basePermissionKinds
 import com.planlock.design.PageAtmosphere
+import com.planlock.design.SettingsChevron
+import com.planlock.design.SettingsDivider
+import com.planlock.design.SettingsGroup
+import com.planlock.design.SettingsHero
+import com.planlock.design.SettingsItem
+import com.planlock.design.SettingsStateTag
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
 import com.planlock.design.planLockAtmosphere
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -64,6 +72,8 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
     var locationRequested by remember { mutableStateOf(false) }
     var requestMarkerLoaded by remember { mutableStateOf(false) }
     var pendingPermission by remember { mutableStateOf<PermissionKind?>(null) }
+    // 已开启的权限也能点：说明用途，并可前往系统设置查看或关闭（v4.1）。
+    var grantedPermission by remember { mutableStateOf<PermissionKind?>(null) }
 
     val locationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         states = PermissionChecker.check(context)
@@ -116,13 +126,24 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
         dismissButton = { TextButton(onClick = { pendingPermission = null }) { Text("取消") } },
     ) }
 
+    grantedPermission?.let { kind -> AlertDialog(
+        onDismissRequest = { grantedPermission = null },
+        title = { Text(kind.title + " · 已开启") },
+        text = { Text("${kind.consequence}。如需关闭或调整，可前往系统设置；关闭后相关功能会降级，但仍可继续使用。") },
+        confirmButton = { TextButton(onClick = {
+            grantedPermission = null
+            if (kind == PermissionKind.LOCATION) runCatching { context.startActivity(PermissionIntent.appDetails(context)) }
+            else PermissionIntent.open(context, kind)
+        }) { Text("前往系统设置") } },
+        dismissButton = { TextButton(onClick = { grantedPermission = null }) { Text("好") } },
+    ) }
+
     Scaffold(
         modifier = Modifier.planLockAtmosphere(PageAtmosphere.QUIET),
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = { Text("权限与系统能力") },
+            TopAppBar(colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent), title = {},
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
                 windowInsets = WindowInsets(0, 0, 0, 0),
             )
@@ -132,43 +153,60 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
             modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            val kinds = basePermissionKinds()
+            val enabledCount = kinds.count { states[it] == true }
             item {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.large,
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                ) {
-                    Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                        basePermissionKinds().forEachIndexed { index, kind ->
-                            if (index > 0) HorizontalDivider()
-                            val status = when {
-                                kind == PermissionKind.LOCATION -> when (locationState) {
-                                    LocationPermissionUiState.ENABLED -> "已开启"
-                                    LocationPermissionUiState.ASK -> "去开启"
-                                    LocationPermissionUiState.ASK_AGAIN -> "再次申请"
-                                    LocationPermissionUiState.APP_SETTINGS -> "前往设置"
-                                }
-                                states[kind] == true -> "已开启"
-                                else -> "去开启"
+                SettingsHero(permissionsMark.glyph, permissionsMark.hue, "权限与系统能力",
+                    "$enabledCount/${kinds.size} 已开启", enabledCount == kinds.size, "点按任一项查看用途或前往系统设置")
+            }
+            item {
+                SettingsGroup {
+                    kinds.forEachIndexed { index, kind ->
+                        if (index > 0) SettingsDivider()
+                        val granted = states[kind] == true
+                        val status = when {
+                            kind == PermissionKind.LOCATION -> when (locationState) {
+                                LocationPermissionUiState.ENABLED -> "已开启"
+                                LocationPermissionUiState.ASK -> "去开启"
+                                LocationPermissionUiState.ASK_AGAIN -> "再次申请"
+                                LocationPermissionUiState.APP_SETTINGS -> "前往设置"
                             }
-                            PermissionSettingRow(
-                                title = kind.title,
-                                description = kind.consequence,
-                                status = status,
-                                enabled = states[kind] == true,
-                                onClick = {
-                                    states = PermissionChecker.check(context)
-                                    if (states[kind] != true && (kind != PermissionKind.LOCATION || requestMarkerLoaded)) {
-                                        pendingPermission = kind
-                                    }
-                                },
-                            )
+                            granted -> "已开启"
+                            else -> "去开启"
                         }
+                        val mark = permissionMark(kind)
+                        SettingsItem(
+                            title = kind.title,
+                            detail = kind.consequence,
+                            glyph = mark.glyph,
+                            hue = mark.hue,
+                            onClick = {
+                                states = PermissionChecker.check(context)
+                                when {
+                                    states[kind] == true -> grantedPermission = kind
+                                    kind != PermissionKind.LOCATION || requestMarkerLoaded -> pendingPermission = kind
+                                }
+                            },
+                            trailing = {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    SettingsStateTag(status, granted)
+                                    SettingsChevron()
+                                }
+                            },
+                        )
                     }
                 }
             }
         }
     }
+}
+
+private fun permissionMark(kind: PermissionKind): SettingsMark = when (kind) {
+    PermissionKind.USAGE_STATS -> SettingsMark("用", com.planlock.design.InkHue.work)
+    PermissionKind.ACCESSIBILITY -> SettingsMark("辅", com.planlock.design.InkHue.sleep)
+    PermissionKind.DND -> SettingsMark("静", com.planlock.design.InkHue.sleep)
+    PermissionKind.NOTIFICATIONS -> SettingsMark("铃", com.planlock.design.InkHue.amber)
+    PermissionKind.LOCATION -> SettingsMark("位", com.planlock.design.InkHue.study)
 }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {

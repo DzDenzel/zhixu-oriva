@@ -8,6 +8,13 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.scaleIn
+import com.planlock.design.Ink
+import com.planlock.design.planLockBackdrop
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.rememberCoroutineScope
@@ -32,6 +39,8 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -70,7 +79,6 @@ import androidx.navigation.navArgument
 import com.planlock.app.api.ApiClient
 import com.planlock.app.api.TokenStore
 import com.planlock.app.api.PlanLockPreferenceKeys
-import com.planlock.app.api.planLockPreferences
 import com.planlock.app.api.dto.DeviceRegisterRequest
 import com.planlock.app.sync.AppSync
 import com.planlock.app.record.RecordStore
@@ -111,6 +119,12 @@ class MainActivity : ComponentActivity() {
             "OrivaSplash",
             "activity-created instance=${System.identityHashCode(this)} cold=$showColdSplash uptimeMs=${android.os.SystemClock.uptimeMillis()}",
         )
+        // BUG-103：系统启动窗口退场后、Compose 首帧前，窗口底露出的是 Theme.PlanLock 的浅色启动底。
+        // 非墨序主题明暗固定，直接把窗口底换成所选主题页面底色；墨序沿用随系统明暗的原资源。
+        com.planlock.design.ThemeStyleStore.current.takeIf { it != com.planlock.design.ThemeStyle.INK }?.let { style ->
+            val ground = com.planlock.design.InkPalettes.of(style, style.isDark(com.planlock.design.ThemeMode.SYSTEM, false)).ground
+            window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(ground.toArgb()))
+        }
         val systemSplashGone = mutableStateOf(android.os.Build.VERSION.SDK_INT < 31)
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             splashScreen.setOnExitAnimationListener {
@@ -149,9 +163,11 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
         loadError = false
         try {
             val restored = withContext(Dispatchers.IO) {
+                com.planlock.app.api.ConnectionStore.restore(context.planLockPreferences)
+                com.planlock.plugin.PluginPublicTransport.get = com.planlock.app.api.ConnectionHttp::publicGet
                 TokenStore.restore(context.planLockPreferences)
                 val key = TodayLocalKey(
-                    userId = TokenStore.userId,
+                    userId = TokenStore.localDataUserId,
                     dateKey = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date()),
                 )
                 key to preference.mode.first()
@@ -163,11 +179,18 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { loadError = true }
     }
-    val dark = themeMode.isDark(isSystemInDarkTheme())
+    // 系统栏图标跟随实际明暗：墨序看明暗设置，其他主题有固定明暗
+    val dark = com.planlock.design.ThemeStyleStore.current.isDark(themeMode, isSystemInDarkTheme())
     SideEffect { onThemeChanged(dark) }
+    // BUG-103：系统启动窗口底色跟随所选主题（API 33+，下次冷启动生效）；偏好读完后再同步，避免用默认明暗误写
+    val themeStyle = com.planlock.design.ThemeStyleStore.current
+    LaunchedEffect(loaded, themeStyle, themeMode) {
+        if (loaded) (context as? android.app.Activity)?.let { com.planlock.app.brand.SplashThemeSync.sync(it, themeStyle, themeMode) }
+    }
     PlanLockTheme(themeMode = themeMode) {
         val reducedMotion = LocalReducedMotion.current
-        Box(Modifier.fillMaxSize()) {
+        // 偏好读取期间（加载骨架）也铺主题底色，不露出窗口的浅色启动底（BUG-103）
+        Box(Modifier.fillMaxSize().background(com.planlock.design.InkTone.ground)) {
         if (!loaded) {
             UIStatePanel(if (loadError) UiState.ERROR else UiState.LOADING,
                 message = if (loadError) "本机偏好读取失败，请重试" else null,
@@ -216,6 +239,10 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
 @Composable
 private fun TodayStartupShell(read: TodayLocalRead) {
     Scaffold(
+        modifier = Modifier.planLockBackdrop(),
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        // 透明底的 Scaffold 推不出内容色：显式给墨 / 月白，未着色的文字在深色下不再发黑
+        contentColor = androidx.compose.material3.MaterialTheme.colorScheme.onBackground,
         bottomBar = {
             NavigationBar(
                 selectedRoute = TopLevelDestination.TODAY.route,
@@ -311,9 +338,17 @@ private fun AppContent(
         }
     }
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
+        // 背景画在根部：切页时背景静止，导航区与页面同一张纸
+        modifier = Modifier.planLockBackdrop(),
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        // 透明底的 Scaffold 推不出内容色：显式给墨 / 月白，未着色的文字在深色下不再发黑
+        contentColor = androidx.compose.material3.MaterialTheme.colorScheme.onBackground,
+        snackbarHost = { com.planlock.design.InkSnackbarHost(snackbar) },
         bottomBar = {
-            if (route in topRoutes || route == "assistant") {
+            // 输入法弹出时收起墨条，让助理输入台贴住键盘。
+            @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+            val imeVisible = androidx.compose.foundation.layout.WindowInsets.Companion.isImeVisible
+            if ((route in topRoutes || route == "assistant") && !imeVisible) {
                 NavigationBar(
                     selectedRoute = route,
                     onSelect = { destination ->
@@ -331,12 +366,41 @@ private fun AppContent(
         }
     ) { innerPadding ->
         SharedTransitionLayout(Modifier.fillMaxSize()) {
-        CompositionLocalProvider(LocalSharedScope provides this) {
-        NavHost(navController, startDestination = TopLevelDestination.TODAY.route, modifier = Modifier.fillMaxSize().padding(innerPadding),
-            enterTransition = { fadeIn(tween(if (reducedMotion) 0 else 180)) },
-            exitTransition = { fadeOut(tween(if (reducedMotion) 0 else 180)) },
-            popEnterTransition = { fadeIn(tween(if (reducedMotion) 0 else 180)) },
-            popExitTransition = { fadeOut(tween(if (reducedMotion) 0 else 180)) }
+        CompositionLocalProvider(LocalSharedScope provides this,
+            // 页头「未登录 · 登录」胶囊点开账户页（v4.1）
+            com.planlock.design.LocalSyncLoginAction provides remember(navController) {
+                { navController.navigate("settings/${SettingsDomain.ACCOUNT.route}") { launchSingleTop = true } }
+            }) {
+        // 输入法：窗口改为 adjustResize，由这里统一让出键盘高度（扣除已占用的系统栏 / 导航条内边距），
+        // 页面整体上移而不是被系统平移——知行页头与返回不再被推出屏幕。
+        NavHost(navController, startDestination = TopLevelDestination.TODAY.route,
+            modifier = Modifier.fillMaxSize().padding(innerPadding).consumeWindowInsets(innerPadding).imePadding(),
+            // v3.0「墨序」转场：同级页「落笔」（淡入 + 微升 + 微缩放），进入详情「翻页」（横移）。
+            enterTransition = {
+                when {
+                    reducedMotion -> fadeIn(tween(0))
+                    isTabRoute(initialState.destination.route) && isTabRoute(targetState.destination.route) ->
+                        fadeIn(tween(260, delayMillis = 60, easing = Ink.Easing)) +
+                            slideInVertically(tween(340, easing = Ink.Easing)) { it / 30 } +
+                            scaleIn(tween(340, easing = Ink.Easing), initialScale = .985f)
+                    else -> fadeIn(tween(240, easing = Ink.Easing)) + slideInHorizontally(tween(340, easing = Ink.Easing)) { it / 5 }
+                }
+            },
+            exitTransition = {
+                when {
+                    reducedMotion -> fadeOut(tween(0))
+                    isTabRoute(initialState.destination.route) && isTabRoute(targetState.destination.route) -> fadeOut(tween(140))
+                    else -> fadeOut(tween(220)) + slideOutHorizontally(tween(340, easing = Ink.Easing)) { -it / 12 }
+                }
+            },
+            popEnterTransition = {
+                if (reducedMotion) fadeIn(tween(0))
+                else fadeIn(tween(240, easing = Ink.Easing)) + slideInHorizontally(tween(340, easing = Ink.Easing)) { -it / 12 }
+            },
+            popExitTransition = {
+                if (reducedMotion) fadeOut(tween(0))
+                else fadeOut(tween(200)) + slideOutHorizontally(tween(340, easing = Ink.Easing)) { it / 5 }
+            }
         ) {
             composable(TopLevelDestination.TODAY.route) {
                 TodayScreen(
@@ -344,6 +408,7 @@ private fun AppContent(
                     onOpenDetail = { navController.navigate("detail/$it") },
                     localHolder = todayHolder,
                     localKey = todayKey,
+                    onAsk = { navController.navigate("assistant") { launchSingleTop = true } },
                 )
             }
             composable(TopLevelDestination.PLANS.route) {
@@ -362,7 +427,7 @@ private fun AppContent(
                     onOpenPermissions = { navController.navigate("settings/permissions") },
                 )
             }
-            SettingsDomain.entries.filterNot { it == SettingsDomain.PLUGINS }.forEach { domain ->
+            SettingsDomain.entries.filterNot { it == SettingsDomain.PLUGINS || it == SettingsDomain.CONNECTION }.forEach { domain ->
                 composable("settings/${domain.route}") {
                     SettingsDetailScreen(domain, themeMode, onThemeModeChange, onBack = { navController.popBackStack() })
                 }
@@ -372,6 +437,12 @@ private fun AppContent(
                     onBack = { navController.popBackStack() },
                     onOpenRepository = { source -> navController.navigate("settings/plugins/repository/${source.name}") },
                     onOpenPlugin = { id -> navController.navigate("settings/plugins/${android.net.Uri.encode(id)}") },
+                )
+            }
+            composable("settings/connection") {
+                com.planlock.feature.settings.ConnectionSettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    onLogin = { navController.navigate("settings/${SettingsDomain.ACCOUNT.route}") },
                 )
             }
             composable(
@@ -387,7 +458,9 @@ private fun AppContent(
                 PluginDetailScreen(backStack.arguments?.getString("pluginId").orEmpty(), onBack = { navController.popBackStack() })
             }
             composable("assistant") {
-                AssistantScreen(onOpenPage = { destination ->
+                AssistantScreen(onBack = {
+                    if (!navController.popBackStack()) navController.navigate(TopLevelDestination.TODAY.route) { launchSingleTop = true }
+                }, onOpenPage = { destination ->
                     navController.navigate(when (destination) {
                         com.planlock.app.api.AssistantDestination.TODAY -> "today"
                         com.planlock.app.api.AssistantDestination.PLANS -> "plans"
@@ -423,3 +496,7 @@ private fun AppContent(
 
 // -1 is the existing creation route; timestamp-based offline plan ids are negative too.
 internal fun planIdForEdit(routeId: Long?): Long? = routeId?.takeUnless { it == -1L }
+
+private val tabRouteSet = TopLevelDestination.entries.map { it.route }.toSet() + "assistant"
+
+internal fun isTabRoute(route: String?): Boolean = route in tabRouteSet

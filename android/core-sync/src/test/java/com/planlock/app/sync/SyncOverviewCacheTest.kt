@@ -10,6 +10,22 @@ import org.junit.Test
 import java.io.IOException
 
 class SyncOverviewCacheTest {
+    @Test fun sameUserIdOnDifferentInstancesKeepsSeparateSnapshots() = runBlocking {
+        val disk = MemoryStore()
+        com.planlock.app.api.TokenStore.restore(disk)
+        val original = com.planlock.app.api.ConnectionStore.state.value.config!!
+        val cache = SyncOverviewCache(disk)
+        try {
+            cache.save(7, SyncOverview(stats = StatsResponse(completedCount = 4)))
+            com.planlock.app.api.TokenStore.changeConnection(disk, original.copy(apiBaseUrl = "https://other.invalid/api/v1/"))
+            assertNull(cache.read(7).stats("week"))
+            cache.save(7, SyncOverview(stats = StatsResponse(completedCount = 9)))
+            com.planlock.app.api.TokenStore.changeConnection(disk, original)
+            assertEquals(4, cache.read(7).stats("week")?.completedCount)
+        } finally {
+            com.planlock.app.api.TokenStore.restore(MemoryStore())
+        }
+    }
     @Test fun retainedAccountOverviewStaysReachableWithoutUsingItsOldCredentials() {
         val account = com.planlock.app.api.AuthSession("token", 99, 8, signedIn = true)
         val signedOut = com.planlock.app.api.AuthState(signedOut = true, dataOwner = 42)

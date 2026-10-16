@@ -73,7 +73,7 @@ class MockApi : PlanLockApi {
     override suspend fun updatePlan(id: Long, baseVersion: Long, req: PlanUpsertRequest): ApiResponse<PlanDto> =
         ApiResponse(0, "ok", PlanDto(id = id, name = req.name, type = req.type))
 
-    override suspend fun deletePlan(id: Long): ApiResponse<Unit> = ApiResponse(0, "ok", Unit)
+    override suspend fun deletePlan(id: Long, baseVersion: Long?): ApiResponse<Unit> = ApiResponse(0, "ok", Unit)
 
     override suspend fun pausePlan(id: Long): ApiResponse<PlanDto> =
         ApiResponse(0, "ok", PlanDto(id = id))
@@ -87,7 +87,7 @@ class MockApi : PlanLockApi {
         val item=ScheduleDto(id=id,userId=1,title=req.title,startDate=req.startDate,startTime=req.startTime,endDate=req.endDate,endTime=req.endTime,allDay=req.allDay,location=req.location,note=req.note,remindAdvanceMin=req.remindAdvanceMin,repeatRule=req.repeatRule,linkedPlanId=req.linkedPlanId,tzId=req.tzId,version=baseVersion+1)
         scheduleItems.removeAll { it.id==id }; scheduleItems += item; return ApiResponse(0,"ok",item)
     }
-    override suspend fun deleteSchedule(id: Long): ApiResponse<Unit> { scheduleItems.removeAll { it.id==id }; return ApiResponse(0,"ok",Unit) }
+    override suspend fun deleteSchedule(id: Long, baseVersion: Long?): ApiResponse<Unit> { scheduleItems.removeAll { it.id==id }; return ApiResponse(0,"ok",Unit) }
 
     override suspend fun strategy(planId: Long): ApiResponse<StrategyDto> =
         ApiResponse(0, "ok", StrategyDto(planId = planId))

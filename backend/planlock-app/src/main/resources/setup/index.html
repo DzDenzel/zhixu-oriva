@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>初始化你的知序 · ORIVA</title><link rel="stylesheet" href="/setup-assets/setup.css"><script src="/setup-assets/setup.js" defer></script></head>
+<body><main><header><span class="brand">知序 <span>ORIVA</span></span><span class="step">首次设置 · 约 1 分钟</span></header>
+<section id="intro"><p class="eyebrow">属于你的个人后端</p><h1>让计划，有自己的家。</h1><p class="lead">设置一个所有者账号，再用知序 App 扫码连接。你的日程将保存在这台机器上。</p></section>
+<form id="setup-form"><h2>初始化实例</h2><label for="setupToken">初始化口令</label><input id="setupToken" name="setupToken" type="password" autocomplete="off" required><p class="hint">复制安装完成时显示的口令。它只用于这一次设置。</p>
+<label for="instanceLabel">实例名称</label><input id="instanceLabel" name="instanceLabel" value="我的知序" maxlength="80" required>
+<label for="account">所有者邮箱或手机号</label><input id="account" name="account" autocomplete="username" maxlength="100" required>
+<label for="password">登录密码</label><input id="password" name="password" type="password" minlength="8" autocomplete="new-password" required><p class="hint">至少 8 个字符。以后在 App 中使用这个账号和密码登录。</p>
+<label for="accessUrl">App 可访问的地址</label><input id="accessUrl" name="accessUrl" type="url" placeholder="http://192.168.1.8:8080" required><p class="hint">家用电脑请填写局域网 IP，手机需接入同一网络。公网服务器请使用 HTTPS 域名。localhost 只指向当前设备。</p>
+<label class="confirmation"><input id="addressConfirmed" type="checkbox" required>我已确认此地址可以从安装 App 的手机访问</label>
+<p id="message" role="status" aria-live="polite"></p><button id="submit" type="submit">创建账号并生成连接配置 <span>→</span></button></form>
+<section id="result" hidden><p class="eyebrow">初始化完成</p><h1>欢迎回到自己的节奏。</h1><p>在 App 中打开「设置 → 后端连接」扫码或导入以下配置，然后用刚才的账号登录。</p><img id="qr" width="300" height="300" alt="App 后端连接二维码"><label for="connection">连接配置 JSON</label><textarea id="connection" rows="9" readonly></textarea><div class="actions"><button id="copy" type="button">复制配置</button><a id="download" download="oriva-connection-qr.png">保存二维码</a></div><p id="copy-status" role="status"></p><p class="hint">请保存二维码或配置。初始化页现已关闭；配置只含公开地址，登录仍需要账号密码。</p></section>
+<footer>知序 ORIVA · 计划由你，数据由你。</footer></main></body></html>

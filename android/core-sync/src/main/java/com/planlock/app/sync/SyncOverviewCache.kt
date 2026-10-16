@@ -7,6 +7,8 @@ import com.planlock.app.api.dto.TodaySummary
 import com.planlock.app.api.dto.DeviceDto
 import com.planlock.app.api.AuthState
 import com.planlock.app.api.TokenStore
+import com.planlock.app.api.ConnectionStore
+import com.planlock.app.api.ConnectionConfig
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -37,11 +39,21 @@ internal fun SyncOverview.withReportScopes(
 /** User-scoped persistent cache; a missing cache is not an I/O failure. */
 class SyncOverviewCache(private val preferences: DataStore<Preferences>) {
     private val json = Json { ignoreUnknownKeys = true }
-    private fun key(userId: Long?) = stringPreferencesKey("sync_overview_${userId ?: "local"}")
-    suspend fun read(userId: Long?): SyncOverview = preferences.data.first()[key(localOverviewOwner(userId, TokenStore.state.value))]
-        ?.let { json.decodeFromString<SyncOverview>(it) } ?: SyncOverview()
+    private fun key(instance: String?, userId: Long?): Preferences.Key<String> {
+        val scope = java.security.MessageDigest.getInstance("SHA-256").digest((instance ?: "local").toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        return stringPreferencesKey("sync_overview_${scope}_${userId ?: "local"}")
+    }
+    suspend fun read(userId: Long?): SyncOverview {
+        val state = TokenStore.state.value
+        val owner = localOverviewOwner(userId, state)
+        val instance = state.dataOwnerInstance ?: ConnectionStore.state.value.instanceId
+        val p = preferences.data.first()
+        val raw = p[key(instance, owner)] ?: if (instance == ConnectionConfig.default.instanceId) p[stringPreferencesKey("sync_overview_${owner ?: "local"}")] else null
+        return raw?.let { json.decodeFromString<SyncOverview>(it) } ?: SyncOverview()
+    }
     suspend fun save(userId: Long?, value: SyncOverview) {
-        preferences.edit { it[key(userId)] = json.encodeToString(value) }
+        val instance = ConnectionStore.state.value.instanceId
+        preferences.edit { it[key(instance, userId)] = json.encodeToString(value) }
     }
 }
 

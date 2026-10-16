@@ -82,7 +82,9 @@ object DayTimeline {
         }.sortedWith(compareBy<TimelineEntry> { it.startMin }.thenBy { it.endMin }.thenBy { it.kind })
         val window = window(entries, nowMinutes)
         val prepared = entries.map { it.copy(backgroundBand = isBackgroundBand(it, window)) }
-        return if (collapseOverlaps) layout(prepared) else prepared
+        // 全天日程是当天背景，独立列在前面，不占用定时安排的重叠列或溢出名额。
+        val (allDay, timed) = prepared.partition { it.kind == TimelineKind.SCHEDULE && it.sourceLabel == "全天日程" }
+        return allDay + if (collapseOverlaps) layout(timed) else timed
     }
 
     private fun occurs(s: ScheduleSnapshotEntity,date:String,calendarDate:OccurrenceDate):Boolean {

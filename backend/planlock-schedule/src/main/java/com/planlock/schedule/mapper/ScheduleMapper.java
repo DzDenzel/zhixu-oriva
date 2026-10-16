@@ -13,4 +13,5 @@ public interface ScheduleMapper {
     @Options(useGeneratedKeys=true,keyProperty="id") int insert(Schedule schedule);
     @Update("UPDATE schedules SET title=#{title},start_date=#{startDate},start_time=#{startTime},end_date=#{endDate},end_time=#{endTime},all_day=#{allDay},location=#{location},note=#{note},remind_advance_min=#{remindAdvanceMin},repeat_rule=#{repeatRule},linked_plan_id=#{linkedPlanId},tz_id=#{tzId},version=version+1 WHERE id=#{id} AND user_id=#{userId} AND version=#{version}") int updateWithVersion(Schedule schedule);
     @Delete("DELETE FROM schedules WHERE id=#{id} AND user_id=#{userId}") int delete(@Param("id") Long id,@Param("userId") Long userId);
+    @Delete("DELETE FROM schedules WHERE id=#{id} AND user_id=#{userId} AND version=#{baseVersion}") int deleteWithVersion(@Param("id") Long id,@Param("userId") Long userId,@Param("baseVersion") Long baseVersion);
 }

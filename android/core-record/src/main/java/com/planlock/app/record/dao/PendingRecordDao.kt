@@ -9,6 +9,9 @@ import com.planlock.app.record.entity.PendingRecordEntity
 @Dao
 interface PendingRecordDao {
 
+    @Query("SELECT * FROM pending_record WHERE type IN ('sync_conflict', 'bulk_delete') ORDER BY id")
+    fun observeConfirmations(): kotlinx.coroutines.flow.Flow<List<PendingRecordEntity>>
+
     @Update
     suspend fun update(record: PendingRecordEntity)
 

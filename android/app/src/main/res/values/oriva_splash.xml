@@ -1,5 +1,5 @@
 <resources>
-    <!-- Matches V2Tokens.light.surface and V2Tokens.brand, no new brand color. -->
-    <color name="oriva_splash_background">#FBFDF9</color>
+    <!-- 墨序 v3.0：开屏底色 = Ink.paper（宣纸），与首页底色无缝衔接。 -->
+    <color name="oriva_splash_background">#F2EDE3</color>
     <color name="oriva_splash_ink">@color/oriva_brand</color>
 </resources>

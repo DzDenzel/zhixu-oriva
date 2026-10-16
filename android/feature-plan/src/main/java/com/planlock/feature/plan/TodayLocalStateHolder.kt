@@ -27,12 +27,31 @@ class TodayLocalStateHolder internal constructor(
     private val reader: TodayLocalReader,
     private val scope: CoroutineScope,
     private val preloadDeadlineMillis: Long = 1_200L,
+    private val localChanges: StateFlow<Long> = MutableStateFlow(0L),
 ) {
     private val mutableState = MutableStateFlow(TodayLocalState())
     val state: StateFlow<TodayLocalState> = mutableState.asStateFlow()
     private var generation = 0L
     private var readJob: Job? = null
     private var queuedRefreshKey: TodayLocalKey? = null
+
+    init {
+        // Capture before launching: a commit between construction and collection must not be lost.
+        var observed = localChanges.value
+        scope.launch {
+            localChanges.collect { revision ->
+                if (revision != observed) {
+                    observed = revision
+                    refreshAfterLocalChange()
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun refreshAfterLocalChange() {
+        mutableState.value.key?.let { start(it, force = true, deadlineMillis = null) }
+    }
 
     /** Cold-start read. Observers may disappear without cancelling this process-owned job. */
     fun prefetch(key: TodayLocalKey) {
@@ -107,6 +126,7 @@ class TodayLocalStateHolder internal constructor(
             instance ?: TodayLocalStateHolder(
                 reader = TodayLocalReader.create(context.applicationContext),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+                localChanges = com.planlock.app.record.RecordStore(context.applicationContext).localRevision,
             ).also { instance = it }
         }
     }

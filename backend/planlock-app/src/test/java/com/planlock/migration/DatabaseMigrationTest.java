@@ -30,12 +30,58 @@ class DatabaseMigrationTest {
     private static final Path EVIDENCE = Path.of(System.getenv().getOrDefault("F37_EVIDENCE_DIR", "target/f37-evidence"));
 
     @Test
-    void emptySchemaStartsWithEightTablesAndAllMigrationVersions() throws Exception {
+    void concurrentDeploymentInitializationCreatesExactlyOneOwnerAndKeepsIdentityAfterRestart() throws Exception {
+        try (Schema schema = new Schema("setup_concurrent")) {
+            String identity;
+            try (var app = start(schema,"--planlock.deployment.enabled=true","--planlock.deployment.setup-token=f37-setup-secret")) {
+                var service=app.getBean(com.planlock.app.setup.SetupService.class);
+                identity=schema.query("SELECT instance_id FROM deployment_instance").getFirst();
+                var request=new com.planlock.app.setup.SetupService.SetupRequest("f37-setup-secret","测试知序","owner@example.invalid","f37-owner-password","http://192.168.1.8:8080");
+                var barrier=new java.util.concurrent.CyclicBarrier(2);
+                try(var executor=java.util.concurrent.Executors.newFixedThreadPool(2)) {
+                    java.util.concurrent.Callable<Integer> initialize=()->{ barrier.await(10,java.util.concurrent.TimeUnit.SECONDS); try { service.initialize(request); return 200; } catch(org.springframework.web.server.ResponseStatusException failure) { return failure.getStatusCode().value(); } };
+                    var first=executor.submit(initialize); var second=executor.submit(initialize);
+                    assertThat(List.of(first.get(30,java.util.concurrent.TimeUnit.SECONDS),second.get(30,java.util.concurrent.TimeUnit.SECONDS))).containsExactlyInAnyOrder(200,409);
+                }
+                assertThat(schema.query("SELECT COUNT(*) FROM users")).containsExactly("1");
+                assertThat(schema.query("SELECT COUNT(*) FROM devices")).containsExactly("0");
+                assertThat(schema.query("SELECT initialized,owner_user_id IS NOT NULL FROM deployment_instance")).containsExactly("1|1");
+                assertThat(schema.query("SELECT password_hash FROM users").getFirst()).startsWith("$2").doesNotContain("f37-owner-password");
+            }
+            try(var app=start(schema,"--planlock.deployment.enabled=true","--planlock.deployment.setup-token=changed-secret")) {
+                assertThat(schema.query("SELECT instance_id FROM deployment_instance")).containsExactly(identity);
+                assertThatThrownBy(()->app.getBean(com.planlock.app.setup.SetupService.class).requirePage()).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+            }
+            evidence("setup-concurrent.txt","Two concurrent requests: exactly one 200 and one 409; one owner; zero devices; stable identity after restart.\n");
+        }
+    }
+
+    @Test
+    void failedDeploymentStateWriteRollsBackOwnerAndAllowsRetry() throws Exception {
+        try(Schema schema=new Schema("setup_rollback")) {
+            try(var app=start(schema,"--planlock.deployment.enabled=true","--planlock.deployment.setup-token=f37-setup-secret")) {
+                var service=app.getBean(com.planlock.app.setup.SetupService.class);
+                var request=new com.planlock.app.setup.SetupService.SetupRequest("f37-setup-secret","测试知序","owner@example.invalid","f37-owner-password","https://example.org");
+                schema.execute("CREATE TRIGGER reject_setup_update BEFORE UPDATE ON deployment_instance FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected state update failure'");
+                assertThatThrownBy(()->service.initialize(request)).isInstanceOf(org.springframework.dao.DataAccessException.class);
+                assertThat(schema.query("SELECT COUNT(*) FROM users")).containsExactly("0");
+                assertThat(schema.query("SELECT initialized,owner_user_id FROM deployment_instance")).containsExactly("0|<NULL>");
+                schema.execute("DROP TRIGGER reject_setup_update");
+                service.initialize(request);
+                assertThat(schema.query("SELECT COUNT(*) FROM users")).containsExactly("1");
+                assertThat(schema.query("SELECT initialized FROM deployment_instance")).containsExactly("1");
+            }
+            evidence("setup-rollback.txt","Injected SQL state write failure: owner insert rolled back, state uninitialized; retry succeeds.\n");
+        }
+    }
+
+    @Test
+    void emptySchemaStartsWithEightBusinessTablesAndDeploymentStateAndAllMigrationVersions() throws Exception {
         try (Schema schema = new Schema("empty")) {
             try (var app = start(schema)) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1");
+                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1");
                 snapshot(schema, "empty");
             }
         }
@@ -57,14 +103,14 @@ class DatabaseMigrationTest {
             try (var app = start(schema, "--spring.flyway.baseline-on-migrate=true", "--spring.flyway.baseline-version=2")) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1");
+                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1");
                 after = snapshot(schema, "existing");
                 assertCreationIdentityStructure(schema);
                 assertThat(rowCounts(schema)).isEqualTo(dataBefore);
             }
             try (var app = start(schema)) {
                 assertThat(app.isActive()).isTrue();
-                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1");
+                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1");
                 assertThat(snapshot(schema, "restart")).isEqualTo(after);
                 assertThat(rowCounts(schema)).isEqualTo(dataBefore);
                 assertThat(schema.query("SELECT email FROM users WHERE id=9001")).containsExactly("f37-sentinel@example.invalid");
@@ -73,7 +119,7 @@ class DatabaseMigrationTest {
                 try (var app = start(fresh)) {
                     assertBusinessStructure(fresh);
                     assertThat(snapshot(fresh, "comparison-empty")).isEqualTo(after);
-                    evidence("structure-diff.txt", "fresh V3 == upgraded existing V2 == restart; difference: []\n");
+                    evidence("structure-diff.txt", "fresh V4 == upgraded existing V2 == restart; difference: []\n");
                 }
             }
         }
@@ -83,9 +129,9 @@ class DatabaseMigrationTest {
     void brokenMigrationStopsApplicationStartupWithFailedHistoryEntry() throws Exception {
         try (Schema schema = new Schema("broken")) {
             assertThatThrownBy(() -> start(schema, "--spring.flyway.locations=classpath:db/migration,classpath:db/f37-broken"))
-                    .hasStackTraceContaining("V4__intentional_syntax_error.sql")
+                    .hasStackTraceContaining("V5__intentional_syntax_error.sql")
                     .hasStackTraceContaining("SQL State");
-            assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|0");
+            assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|0");
             assertBusinessStructure(schema);
             snapshot(schema, "broken");
         }
@@ -97,8 +143,8 @@ class DatabaseMigrationTest {
             try (var app = start(schema, "--spring.flyway.baseline-on-migrate=true", "--spring.flyway.baseline-version=2")) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1");
-                evidence("baseline-empty.txt", "Completely empty schema: V1, V2 and V3 executed despite baseline override.\n");
+                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1");
+                evidence("baseline-empty.txt", "Completely empty schema: V1, V2, V3 and V4 executed despite baseline override.\n");
             }
         }
     }
@@ -259,7 +305,7 @@ class DatabaseMigrationTest {
     }
 
     private static Connection adminConnection() throws Exception {
-        return DriverManager.getConnection("jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true",
+        return DriverManager.getConnection(TestDatabase.url(""),
                 required("F37_DB_USER"), required("F37_DB_PASSWORD"));
     }
 
@@ -274,7 +320,10 @@ class DatabaseMigrationTest {
 
     private static void assertBusinessStructure(Schema schema) throws Exception {
         assertThat(schema.query("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='" + schema.name + "' AND TABLE_NAME <> 'flyway_schema_history' ORDER BY TABLE_NAME"))
-                .containsExactly("devices", "execution_records", "plan_strategies", "plans", "schedules", "unlock_records", "users", "violation_records");
+                .containsExactly("deployment_instance", "devices", "execution_records", "plan_strategies", "plans", "schedules", "unlock_records", "users", "violation_records");
+        assertThat(schema.query("SELECT id, initialized, owner_user_id FROM deployment_instance")).containsExactly("1|0|<NULL>");
+        assertThat(schema.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" + schema.name + "' AND TABLE_NAME='deployment_instance' ORDER BY ORDINAL_POSITION"))
+                .containsExactly("id","instance_id","initialized","instance_label","owner_user_id","initialized_at");
         assertThat(schema.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" + schema.name + "' AND TABLE_NAME='violation_records' AND COLUMN_NAME IN ('started_at','ended_at','duration_ms','source_level') ORDER BY COLUMN_NAME"))
                 .containsExactly("duration_ms", "ended_at", "source_level", "started_at");
     }
@@ -350,7 +399,7 @@ class DatabaseMigrationTest {
                 throw new IllegalArgumentException("Unsafe F37 schema name");
             }
             this.evidenceWriter = evidenceWriter;
-            try (Connection admin = DriverManager.getConnection("jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true", required("F37_DB_USER"), required("F37_DB_PASSWORD")); var statement = admin.createStatement()) {
+            try (Connection admin = DriverManager.getConnection(TestDatabase.url(""), required("F37_DB_USER"), required("F37_DB_PASSWORD")); var statement = admin.createStatement()) {
                 statement.execute("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
                 created = true;
                 evidenceWriter.write(name + "-ownership.txt", "Created by DatabaseMigrationTest; exact cleanup target: " + name + "\n");
@@ -368,7 +417,7 @@ class DatabaseMigrationTest {
             }
         }
 
-        String url() { return "jdbc:mysql://localhost:3306/" + name + "?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true"; }
+        String url() { return TestDatabase.url(name); }
         Connection connection() throws Exception { return DriverManager.getConnection(url(), required("F37_DB_USER"), required("F37_DB_PASSWORD")); }
         void execute(String sql) throws Exception { try (var c = connection(); var s = c.createStatement()) { s.execute(sql); } }
         List<String> query(String sql) throws Exception {

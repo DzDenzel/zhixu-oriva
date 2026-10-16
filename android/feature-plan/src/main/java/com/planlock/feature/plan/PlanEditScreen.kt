@@ -46,6 +46,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.background
+import com.planlock.design.planLockAtmosphere
 import androidx.core.graphics.drawable.toBitmap
 import com.planlock.app.api.ApiClient
 import com.planlock.app.api.planLockPreferences
@@ -262,9 +267,12 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
         )
     }
 
-    Scaffold(snackbarHost = { SnackbarHost(snackbar) }, contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = {
+    Scaffold(modifier = Modifier.planLockAtmosphere(com.planlock.design.PageAtmosphere.QUIET),
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        snackbarHost = { com.planlock.design.InkSnackbarHost(snackbar) }, contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = {
         TopAppBar(
-            title = { Text(if (planId == null) "新建计划" else "编辑计划") },
+            colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
+            title = { Text(if (planId == null) "新建计划" else "编辑计划", style = MaterialTheme.typography.titleLarge) },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
             windowInsets = WindowInsets(0, 0, 0, 0),
         )
@@ -377,7 +385,7 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
 @Composable
 private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
     PresentationCard {
-        Text(title, style = MaterialTheme.typography.titleMedium)
+        Text(title, style = com.planlock.design.InkText.meta, color = com.planlock.design.InkTone.faint)
         content()
     }
 }

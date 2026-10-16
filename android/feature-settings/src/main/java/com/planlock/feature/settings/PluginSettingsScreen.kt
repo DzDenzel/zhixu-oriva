@@ -33,6 +33,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -155,7 +156,7 @@ fun PluginSettingsScreen(
                 }
             }
             item {
-                Text("已安装插件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                Text("已安装插件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, color = com.planlock.design.InkTone.text)
             }
             if (snapshot.installed.isEmpty()) {
                 item { UIStatePanel(UiState.EMPTY, "暂无已安装插件", emptySubject = "插件") }
@@ -218,7 +219,8 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
 
     val sourcePath = if (sourceType == PluginSourceType.OFFICIAL) "official" else "third-party"
-    val catalogUrl = "${ApiClient.baseUrl}plugins/catalog/$sourcePath"
+    val connection by com.planlock.app.api.ConnectionStore.state.collectAsState()
+    val catalogUrl = (connection.config ?: com.planlock.app.api.ConnectionConfig.default).catalogUrl(sourcePath)
 
     suspend fun load() {
         loading = true
@@ -231,7 +233,7 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
         loadError = if (catalog == null) "仓库读取失败：${result.exceptionOrNull()?.message ?: "来源不匹配"}" else null
         loading = false
     }
-    LaunchedEffect(sourceType) { load() }
+    LaunchedEffect(sourceType, catalogUrl) { load() }
     val visible = catalog?.plugins.orEmpty().filter {
         query.isBlank() || it.name.contains(query, ignoreCase = true) || it.description.contains(query, ignoreCase = true)
     }
@@ -350,8 +352,8 @@ internal fun PluginScaffold(title: String, onBack: () -> Unit, snackbar: Snackba
         modifier = Modifier.planLockAtmosphere(PageAtmosphere.QUIET),
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { TopAppBar(title = { Text(title) }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }) },
-        snackbarHost = { snackbar?.let { SnackbarHost(it) } },
+        topBar = { TopAppBar(colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent), title = { Text(title) }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }) },
+        snackbarHost = { snackbar?.let { com.planlock.design.InkSnackbarHost(it) } },
         content = content,
     )
 }

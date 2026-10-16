@@ -1,5 +1,11 @@
 package com.planlock.design
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Arrangement
@@ -250,7 +256,24 @@ fun RepeatRuleSelector(preset: RepeatPreset, weekdays: Set<Int>, onPreset: (Repe
 @Composable
 fun PlanTypeSegmented(selected: String, onSelect: (String) -> Unit) {
     val options = listOf("学习", "工作", "运动", "睡眠")
-    ChoiceChips(options.map { it to it }, selected, onSelect)
+    // 每种类型一种颜色：选中时实心类别色，未选中是同色淡底
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        options.forEach { option ->
+            val hue = InkHue.forType(option).color()
+            val isSelected = option == selected
+            Box(
+                Modifier.weight(1f).heightIn(min = 48.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(14.dp))
+                    .background(if (isSelected) hue else hue.inkTint())
+                    .clickable { onSelect(option) }
+                    .semantics { contentDescription = option + if (isSelected) "，已选中" else "" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(option, style = MaterialTheme.typography.labelLarge,
+                    color = if (isSelected) com.planlock.design.InkTone.onAccent else hue)
+            }
+        }
+    }
 }
 
 @Composable

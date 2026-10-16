@@ -89,7 +89,8 @@ public interface SyncMapper {
     int countStrategy(@Param("planId") Long planId);
 
     @Insert("INSERT INTO plan_strategies(plan_id, blacklist_apps, whitelist_apps, auto_dnd, notify_silence, version) "
-            + "VALUES(#{s.planId}, #{s.blacklistApps}, #{s.whitelistApps}, #{s.autoDnd}, #{s.notifySilence}, 0)")
+            + "SELECT #{s.planId}, #{s.blacklistApps}, #{s.whitelistApps}, #{s.autoDnd}, #{s.notifySilence}, 0 "
+            + "FROM plans WHERE id = #{s.planId} FOR SHARE")
     int insertStrategy(@Param("s") SyncPushRequest.StrategyItem s);
 
     @Update("UPDATE plan_strategies SET blacklist_apps = #{s.blacklistApps}, whitelist_apps = #{s.whitelistApps}, "

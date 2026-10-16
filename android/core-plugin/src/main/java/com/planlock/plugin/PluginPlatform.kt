@@ -161,8 +161,17 @@ object PluginCatalogCodec {
     fun decode(raw: String): PluginCatalogDocument = json.decodeFromString(raw)
 }
 
+/** Installed by the application; transport is public and must never attach business credentials. */
+object PluginPublicTransport {
+    @Volatile var get: ((String) -> ByteArray)? = null
+}
+
 class PluginCatalogClient {
     fun fetch(url: String): PluginCatalogDocument {
+        PluginPublicTransport.get?.let { get ->
+            val document = PluginCatalogCodec.decode(get(url).toString(Charsets.UTF_8))
+            return document.copy(plugins = document.plugins.map { it.copy(downloadUrl = URL(URL(url), it.downloadUrl).toString()) })
+        }
         val connection = URL(url).openConnection() as HttpURLConnection
         return try {
             connection.connectTimeout = 10_000

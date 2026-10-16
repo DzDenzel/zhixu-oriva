@@ -5,6 +5,7 @@ import androidx.room.PrimaryKey
 
 /** 日程本地快照。与计划独立，不被执行引擎读取。 */
 @Entity(tableName = "schedule_snapshot")
+@kotlinx.serialization.Serializable
 data class ScheduleSnapshotEntity(
     @PrimaryKey val id: Long,
     val userId: Long,

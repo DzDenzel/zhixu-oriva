@@ -140,7 +140,9 @@ public class SyncService {
             throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
         }
         if (syncMapper.countStrategy(item.getPlanId()) == 0) {
-            syncMapper.insertStrategy(item);
+            if (syncMapper.insertStrategy(item) == 0) {
+                throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
+            }
             return;
         }
         if (item.getBaseVersion() == null) {

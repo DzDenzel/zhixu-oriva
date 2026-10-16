@@ -24,5 +24,7 @@ data class PendingRecordEntity(
     val method: String? = null,
     val clientId: String,
     val payload: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val baseVersion: Long? = null,
+    val localSnapshot: String? = null,
 )

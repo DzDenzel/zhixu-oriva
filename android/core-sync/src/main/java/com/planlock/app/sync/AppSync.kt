@@ -15,7 +15,7 @@ class AppSync private constructor(context: Context) {
     private val api = ApiClient.create()
     private val records = RecordStore(app)
     var beforePlanMapping: suspend (Long, Long) -> Unit = { _, _ -> }
-    private val client = SyncClient(api, records) { old, new -> beforePlanMapping(old, new) }
+    private val client = SyncClient(api, records, owner = { TokenStore.userId }) { old, new -> beforePlanMapping(old, new) }
     val cache = SyncOverviewCache(app.planLockPreferences)
     val foregroundGate = ForegroundSyncGate()
     val coordinator = SyncCoordinator(scope) {
@@ -24,21 +24,27 @@ class AppSync private constructor(context: Context) {
         finally { android.util.Log.i("OrivaSync", "coordinated-sync-end") }
     }
     private val authLock = kotlinx.coroutines.sync.Mutex()
+    private val registrationGate = DeviceRegistrationGate()
     private val sessionLock = kotlinx.coroutines.sync.Mutex()
 
     /** Identity commit/merge cannot overlap an automatic transfer authenticated as the old identity. */
-    suspend fun <T> withSessionChange(block: suspend () -> T): T = sessionLock.withLock { block() }
+    suspend fun <T> withSessionChange(block: suspend () -> T): T = sessionLock.withLock {
+        val previousConnection = ConnectionStore.state.value
+        val result = block()
+        if (ConnectionStore.state.value.config == null || ConnectionStore.state.value != previousConnection) coordinator.clearError()
+        result
+    }
 
     private suspend fun ensureSession() {
         authLock.lock()
         try {
             TokenStore.restore(app.planLockPreferences)
             if (!TokenStore.hasSession) {
-                check(TokenStore.canRegisterDevice) { "已退出登录，本地数据保留，请重新登录" }
+                requireAutomaticRegistration(TokenStore.canRegisterDevice, TokenStore.state.value)
                 val uid = Settings.Secure.getString(app.contentResolver, Settings.Secure.ANDROID_ID) ?: "android-dev"
-                val response = api.deviceRegister(DeviceRegisterRequest(uid, "Android", "android"))
-                check(response.code == 0)
-                val auth = checkNotNull(response.data)
+                val auth = registrationGate.register(ConnectionStore.state.value) {
+                    api.deviceRegister(DeviceRegisterRequest(uid, "Android", "android"))
+                }
                 TokenStore.save(app.planLockPreferences, AuthSession(auth.token, auth.userId, auth.deviceId, auth.guestUserId))
             }
             check(TokenStore.canSync) { "本机数据属于原账号，自动同步已暂停，请登录原账号" }
@@ -46,6 +52,7 @@ class AppSync private constructor(context: Context) {
         } finally { authLock.unlock() }
     }
     private suspend fun synchronize() {
+        if (ConnectionStore.state.value.config == null) return
         ensureSession()
         val owner = TokenStore.userId
         var overview = try { cache.read(owner) }
@@ -78,9 +85,27 @@ class AppSync private constructor(context: Context) {
     }
     /** Mutations and service telemetry preserve reliable pending uploads without a full pull. */
     suspend fun pushPendingRecords() = sessionLock.withLock {
+        if (ConnectionStore.state.value.config == null) return
         if (records.pending().isEmpty()) return
         ensureSession()
         client.pushPendingRecords()
+    }
+
+    /** A choice is a manual sync intent, serialized with connection/account changes. */
+    suspend fun resolveConfirmation(expected: com.planlock.app.record.SyncConfirmation, keepMine: Boolean) {
+        sessionLock.withLock {
+            ensureSession()
+            client.pull() // Re-read before applying the precise versions displayed in the dialog.
+            records.resolveConfirmation(expected, keepMine)
+        }
+        coordinator.refresh()
+    }
+    suspend fun approveBulkDeletion(expected: com.planlock.app.record.BulkDeletion) {
+        sessionLock.withLock {
+            ensureSession()
+            records.approveBulkDeletion(expected)
+        }
+        coordinator.refresh()
     }
 
     companion object {

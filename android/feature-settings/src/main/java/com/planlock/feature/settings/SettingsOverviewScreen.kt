@@ -1,5 +1,18 @@
 package com.planlock.feature.settings
 
+import com.planlock.design.Ink
+import com.planlock.design.InkHue
+import com.planlock.design.color
+import com.planlock.design.tint
+import com.planlock.design.InkMasthead
+import com.planlock.design.InkText
+import com.planlock.design.InkTone
+import com.planlock.design.inkReveal
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -60,6 +73,7 @@ enum class SettingsDomain(val route: String, val title: String) {
     PLUGINS("plugins", "插件"),
     WEATHER("weather", "天气城市"),
     ACCOUNT("account", "账户"),
+    CONNECTION("connection", "后端连接"),
     PASSWORD("password", "备用密码"),
     DEVICES("devices", "设备"),
 }
@@ -70,6 +84,7 @@ internal enum class SettingsOverviewItem(val domain: SettingsDomain?, val title:
     PLUGINS(SettingsDomain.PLUGINS, SettingsDomain.PLUGINS.title),
     WEATHER(SettingsDomain.WEATHER, SettingsDomain.WEATHER.title),
     ACCOUNT(SettingsDomain.ACCOUNT, SettingsDomain.ACCOUNT.title),
+    CONNECTION(SettingsDomain.CONNECTION, SettingsDomain.CONNECTION.title),
     DEVICES(SettingsDomain.DEVICES, SettingsDomain.DEVICES.title),
     PASSWORD(SettingsDomain.PASSWORD, SettingsDomain.PASSWORD.title),
     PERMISSIONS(null, "权限与系统能力"),
@@ -87,7 +102,7 @@ internal object SettingsOverviewStructure {
             "功能",
             listOf(SettingsOverviewItem.BASIC_TOOLS, SettingsOverviewItem.PLUGINS, SettingsOverviewItem.WEATHER),
         ),
-        SettingsOverviewSection("数据与账户", listOf(SettingsOverviewItem.ACCOUNT, SettingsOverviewItem.DEVICES)),
+        SettingsOverviewSection("数据与账户", listOf(SettingsOverviewItem.ACCOUNT, SettingsOverviewItem.CONNECTION, SettingsOverviewItem.DEVICES)),
         SettingsOverviewSection(
             "安全与系统",
             listOf(SettingsOverviewItem.PASSWORD, SettingsOverviewItem.PERMISSIONS),
@@ -100,6 +115,7 @@ private data class SettingsSummary(
     val pluginSummary: String = "总开关关闭 · 安全模式开启",
     val weather: String = "未设置",
     val password: String = "未设置",
+    val actionGate: Boolean = false,
     val deviceCount: Int? = null,
     val permissions: BasePermissionSummary = basePermissionSummary(emptyMap()),
 )
@@ -114,6 +130,7 @@ fun SettingsScreen(
     val sync = remember { AppSync.get(context) }
     val syncState by sync.coordinator.state.collectAsState()
     val authState by TokenStore.state.collectAsState()
+    val connection by com.planlock.app.api.ConnectionStore.state.collectAsState()
     LaunchedEffect(Unit) {
         while (true) { TokenStore.refreshLocalValidity(); kotlinx.coroutines.delay(1_000) }
     }
@@ -129,18 +146,21 @@ fun SettingsScreen(
         val weather = WeatherStore(context.planLockPreferences).location()
         val password = BackupPasswordStore(context.planLockPreferences).hasPassword()
         val permissions = PermissionChecker.check(context)
-        val devices = if (TokenStore.signedIn) runCatching { sync.cache.read(TokenStore.userId).deviceCount }.getOrNull() else 0
+        // 与设备子页同源：同一份缓存的设备列表长度；未登录 / 已退出时不计数（v4.1）。
+        val devices = if (settingsDevicesManageable(TokenStore.state.value))
+            runCatching { sync.cache.read(TokenStore.userId).devices.orEmpty().size }.getOrNull() else -1
         summary = SettingsSummary(
             basicToolsEnabled = preferences[PlanLockPreferenceKeys.basicToolsEnabled] ?: true,
             pluginSummary = "总开关${if (pluginState.globalEnabled) "开启" else "关闭"} · 安全模式${if (pluginState.safeMode) "开启" else "关闭"} · ${pluginState.installed.size} 个已安装",
             weather = weather?.displayName ?: "未设置时今日页不显示天气",
-            password = if (password) "已设置，可作为可选确认方式" else "未设置，执行期确认未开启",
+            password = if (password) "已设置" else "未设置",
+            actionGate = preferences[PlanLockPreferenceKeys.actionGateEnabled] ?: false,
             deviceCount = devices,
             permissions = basePermissionSummary(permissions),
         )
     }
 
-    LaunchedEffect(syncState.revision) { refresh() }
+    LaunchedEffect(syncState.revision, authState.signedOut, authState.session.signedIn) { refresh() }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -159,37 +179,36 @@ fun SettingsScreen(
         LazyColumn(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             item {
-                Column(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 4.dp)) {
-                    Text("设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                }
+                InkMasthead(eyebrow = "", title = "设置",
+                    modifier = Modifier.padding(top = 20.dp, bottom = 4.dp, start = 6.dp, end = 6.dp).inkReveal(0))
             }
-            SettingsOverviewStructure.sections.forEach { section ->
+            SettingsOverviewStructure.sections.forEachIndexed { sectionIndex, section ->
                 item {
-                    Text(
-                        section.title,
-                        modifier = Modifier.padding(top = 8.dp, start = 4.dp),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Bold,
-                    )
+                    Text(section.title, style = InkText.meta, color = InkTone.faint,
+                        modifier = Modifier.padding(top = 14.dp, start = 6.dp).inkReveal(sectionIndex + 1))
                 }
                 item {
                     OverviewSection(
                         section = section,
                         summaryFor = { item ->
                             when (item) {
-                                SettingsOverviewItem.THEME -> themeMode.label
+                                SettingsOverviewItem.THEME -> com.planlock.design.ThemeStyleStore.current.let { if (it == com.planlock.design.ThemeStyle.INK) "墨序 · " + themeMode.label else it.label }
                                 SettingsOverviewItem.BASIC_TOOLS -> if (summary.basicToolsEnabled) "默认不计入分心" else "按计划名单判断"
                                 SettingsOverviewItem.PLUGINS -> summary.pluginSummary
                                 SettingsOverviewItem.WEATHER -> summary.weather
                                 SettingsOverviewItem.ACCOUNT -> accountPresentation(authState).let {
                                     if (authState.ownershipMismatch) it.description else it.title
                                 }
-                                SettingsOverviewItem.DEVICES -> summary.deviceCount?.let { "$it 台设备" } ?: "读取失败，可进入重试"
-                                SettingsOverviewItem.PASSWORD -> summary.password
+                                SettingsOverviewItem.DEVICES -> when (val count = summary.deviceCount) {
+                                    null -> "读取失败，可进入重试"
+                                    -1 -> "未登录 · 登录后可管理"
+                                    else -> "$count 台设备"
+                                }
+                                SettingsOverviewItem.CONNECTION -> connection.config?.instanceLabel ?: "仅本地使用"
+                                SettingsOverviewItem.PASSWORD -> summary.password + if (summary.actionGate) " · 执行期确认开启" else " · 执行期确认关闭"
                                 SettingsOverviewItem.PERMISSIONS -> "${summary.permissions.enabled}/${summary.permissions.total} 已开启"
                             }
                         },
@@ -211,34 +230,20 @@ private fun OverviewSection(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(18.dp),
+        color = InkTone.raised,
     ) {
         Column {
             section.items.forEachIndexed { index, item ->
                 if (index > 0) {
                     HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.padding(start = 62.dp, end = 16.dp),
+                        color = InkTone.hairline.copy(alpha = .6f),
                     )
                 }
-                OverviewRow(item.title, summaryFor(item)) { onOpen(item) }
+                val mark = settingsMark(item)
+                com.planlock.design.SettingsItem(item.title, summaryFor(item), mark.glyph, mark.hue, onClick = { onOpen(item) })
             }
         }
-    }
-}
-
-@Composable
-private fun OverviewRow(title: String, summary: String, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(summary, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "进入")
     }
 }

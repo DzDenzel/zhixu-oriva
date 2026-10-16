@@ -47,6 +47,12 @@ public interface PlanMapper {
             + "WHERE id = #{id} AND user_id = #{userId}")
     int togglePause(@Param("id") Long id, @Param("userId") Long userId);
 
-    @Delete("DELETE FROM plans WHERE id = #{id} AND user_id = #{userId}")
+    @Delete("DELETE p, s FROM plans p LEFT JOIN plan_strategies s ON s.plan_id = p.id "
+            + "WHERE p.id = #{id} AND p.user_id = #{userId}")
     int delete(@Param("id") Long id, @Param("userId") Long userId);
+
+    @Delete("DELETE p, s FROM plans p LEFT JOIN plan_strategies s ON s.plan_id = p.id "
+            + "WHERE p.id = #{id} AND p.user_id = #{userId} AND p.version = #{baseVersion}")
+    int deleteWithVersion(@Param("id") Long id, @Param("userId") Long userId,
+                          @Param("baseVersion") Long baseVersion);
 }

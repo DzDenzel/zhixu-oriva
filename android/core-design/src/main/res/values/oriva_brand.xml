@@ -1,4 +1,4 @@
 <resources>
-    <!-- Same sampled brand token as V2Tokens.brand; checked by asset verification. -->
-    <color name="oriva_brand">#182F20</color>
+    <!-- 墨序 v3.0：品牌墨 = Ink.ink = V2Tokens.brand；由 BrandResourcesTest 校验。 -->
+    <color name="oriva_brand">#1A1D1B</color>
 </resources>

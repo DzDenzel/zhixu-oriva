@@ -7,6 +7,7 @@ import androidx.room.PrimaryKey
  * 计划快照缓存（含 version，用于冲突检测与断网执行）。
  */
 @Entity(tableName = "plan_snapshot")
+@kotlinx.serialization.Serializable
 data class PlanSnapshotEntity(
     @PrimaryKey val id: Long,
     val userId: Long,

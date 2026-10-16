@@ -13,9 +13,12 @@ data class AuthState(
     val validity: AuthValidity = AuthValidity.UNKNOWN,
     val signedOut: Boolean = false,
     val dataOwner: Long? = null,
+    val instanceId: String? = null,
+    val dataOwnerInstance: String? = null,
 ) {
     val expired get() = validity == AuthValidity.EXPIRED_LOCAL || validity == AuthValidity.REJECTED
-    val ownershipMismatch get() = dataOwner != null && session.userId != null && dataOwner != session.userId
+    val ownershipMismatch get() = (dataOwner != null && session.userId != null && dataOwner != session.userId) ||
+        (dataOwnerInstance != null && dataOwnerInstance != instanceId)
     val localDataUserId get() = dataOwner ?: session.userId
 }
 

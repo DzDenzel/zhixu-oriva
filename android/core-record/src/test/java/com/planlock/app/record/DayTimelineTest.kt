@@ -45,6 +45,29 @@ class DayTimelineTest {
         assertTrue(entries.all { it.columnCount == 1 && it.overflowCount == 0 })
     }
 
+    @Test fun allDaySchedulesDoNotConsumeTimedOverlapColumns() {
+        val date = "2026-09-23"
+        val schedules = listOf(
+            schedule(1, date, null, date, null, allDay = true),
+            schedule(2, date, null, date, null, allDay = true),
+        ) + (3L..5L).map { schedule(it, date, "09:00", date, "10:00") }
+        val entries = DayTimeline.build(date, emptyList(), schedules, 570)
+        assertEquals(listOf(1L, 2L, 3L, 4L), entries.map { it.id })
+        assertTrue(entries.take(2).all { it.columnCount == 1 && it.overflowCount == 0 })
+        assertEquals(2, entries.last().columnCount)
+        assertEquals(1, entries.last().overflowCount)
+    }
+
+    @Test fun listModePlacesAllDayBeforeMidnightTimedEntries() {
+        val date = "2026-09-23"
+        val schedules = listOf(
+            schedule(1, date, "00:00", date, "01:00"),
+            schedule(2, date, null, date, null, allDay = true),
+            schedule(3, date, null, date, null, allDay = true),
+        )
+        assertEquals(listOf(2L, 3L, 1L), DayTimeline.build(date, emptyList(), schedules, 30, collapseOverlaps = false).map { it.id })
+    }
+
     @Test fun rejectsUnsupportedRuleAtInputBoundary(){
         assertFalse(PlanOccurrence.isSupportedRule("{\"type\":\"monthly\"}"))
         assertTrue(PlanOccurrence.isSupportedRule("{\"type\":\"weekly\",\"weekdays\":[1,3]}"))

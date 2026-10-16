@@ -1,0 +1,76 @@
+services:
+  backend:
+    image: ${ORIVA_IMAGE:?Run the installer to create .env}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${ORIVA_BIND_ADDRESS:-0.0.0.0}:${ORIVA_PORT:-8080}:8080"
+    environment:
+      PLANLOCK_DEPLOYMENT_ENABLED: "true"
+      PLANLOCK_TRUSTED_PROXIES: ${PLANLOCK_TRUSTED_PROXIES:-}
+      PLANLOCK_SETUP_TOKEN: ${PLANLOCK_SETUP_TOKEN:?Missing setup token}
+      PLANLOCK_PUBLIC_PLUGINS_CATALOG_URL: ${PLANLOCK_PUBLIC_PLUGINS_CATALOG_URL:-}
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/planlock?useUnicode=true&characterEncoding=utf8&serverTimezone=${ORIVA_TIMEZONE:-UTC}&useSSL=false&allowPublicKeyRetrieval=true
+      PLANLOCK_DB_USER: oriva
+      PLANLOCK_DB_PASSWORD: ${PLANLOCK_DB_PASSWORD:?Missing DB password}
+      PLANLOCK_REDIS_HOST: redis
+      PLANLOCK_REDIS_PASSWORD: ${PLANLOCK_REDIS_PASSWORD:?Missing Redis password}
+      PLANLOCK_JWT_SECRET: ${PLANLOCK_JWT_SECRET:?Missing JWT secret}
+      JAVA_TOOL_OPTIONS: -Duser.timezone=${ORIVA_TIMEZONE:-UTC}
+      LOGGING_LEVEL_COM_PLANLOCK: INFO
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "java", "-cp", "/opt/oriva/health", "Healthcheck"]
+      interval: 15s
+      timeout: 5s
+      start_period: 90s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+  mysql:
+    image: mysql:8.0.43
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: planlock
+      MYSQL_USER: oriva
+      MYSQL_PASSWORD: ${PLANLOCK_DB_PASSWORD:?Missing DB password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Missing root password}
+      TZ: ${ORIVA_TIMEZONE:-UTC}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql --user=oriva --database=planlock --execute='SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+  redis:
+    image: redis:7.4.5-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${PLANLOCK_REDIS_PASSWORD:?Missing Redis password}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  mysql-data:
+  redis-data:
+
+# Python Agent reserved for a future approved task; intentionally not running.
+#  agent:
+#    image: ${ORIVA_AGENT_IMAGE}
+#    depends_on:
+#      backend:
+#        condition: service_healthy

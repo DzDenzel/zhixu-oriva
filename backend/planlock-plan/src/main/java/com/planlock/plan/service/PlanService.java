@@ -71,12 +71,27 @@ public class PlanService {
 
     @Transactional
     public void delete(Long userId, Long id) {
+        delete(userId, id, null);
+    }
+
+    @Transactional
+    public void delete(Long userId, Long id, Long baseVersion) {
         Plan existing = planMapper.findById(id);
         if (existing == null) return;
         if (!existing.getUserId().equals(userId)) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
         }
-        planMapper.delete(id, userId);
+        if (baseVersion == null) {
+            planMapper.delete(id, userId);
+        } else if (planMapper.deleteWithVersion(id, userId, baseVersion) == 0) {
+            // A locking read sees concurrent commits, unlike the transaction's earlier snapshot.
+            Plan current = planMapper.findByIdForUpdate(id);
+            if (current == null) return;
+            if (!current.getUserId().equals(userId)) {
+                throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
+            }
+            throw new BusinessException(ErrorCode.VERSION_CONFLICT);
+        }
     }
 
     @Transactional

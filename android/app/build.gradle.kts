@@ -7,6 +7,7 @@ plugins {
 }
 
 android {
+    sourceSets.getByName("androidTest").assets.srcDir("../core-record/schemas")
     namespace = "com.planlock.app"
     compileSdk = 36
 
@@ -15,8 +16,8 @@ android {
         applicationId = "com.planlock.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "2.0.0"
+        versionCode = 3
+        versionName = "2.1.0"
     }
 
     buildTypes {
@@ -76,4 +77,5 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.room.runtime)
+    androidTestImplementation(libs.androidx.room.ktx)
 }

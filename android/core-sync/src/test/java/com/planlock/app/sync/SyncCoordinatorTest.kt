@@ -5,6 +5,38 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SyncCoordinatorTest {
+    @Test fun clearedConnectionFeedbackCannotBeRestoredByOldInFlightWork() = runBlocking {
+        for (requiresLogin in listOf(false, true)) {
+            val releasedSession = CompletableDeferred<Unit>()
+            val finishOldWork = CompletableDeferred<Unit>()
+            var calls = 0
+            val coordinator = SyncCoordinator(this) {
+                calls++
+                releasedSession.complete(Unit)
+                finishOldWork.await()
+                if (requiresLogin) throw OwnerLoginRequiredException() else error("old connection failed")
+            }
+            val old = coordinator.refresh()
+            releasedSession.await()
+            coordinator.clearError()
+            finishOldWork.complete(Unit)
+            old.join()
+            assertNull(coordinator.state.value.error)
+            assertFalse(coordinator.state.value.loginRequired)
+            assertEquals(1, calls)
+        }
+    }
+    @Test fun localOnlyCanDismissPreviousFailureWithoutStartingAnotherTransfer() = runBlocking {
+        var calls = 0
+        val coordinator = SyncCoordinator(this) { calls++; error("offline") }
+        coordinator.refresh().join()
+        assertNotNull(coordinator.state.value.error)
+        val before = coordinator.state.value
+        coordinator.clearError()
+        coordinator.pageEntered()
+        assertEquals(1, calls)
+        assertEquals(before.copy(error = null), coordinator.state.value)
+    }
     @Test fun coldSyncHappensOnceButPageEntriesNeverRequest() = runBlocking {
         var calls = 0
         val coordinator = SyncCoordinator(this) { calls++ }

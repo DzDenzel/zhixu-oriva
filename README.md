@@ -1,133 +1,224 @@
+<div align="center">
+
 # 知序 ORIVA
 
 **知你所想，序你所行。**
 
-知序 ORIVA 是个人时间助理与通用插件平台。用日程和计划组织想做的事，用执行记录了解时间去向；本地助理提供查询与操作入口，扩展能力通过插件接入。
+开源的个人助理：日程与计划在手机上本地优先地运行，数据同步到你自己部署的后端。
+
+[![Release](https://img.shields.io/github/v/release/DzDenzel/zhixu-oriva?label=release)](https://github.com/DzDenzel/zhixu-oriva/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Android 7.0+](https://img.shields.io/badge/Android-7.0%2B-3DDC84)
+![Backend](https://img.shields.io/badge/backend-Spring%20Boot%20%7C%20Docker-6DB33F)
+
+[下载 App](https://github.com/DzDenzel/zhixu-oriva/releases/latest) · [部署后端](deploy/README.md) · [插件开发](android/tools/plugin-sdk/README.md) · [更新记录](https://github.com/DzDenzel/zhixu-oriva/releases)
+
+</div>
+
+<p align="center">
+  <img src="docs/screenshots/today-ink.png" width="240" alt="今日页 · 墨序主题">
+  <img src="docs/screenshots/today-atlas.png" width="240" alt="今日页 · 星图主题">
+  <img src="docs/screenshots/today-phosphor.png" width="240" alt="今日页 · 荧屏主题">
+</p>
+
+---
+
+## 简介
+
+知序 ORIVA 由三部分组成：
+
+- **App（Android）**：管理日程、计划与执行记录。所有操作先写入本机，离线可用，联网后自动补传。
+- **你自己的后端**：开源的 Spring Boot 服务，用 Docker 一条命令部署在自己的服务器、家用电脑或 NAS 上，供多台设备同步。本项目不运营任何托管服务，数据只存在你的设备和你的服务器上。
+- **插件**：DEX 与 JS/TS 两种插件运行时，可以为 App 增加能力和界面。
+
+> *English:* ORIVA is an open-source, local-first personal assistant for Android. Your schedules and plans live on your phone and sync to a backend you host yourself (Docker, one command). No hosted service, no third-party data storage. MIT licensed.
 
 ## 功能
 
-- 日程、计划与提醒，支持本地记录、离线修改和联网补传。
-- 执行报告与统计，支持 JSON、CSV、ICS 导出。
-- 本地助理：基于应用内数据理解常见时间管理指令。
-- 插件工坊：官方和第三方来源，校验下载摘要、签名、来源与申请能力。
-- 双插件路线：DEX 插件承载 Android 系统能力，JS/TS 插件运行在 QuickJS 中，并通过宿主契约贡献界面。
-- 主题切换、权限引导、账户同步与备份密码管理。
+**日程与计划**
+- 日程、计划、提醒；全天日程与定时安排分开展示
+- 日晷式今日视图：一眼看清一天里什么时候做什么
+- 执行记录与报告，支持导出 JSON、CSV、ICS
 
-## 技术栈与模块
+**多设备同步**（v2.1 新增）
+- 连接你自己部署的后端，多台设备同步日程与计划
+- 两台设备改了同一条内容时，由你选择保留哪个版本，不会悄悄覆盖
+- 远端一次删除大量数据时先暂停并请你确认，防止误清空
+- 离线修改联网后自动补传，重复提交不会产生重复数据
 
-| 目录 | 职责 |
+**界面**
+- 六套主题：墨序（随系统明暗）、青瓷、暮霞、构成、星图、荧屏
+- 所选主题从冷启动第一屏起保持一致（Android 13 及以上）
+
+**助理与插件**
+- 本地助理：理解常见的时间管理指令，任何写入都先给出草稿、确认后才保存
+- 插件工坊：支持官方与第三方来源，下载前校验摘要、签名、来源与申请的权限
+- DEX 插件承载系统能力；JS/TS 插件运行在 QuickJS 沙箱中，可以向界面贡献内容
+
+## 快速开始
+
+### 1. 安装 App
+
+在 [Releases](https://github.com/DzDenzel/zhixu-oriva/releases/latest) 下载 `zhixu-oriva-<版本>.apk` 并安装。安装前建议按[校验发布文件](#校验发布文件)核对哈希与签名。
+
+已安装 v2.0.0 的用户直接覆盖安装即可，数据和登录状态都会保留，**请勿先卸载**。
+
+只在一台手机上使用的话，可以选择「仅本地使用」，不需要后端。
+
+### 2. 部署后端（可选，多设备同步需要）
+
+需要 Docker 与 Docker Compose 2.24.4 或更新版本。下载源码 ZIP 并解压，在 `deploy` 目录执行：
+
+```sh
+# Linux / macOS / NAS
+sh install.sh
+```
+
+```powershell
+# Windows PowerShell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+脚本会拉取公开镜像 `ghcr.io/dzdenzel/zhixu-oriva-backend`，自动生成数据库、Redis 和 JWT 密钥，再启动 MySQL、Redis 与后端。数据库和 Redis 不对外开放端口；重复运行不会覆盖已有数据。
+
+### 3. 连接
+
+1. 打开终端显示的初始化页，设置所有者账号，并确认手机能访问的地址。
+2. 初始化页会生成连接二维码。在 App 的「设置 → 后端连接」导入二维码图片或粘贴连接配置。
+3. 用所有者账号登录。其他设备导入同一份配置，登录同一账号，即可开始同步。
+
+公网 HTTPS、升级、备份恢复和网络排障见 [部署说明](deploy/README.md)。
+
+## 架构
+
+```mermaid
+flowchart LR
+  subgraph Phone["Android App"]
+    UI["Compose 界面"] --> Room[("Room 本地库")]
+    Room --> Sync["同步与补传"]
+    Plugins["插件宿主<br/>DEX · QuickJS"] --> UI
+  end
+  Sync -- "HTTPS / 局域网" --> API
+  subgraph Server["你的服务器（Docker）"]
+    API["Spring Boot 后端"] --> DB[("MySQL 8")]
+    API --> Cache[("Redis")]
+  end
+```
+
+App 的所有写入先落到本机 Room 数据库，界面只读本机数据；同步层在后台与后端交换完整快照，冲突与批量删除交给用户确认。后端数据库结构由 Flyway 管理，升级镜像时自动迁移。
+
+## 项目结构
+
+| 目录 | 内容 |
 |---|---|
-| `android/app` | Kotlin / Jetpack Compose 应用入口与导航 |
-| `android/core-api`、`core-record`、`core-sync` | Retrofit 接口、Room 本地记录、同步与离线补传 |
-| `android/core-engine`、`core-dnd`、`core-security` | 执行引擎、勿扰接入、安全与备份密码 |
-| `android/core-design`、`feature-*` | 共享设计组件与计划、向导、统计、设置界面 |
-| `android/core-plugin`、`plugin-force-blocker` | 通用插件宿主与 DEX 示例 |
-| `android/tools/plugin-sdk` | JS/TS 插件 SDK、模板、打包与验证工具 |
-| `backend/planlock-*` | Java 21 / Spring Boot / MyBatis：账户、计划、日程、策略、记录与同步 |
-| `backend/plugins` | 文件驱动的插件目录及已签名示例包 |
+| `android/app` | 应用入口、导航、主题与启动 |
+| `android/core-*` | 接口、本地库、同步、执行引擎、免打扰、安全、设计组件、插件宿主 |
+| `android/feature-*` | 今日 / 计划、统计、设置、引导等界面 |
+| `android/tools/plugin-sdk` | JS/TS 插件 SDK、模板、打包与校验工具 |
+| `backend/planlock-*` | Java 21 / Spring Boot / MyBatis：账户、计划、日程、策略、记录、同步 |
+| `backend/plugins` | 插件目录与已签名示例包 |
+| `deploy` | Docker 镜像、Compose 编排、安装 / 备份 / 恢复脚本、可选 HTTPS（Caddy） |
 
-后端使用 MySQL 8、Redis 和 Flyway；Android 最低版本为 Android 7.0（API 24）。
+## 从源码构建
 
-## 下载与联网范围
+<details>
+<summary><b>Android</b></summary>
 
-在 [GitHub Releases](https://github.com/DzDenzel/zhixu-oriva/releases) 下载正式签名 APK、源码 ZIP、`SHA256SUMS` 和公开签名证书。安装前按下文校验。
+需要 JDK 21、Android SDK 36（Build Tools 36.0.0）、NDK 27.0.12077973、CMake 3.22.1。Gradle 版本由仓库自带的 wrapper 固定。
 
-v2.0.0 APK 使用真实后端接口，默认地址为 `http://10.0.2.2:8080/api/v1/`，面向 Android 模拟器连接宿主机后端。**这不是公网服务地址**：账户、同步和插件下载需要可访问的后端。真机连接自建服务时，按下文用自己的地址构建；本仓库不提供托管服务。
-
-正式发布证书与历史开发版证书不同，不能直接覆盖安装历史 debug 版本。已有数据的用户请先在原版本完成同步或自行备份，并确认恢复方式；不要为安装直接卸载含唯一数据的旧版本。应用包名保持 `com.planlock.app`。
-
-## 构建 Android
-
-需要 JDK 21、Android SDK 36、Build Tools 36.0.0、NDK 27.0.12077973、CMake 3.22.1。Gradle 由仓库 wrapper 固定为 9.0.0，首次构建需要下载依赖。
-
-PowerShell 示例，在仓库根目录执行：
-
-```powershell
-$env:JAVA_HOME = 'C:/Program Files/Java/jdk-21' # 替换为本机 JDK 21 路径
-$env:ANDROID_HOME = 'C:/Android/Sdk'            # 替换为本机 SDK 路径
-Set-Location android
-./gradlew.bat -g .gradle-home testDebugUnitTest lintDebug assembleDebug
-./gradlew.bat --stop -g .gradle-home
+```sh
+cd android
+./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-**debug 构建默认使用本地模拟数据接口。连接真实后端须显式附加 `-PPLANLOCK_USE_MOCK=false`**；例如连接自建服务：
+- debug 构建默认使用本地模拟数据接口；连接真实后端时加 `-PPLANLOCK_USE_MOCK=false`。
+- release 构建始终使用真实接口，输出未签名 APK：`./gradlew :app:assembleRelease -PPLANLOCK_USE_MOCK=false`，再用 `zipalign` 和 `apksigner` 以你自己的密钥签名。自行签名的 APK 证书与官方版本不同，不能覆盖安装官方版本。
+- 最低支持 Android 7.0（API 24）。
 
-```powershell
-./gradlew.bat -g .gradle-home assembleDebug -PPLANLOCK_USE_MOCK=false -PPLANLOCK_API_BASE_URL=https://your-server.example/api/v1/
-./gradlew.bat --stop -g .gradle-home
-```
+</details>
 
-默认模拟器地址可直接用于本机联调；真机须配置可访问的主机名或局域网地址。release 仅为默认模拟器主机 `10.0.2.2` 放行 HTTP，其他地址须使用 HTTPS；debug 可用于局域网 HTTP 联调。部署时优先使用 HTTPS。`release` 构建强制使用真实接口，生成 unsigned APK：
+<details>
+<summary><b>后端（不使用 Docker）</b></summary>
 
-```powershell
-./gradlew.bat -g .gradle-home clean testReleaseUnitTest lintRelease :app:assembleRelease -PPLANLOCK_USE_MOCK=false
-./gradlew.bat --stop -g .gradle-home
-```
+需要 JDK 21、Maven 3.9+、MySQL 8 与 Redis。先创建 UTF-8 数据库 `planlock`，并通过环境变量提供凭据：
 
-产物位于 `android/app/build/outputs/apk/release/app-release-unsigned.apk`。发布者使用自有 keystore，通过 Android SDK 的 `zipalign` 和 `apksigner` 签名；本仓库不分发 APK 或插件的私钥及口令。自行签名生成的 APK 与官方发布证书不同，不能覆盖官方版本。
-
-## 维护者发布
-
-后续版本在同一主仓库开发、提交和构建，复用已有正式签名密钥；发布工具从 Android 配置读取版本，将资产和证据按版本隔离。默认不克隆仓库，接收者克隆验证可按需启用。命令与中断恢复说明见 [可复用发布工具](android/tools/release/README.md)。
-
-```powershell
-python android/tools/release/release.py plan
-```
-
-## 构建与启动后端
-
-需要 JDK 21、Maven 3.9+、MySQL 8 和 Redis。创建 UTF-8 数据库 `planlock`，准备具备该库权限的用户；在当前终端为环境变量赋值。敏感值请从自己的本地凭据管理方式注入：
-
-| 环境变量 | 含义 |
+| 环境变量 | 说明 |
 |---|---|
-| `PLANLOCK_DB_USER` | MySQL 用户，默认 `root`；部署时使用专用用户 |
-| `PLANLOCK_DB_PASSWORD` | MySQL 口令，必须提供 |
-| `PLANLOCK_REDIS_HOST` / `PLANLOCK_REDIS_PORT` | 默认 `localhost` / `6379` |
-| `PLANLOCK_REDIS_PASSWORD` | Redis 口令，必须提供；无认证的本地 Redis 可显式设为空值 |
-| `PLANLOCK_JWT_SECRET` | 自行生成并妥善保存的随机 JWT 密钥，至少 32 字节；必须提供 |
-| `PLANLOCK_PLUGIN_DIRECTORY` | 插件目录，默认相对当前工作目录的 `plugins` |
+| `PLANLOCK_DB_USER` / `PLANLOCK_DB_PASSWORD` | MySQL 用户与口令（口令必填） |
+| `PLANLOCK_REDIS_HOST` / `PLANLOCK_REDIS_PORT` / `PLANLOCK_REDIS_PASSWORD` | Redis 连接，默认 `localhost:6379` |
+| `PLANLOCK_JWT_SECRET` | 至少 32 字节的随机密钥（必填） |
+| `PLANLOCK_PLUGIN_DIRECTORY` | 插件目录，默认为启动目录下的 `plugins` |
+| `SPRING_DATASOURCE_URL` | 需要时覆盖默认连接串 `localhost:3306/planlock` |
 
-MySQL 默认连接 `localhost:3306/planlock`。需要替换连接串时设置 Spring Boot 标准环境变量 `SPRING_DATASOURCE_URL`；`SPRING_DATASOURCE_PASSWORD`、`SPRING_DATA_REDIS_PASSWORD` 也可直接覆盖对应配置。
-
-```powershell
-Set-Location backend
-mvn clean test package
-java -jar planlock-app/target/planlock-app-1.0.0.jar
+```sh
+cd backend
+mvn clean verify
+java -jar planlock-app/target/planlock-app-2.1.0.jar
 ```
 
-保持启动目录为 `backend/`，便可找到仓库中的 `plugins/`。默认监听 8080 端口。后端 Maven 坐标 `1.0.0` 是模块坐标，Android 发布版本为 `2.0.0`。
+默认监听 8080 端口。Flyway 会在空库上自动建表；已有数据库接入前请先备份并核对迁移历史，不要对存量库直接导入建表脚本。
 
-Flyway 在空库自动执行 V1—V3 迁移。已有数据库接入前先备份，核对结构与迁移历史，明确基线后再启动；不要对存量库直接导入 `schema.sql` 或重复执行旧建表脚本。普通测试不触碰真实数据库；数据库迁移集成测试须按 `backend/planlock-app/scripts/test-f37.ps1` 的显式参数运行。
+</details>
 
-## 插件开发
+<details>
+<summary><b>插件 SDK</b></summary>
 
-JS/TS SDK 需要 Node.js 22+：
+需要 Node.js 22+：
 
-```powershell
-Set-Location android/tools/plugin-sdk
+```sh
+cd android/tools/plugin-sdk
 npm ci
 npm run verify
 ```
 
-包契约与签名操作见 [SDK README](android/tools/plugin-sdk/README.md)，目录部署见 [插件目录说明](backend/plugins/README.md)。DEX 示例打包脚本同样从 `ORIVA_PLUGIN_STOREPASS` 读取签名口令；官方和第三方来源的签名私钥不随源码提供。自行生成的签名不会自动取得既有来源的信任，须配置自己的来源和信任关系。
+包格式、签名与发布见 [SDK 说明](android/tools/plugin-sdk/README.md)，服务端插件目录见 [插件目录说明](backend/plugins/README.md)。官方与第三方来源的签名私钥不随源码提供；自建来源须配置自己的签名与信任关系。
+
+</details>
+
+## 安全与隐私
+
+- **数据归属**：本项目不运营托管服务；你的日程、计划与执行记录只存储在你的设备和你部署的后端上。
+- **App 访问的外部服务**：除你配置的后端与插件目录外，天气功能会向 [Open-Meteo](https://open-meteo.com/) 发送你搜索的城市名（`geocoding-api.open-meteo.com`）或所选城市的经纬度与时区（`api.open-meteo.com`），用于查询城市与当前天气，不发送账号或日程数据。使用定位时，地点解析由系统定位服务完成。
+- **传输**：公网地址强制 HTTPS。局域网 HTTP 仅对连接配置中显式允许、且解析结果全部为私网地址的端点生效，不放宽系统全局的明文传输策略。
+- **部署默认值**：密钥在安装时随机生成且仅当前用户可读；数据库与 Redis 不暴露端口；部署模式关闭公开注册与验证码登录。
+- **连接配置**：二维码与连接 JSON 只包含公开字段（实例名称、地址等），不含密码或令牌。
+- **插件**：安装前校验摘要、签名与来源；插件申请的能力须用户授权。
+
+发现安全问题请通过 GitHub 私密漏洞报告（Security → Report a vulnerability）联系，不要直接公开 Issue。
 
 ## 校验发布文件
 
-下载同一 Release 中的 `SHA256SUMS`，先核对 APK 与源码 ZIP 的 SHA-256：
+每个 Release 附带 `SHA256SUMS` 和公开签名证书 `oriva-release.cer`。
 
-```powershell
-Get-FileHash ./zhixu-oriva-2.0.0.apk -Algorithm SHA256
-Get-FileHash ./zhixu-oriva-2.0.0-source.zip -Algorithm SHA256
+```sh
+sha256sum -c SHA256SUMS
+apksigner verify --print-certs zhixu-oriva-2.1.0.apk
 ```
 
-或在提供 `sha256sum` 的环境运行 `sha256sum -c SHA256SUMS`。使用 Android SDK Build Tools 校验 APK 签名：
+Windows 可用 `Get-FileHash .\zhixu-oriva-2.1.0.apk -Algorithm SHA256`。将 `Signer #1 certificate SHA-256 digest` 与 Release 说明中公布的证书指纹比对，一致即为官方构建。
 
-```powershell
-apksigner verify --verbose --print-certs ./zhixu-oriva-2.0.0.apk
-```
+## 已知限制
 
-将 `Signer #1 certificate SHA-256 digest` 与 Release 说明中的证书指纹对照。Release 附带的 `.cer` 是公开证书，可用 `keytool -printcert -file oriva-release.cer` 查看；它不包含私钥。
+- 公网 HTTPS 自动证书尚未使用真实域名验证。
+- 后端镜像目前只验证了 linux/amd64；arm64 与具体 NAS 型号尚未验证。
+- AI 对话模式尚未开放，当前为本地指令助理；附件目前只有选择入口，暂不支持读取和总结。
+- 统计页暂不包含尚未上传到后端的本机执行记录。
+- Android 12L 及以下，冷启动时的系统启动窗口不跟随所选主题（应用内主题不受影响）。
+
+## 路线图
+
+| 版本 | 内容 |
+|---|---|
+| **v2.1**（当前） | 自建后端部署套件、多设备同步与冲突确认、六套主题 |
+| v2.2 | 云平台一键部署（优先免费层，收费项事先说明） |
+| v2.3 | App 内部署向导 |
+| 之后 | 日常记录、iOS、Web 端、开源插件站 |
+| v3.0 | AI 内核：在你自己的后端上理解你的习惯，生成可迁移的个人档案（暂缓） |
+
+## 参与贡献
+
+欢迎提交 Issue 与 Pull Request。提交代码前请确保 Android 单测与 lint、后端 `mvn clean verify` 通过；涉及界面的改动请附截图。
 
 ## 许可证
 
-项目自有代码按 [MIT License](LICENSE) 开源。第三方组件保留各自许可：嵌入的 QuickJS 为 MIT（见源码目录 `LICENSE`）；理念词字体 Ma Shan Zheng 子集遵循 SIL Open Font License 1.1（见 `android/app/src/main/assets/licenses/zhixu_motto_OFL.txt`）。其他构建依赖遵循各自许可证。
+项目代码以 [MIT License](LICENSE) 开源。第三方组件保留各自许可：嵌入的 QuickJS 为 MIT；理念词字体 Ma Shan Zheng 子集遵循 SIL Open Font License 1.1（见 `android/app/src/main/assets/licenses/zhixu_motto_OFL.txt`）；其余依赖遵循各自的许可证。

@@ -46,7 +46,9 @@ public class StrategyService {
             strategy.setPlanId(planId);
             apply(strategy, req);
             strategy.setVersion(0L);
-            strategyMapper.insert(strategy);
+            if (strategyMapper.insert(strategy) == 0) {
+                throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
+            }
             return toResponse(strategyMapper.findByPlanId(planId));
         }
         if (baseVersion == null) {

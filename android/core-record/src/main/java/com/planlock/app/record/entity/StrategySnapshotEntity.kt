@@ -7,6 +7,7 @@ import androidx.room.PrimaryKey
  * 执行策略快照缓存。
  */
 @Entity(tableName = "strategy_snapshot")
+@kotlinx.serialization.Serializable
 data class StrategySnapshotEntity(
     @PrimaryKey val id: Long,
     val planId: Long,

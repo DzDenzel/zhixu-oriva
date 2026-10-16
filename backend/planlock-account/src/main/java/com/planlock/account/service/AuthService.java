@@ -19,6 +19,9 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
@@ -37,9 +40,16 @@ public class AuthService {
     private final VerificationCodeService verificationCodeService;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
+    private final DeploymentAuthLimiter deploymentAuthLimiter;
+
+    @Value("${planlock.deployment.enabled:false}")
+    private boolean deploymentEnabled;
 
     @Transactional
     public AuthResponse deviceRegister(DeviceRegisterRequest req) {
+        if (deploymentEnabled) {
+            return touchAuthenticatedDeploymentDevice(req);
+        }
         Device existing = deviceMapper.findByDeviceUid(req.getDeviceUid());
         if (existing != null) {
             deviceMapper.touch(existing.getId(), LocalDateTime.now());
@@ -53,46 +63,76 @@ public class AuthService {
 
     @Transactional
     public AuthResponse register(RegisterRequest req) {
+        if (deploymentEnabled) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "公开注册已关闭，请使用实例所有者账号登录");
+        }
         if (!verificationCodeService.verify(req.getAccount(), req.getCode())) {
             throw new BusinessException(ErrorCode.INVALID_PARAM, "验证码错误或已过期");
         }
-        if (userMapper.findByAccount(req.getAccount()) != null) {
-            throw new BusinessException(ErrorCode.INVALID_PARAM, "账号已存在");
-        }
-        User user = new User();
-        if (isEmail(req.getAccount())) {
-            user.setEmail(req.getAccount());
-        } else {
-            user.setPhone(req.getAccount());
-        }
-        if (hasText(req.getPassword())) {
-            user.setPasswordHash(passwordEncoder.encode(req.getPassword()));
-        }
-        userMapper.insert(user);
+        User user = createAccount(req.getAccount(), req.getPassword());
         Long guestUserId = resolveGuestUserId(req.getDeviceUid(), user.getId());
         Device device = bindDevice(req.getDeviceUid(), req.getDeviceName(), req.getPlatform(), user.getId());
         return buildAuth(device, guestUserId);
     }
 
+    /** Only the transaction-locked deployment setup service calls this controlled entry point. */
+    @Transactional
+    public Long createSetupOwner(String account, String password) {
+        if (!hasText(password)) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "所有者必须设置密码");
+        }
+        return createAccount(account, password).getId();
+    }
+
+    private User createAccount(String account, String password) {
+        if (userMapper.findByAccount(account) != null) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "账号已存在");
+        }
+        User user = new User();
+        if (isEmail(account)) {
+            user.setEmail(account);
+        } else {
+            user.setPhone(account);
+        }
+        if (hasText(password)) {
+            user.setPasswordHash(passwordEncoder.encode(password));
+        }
+        userMapper.insert(user);
+        return user;
+    }
+
     @Transactional
     public AuthResponse login(LoginRequest req) {
+        rejectDeploymentCode(req.getCode());
+        String source = deploymentEnabled ? deploymentAuthLimiter.sourceKey() : null;
+        if (deploymentEnabled) deploymentAuthLimiter.check(source);
         User user = userMapper.findByAccount(req.getAccount());
-        if (user == null) {
-            throw new BusinessException(ErrorCode.INVALID_PARAM, "账号或密码错误");
-        }
-        if (hasText(req.getCode())) {
-            if (!verificationCodeService.verify(req.getAccount(), req.getCode())) {
-                throw new BusinessException(ErrorCode.INVALID_PARAM, "验证码错误或已过期");
-            }
-        } else if (hasText(req.getPassword())) {
-            if (user.getPasswordHash() == null || !passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
+        String account = deploymentEnabled ? deploymentAuthLimiter.accountKey(user == null ? null : user.getId(), req.getAccount()) : null;
+        if (deploymentEnabled) {
+            deploymentAuthLimiter.reserve(source, account);
+            if (user == null || !hasText(req.getPassword()) || user.getPasswordHash() == null
+                    || !passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
                 throw new BusinessException(ErrorCode.INVALID_PARAM, "账号或密码错误");
             }
         } else {
-            throw new BusinessException(ErrorCode.INVALID_PARAM, "请提供密码或验证码");
+            if (user == null) {
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "账号或密码错误");
+            }
+            if (hasText(req.getCode())) {
+                if (!verificationCodeService.verify(req.getAccount(), req.getCode())) {
+                    throw new BusinessException(ErrorCode.INVALID_PARAM, "验证码错误或已过期");
+                }
+            } else if (hasText(req.getPassword())) {
+                if (user.getPasswordHash() == null || !passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
+                    throw new BusinessException(ErrorCode.INVALID_PARAM, "账号或密码错误");
+                }
+            } else {
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "请提供密码或验证码");
+            }
         }
         Long guestUserId = resolveGuestUserId(req.getDeviceUid(), user.getId());
         Device device = bindDevice(req.getDeviceUid(), req.getDeviceName(), req.getPlatform(), user.getId());
+        if (deploymentEnabled) deploymentAuthLimiter.succeeded(source, account);
         return buildAuth(device, guestUserId);
     }
 
@@ -118,30 +158,75 @@ public class AuthService {
 
     @Transactional
     public void resetBackupPassword(BackupPasswordResetRequest req) {
+        rejectDeploymentCode(req.getCode());
+        String source = deploymentEnabled ? deploymentAuthLimiter.sourceKey() : null;
+        if (deploymentEnabled) deploymentAuthLimiter.check(source);
         User user = userMapper.findByAccount(req.getAccount());
-        if (user == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND, "账号不存在");
-        }
-        if (hasText(req.getCode())) {
-            if (!verificationCodeService.verify(req.getAccount(), req.getCode())) {
-                throw new BusinessException(ErrorCode.INVALID_PARAM, "验证码错误或已过期");
-            }
-        } else if (hasText(req.getSecurityAnswer())) {
-            if (user.getSecurityAnswerHash() == null
+        String account = deploymentEnabled ? deploymentAuthLimiter.accountKey(user == null ? null : user.getId(), req.getAccount()) : null;
+        if (deploymentEnabled) {
+            deploymentAuthLimiter.reserve(source, account);
+            if (user == null || !hasText(req.getSecurityAnswer()) || user.getSecurityAnswerHash() == null
                     || !passwordEncoder.matches(req.getSecurityAnswer(), user.getSecurityAnswerHash())) {
-                throw new BusinessException(ErrorCode.INVALID_PARAM, "密保答案错误");
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "账号或密码错误");
             }
         } else {
-            throw new BusinessException(ErrorCode.INVALID_PARAM, "请提供验证码或密保答案");
+            if (user == null) {
+                throw new BusinessException(ErrorCode.NOT_FOUND, "账号不存在");
+            }
+            if (hasText(req.getCode())) {
+                if (!verificationCodeService.verify(req.getAccount(), req.getCode())) {
+                    throw new BusinessException(ErrorCode.INVALID_PARAM, "验证码错误或已过期");
+                }
+            } else if (hasText(req.getSecurityAnswer())) {
+                if (user.getSecurityAnswerHash() == null
+                        || !passwordEncoder.matches(req.getSecurityAnswer(), user.getSecurityAnswerHash())) {
+                    throw new BusinessException(ErrorCode.INVALID_PARAM, "密保答案错误");
+                }
+            } else {
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "请提供验证码或密保答案");
+            }
         }
         userMapper.updateBackupPassword(user.getId(),
                 passwordEncoder.encode(req.getNewBackupPassword()),
                 user.getSecurityQuestion(),
                 user.getSecurityAnswerHash());
+        if (deploymentEnabled) deploymentAuthLimiter.succeeded(source, account);
     }
 
     public void sendCode(SendCodeRequest req) {
+        rejectDeploymentCode("send");
         verificationCodeService.issue(req.getAccount());
+    }
+
+    private void rejectDeploymentCode(String code) {
+        if (deploymentEnabled && hasText(code)) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "自建实例不支持验证码，请使用账号密码");
+        }
+    }
+
+    private AuthResponse touchAuthenticatedDeploymentDevice(DeviceRegisterRequest req) {
+        var attributes = RequestContextHolder.getRequestAttributes();
+        String authorization = attributes instanceof ServletRequestAttributes servlet
+                ? servlet.getRequest().getHeader("Authorization") : null;
+        if (authorization == null || !authorization.startsWith("Bearer ")) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED, "请使用账号密码登录自建实例");
+        }
+        Long userId;
+        Long deviceId;
+        try {
+            var claims = jwtUtil.parse(authorization.substring(7));
+            userId = claims.get("uid", Long.class);
+            deviceId = claims.get("did", Long.class);
+            if (userId == null || deviceId == null) throw new IllegalArgumentException("Missing identity");
+        } catch (Exception invalidToken) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED, "请使用账号密码登录自建实例");
+        }
+        Device existing = deviceMapper.findByDeviceUid(req.getDeviceUid());
+        if (existing == null || !userId.equals(existing.getUserId()) || !deviceId.equals(existing.getId())) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED, "请使用账号密码登录自建实例");
+        }
+        deviceMapper.touch(existing.getId(), LocalDateTime.now());
+        return buildAuth(existing, null);
     }
 
     private AuthResponse buildAuth(Device device, Long guestUserId) {

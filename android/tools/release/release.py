@@ -67,13 +67,15 @@ def audit_archive(z):
     for item in z.infolist():
         if item.is_dir(): continue
         path = PurePosixPath(item.filename); rel = PurePosixPath(*path.parts[1:]); count += 1
-        need(rel.as_posix() in {'README.md','LICENSE','.gitignore'} or rel.parts[0] in {'android','backend'}, 'Outside public boundary: '+str(rel))
+        readme_screenshots = {'docs/screenshots/today-ink.png', 'docs/screenshots/today-atlas.png', 'docs/screenshots/today-phosphor.png'}
+        need(rel.as_posix() in {'README.md','LICENSE','.gitignore'} | readme_screenshots or rel.parts[0] in {'android','backend','deploy'} or rel.parts[:2] == ('.github','workflows'), 'Outside public boundary: '+str(rel))
         need(not forbidden.intersection(rel.parts) and rel.suffix.lower() not in {'.jks','.keystore','.p12','.pfx','.key','.pem','.pyc','.log'} and not rel.name.startswith('.env') and rel.name != 'local.properties', 'Private/generated file: '+str(rel))
         data=z.read(item); scan(data,str(rel))
         if rel.suffix.lower() in {'.yml','.yaml'}:
             for match in re.finditer(rb'(?im)^\s*(?:password|secret|token)\s*:\s*([^\r\n#]+)',data):
                 value=match[1].strip().strip(b'\"\'')
-                need(not value or re.fullmatch(rb'\$\{[A-Z][A-Z0-9_]*\}',value),'Plain credential/config fallback: '+str(rel))
+                actions_secret = rel.parts[:2] == ('.github','workflows') and re.fullmatch(rb'\$\{\{\s*secrets\.[A-Z][A-Z0-9_]*\s*\}\}', value)
+                need(not value or re.fullmatch(rb'\$\{[A-Z][A-Z0-9_]*\}',value) or actions_secret,'Plain credential/config fallback: '+str(rel))
         if str(rel)=='backend/planlock-app/src/main/resources/application.yml':
             for key in ['PLANLOCK_DB_PASSWORD','PLANLOCK_REDIS_PASSWORD','PLANLOCK_JWT_SECRET']:
                 need(('${'+key+'}').encode() in data,'Required backend secret env missing: '+key)

@@ -35,13 +35,13 @@ class CreationIdempotencyTest {
     private PlanService plans;
     private ScheduleService schedules;
     private SyncService sync;
-    private String url(){return "jdbc:mysql://localhost:3306/"+schema+"?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai";}
+    private String url(){return TestDatabase.url(schema);}
     private Connection connection(String url) throws Exception {return DriverManager.getConnection(url,System.getenv("F37_DB_USER"),System.getenv("F37_DB_PASSWORD"));}
     private long count(String table,long user) throws Exception {try(var c=connection(url());var s=c.createStatement();var r=s.executeQuery("SELECT COUNT(*) FROM "+table+" WHERE user_id="+user)){r.next();return r.getLong(1);}}
     private void record(String file,String value) throws Exception {Files.createDirectories(evidence);Files.writeString(evidence.resolve(file),value,StandardCharsets.UTF_8);}
     @BeforeAll void setup() throws Exception {
         if(!schema.matches("planlock_f80_[0-9a-f]{32}")) throw new IllegalStateException("Unsafe schema");
-        try(var c=connection("jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true");var s=c.createStatement()) {s.execute("CREATE DATABASE "+schema+" CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");owned=true;}
+        try(var c=connection(TestDatabase.url(""));var s=c.createStatement()) {s.execute("CREATE DATABASE "+schema+" CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");owned=true;}
         try {
             record(schema+"-ownership.txt","Created only "+schema+"\n");
             app=new SpringApplication(PlanLockApplication.class).run("--spring.profiles.active=f37","--server.port=0","--spring.datasource.url="+url(),"--spring.datasource.username="+System.getenv("F37_DB_USER"),"--spring.datasource.password="+System.getenv("F37_DB_PASSWORD"));
@@ -50,7 +50,7 @@ class CreationIdempotencyTest {
     }
     @AfterAll void cleanup() throws Exception {
         if(app!=null){app.close();app=null;}
-        if(owned){try(var c=connection("jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true");var s=c.createStatement()){s.execute("DROP DATABASE "+schema);owned=false;}record(schema+"-cleanup.txt","Dropped only owned schema "+schema+"\n");}
+        if(owned){try(var c=connection(TestDatabase.url(""));var s=c.createStatement()){s.execute("DROP DATABASE "+schema);owned=false;}record(schema+"-cleanup.txt","Dropped only owned schema "+schema+"\n");}
     }
     private String planJson(String key){return "{\"name\":\"offline plan\",\"type\":\"学习\",\"startTime\":\"08:00:00\",\"endTime\":\"09:00:00\""+(key==null?"":",\"clientId\":\""+key+"\"")+"}";}
     private String scheduleJson(String key){return "{\"title\":\"offline schedule\",\"startDate\":\"2026-10-09\",\"endDate\":\"2026-10-09\",\"allDay\":true"+(key==null?"":",\"clientId\":\""+key+"\"")+"}";}

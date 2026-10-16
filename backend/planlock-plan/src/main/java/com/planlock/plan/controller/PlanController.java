@@ -49,8 +49,9 @@ public class PlanController {
     }
 
     @DeleteMapping("/{id}")
-    public ApiResponse<Void> delete(@PathVariable Long id) {
-        planService.delete(UserContext.userId(), id);
+    public ApiResponse<Void> delete(@PathVariable Long id,
+                                    @RequestParam(required = false) Long baseVersion) {
+        planService.delete(UserContext.userId(), id, baseVersion);
         return ApiResponse.ok();
     }
 

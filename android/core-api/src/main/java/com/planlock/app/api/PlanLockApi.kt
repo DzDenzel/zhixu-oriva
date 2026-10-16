@@ -82,7 +82,7 @@ interface PlanLockApi {
     ): ApiResponse<PlanDto>
 
     @DELETE("plans/{id}")
-    suspend fun deletePlan(@Path("id") id: Long): ApiResponse<Unit>
+    suspend fun deletePlan(@Path("id") id: Long, @Query("baseVersion") baseVersion: Long? = null): ApiResponse<Unit>
 
     @POST("plans/{id}/pause")
     suspend fun pausePlan(@Path("id") id: Long): ApiResponse<PlanDto>
@@ -90,7 +90,7 @@ interface PlanLockApi {
     @GET("schedules") suspend fun schedules(): ApiResponse<List<ScheduleDto>>
     @POST("schedules") suspend fun createSchedule(@Body req: ScheduleUpsertRequest): ApiResponse<ScheduleDto>
     @PUT("schedules/{id}") suspend fun updateSchedule(@Path("id") id: Long,@Query("baseVersion") baseVersion: Long,@Body req: ScheduleUpsertRequest): ApiResponse<ScheduleDto>
-    @DELETE("schedules/{id}") suspend fun deleteSchedule(@Path("id") id: Long): ApiResponse<Unit>
+    @DELETE("schedules/{id}") suspend fun deleteSchedule(@Path("id") id: Long, @Query("baseVersion") baseVersion: Long? = null): ApiResponse<Unit>
 
     @GET("plans/{id}/strategy")
     suspend fun strategy(@Path("id") planId: Long): ApiResponse<StrategyDto>

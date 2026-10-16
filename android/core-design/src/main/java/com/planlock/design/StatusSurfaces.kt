@@ -22,7 +22,7 @@ fun StatusCard(
     actions: @Composable () -> Unit,
 ) {
     Surface(modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerLow) {
+        color = InkTone.raised) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -63,7 +63,8 @@ fun StatusActionRow(
 /** Reserve the same header geometry when a continuing status appears or disappears. */
 @Composable
 fun StatusRegion(content: @Composable () -> Unit) {
-    Box(Modifier.width(128.dp).height(48.dp), contentAlignment = Alignment.CenterEnd) { content() }
+    // 最小宽度固定，保证状态出现 / 消失时页头不跳；同步失败胶囊展开时可略宽
+    Box(Modifier.widthIn(min = 128.dp).height(48.dp), contentAlignment = Alignment.CenterEnd) { content() }
 }
 
 @Composable

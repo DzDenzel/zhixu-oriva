@@ -58,8 +58,8 @@ object TokenStore {
     val guestUserId get() = session.guestUserId
     val signedIn get() = session.signedIn
     val hasSession get() = session.usable
-    val canRegisterDevice get() = !state.value.signedOut
-    val canSync get() = hasSession && !state.value.signedOut && !state.value.ownershipMismatch
+    val canRegisterDevice get() = ConnectionStore.state.value.config != null && !state.value.signedOut && !state.value.ownershipMismatch
+    val canSync get() = ConnectionStore.state.value.config != null && hasSession && !state.value.signedOut && !state.value.ownershipMismatch
     val localDataUserId get() = state.value.localDataUserId
 
     private val tokenKey = stringPreferencesKey("token")
@@ -69,8 +69,10 @@ object TokenStore {
     private val signedInKey = booleanPreferencesKey("signed_in")
     private val signedOutKey = booleanPreferencesKey("auth_signed_out")
     private val dataOwnerKey = longPreferencesKey("auth_data_owner")
+    private val dataOwnerInstanceKey = stringPreferencesKey("auth_data_owner_instance")
 
     suspend fun restore(store: DataStore<Preferences>): AuthValidity = lock.withLock {
+        ConnectionStore.restore(store)
         val p = store.data.first()
         val saved = AuthSession(p[tokenKey], p[userKey], p[deviceKey], p[guestKey], p[signedInKey] ?: false)
         synchronized(stateLock) {
@@ -83,16 +85,25 @@ object TokenStore {
                 else -> AuthValidity.UNKNOWN
             }
             mutableState.value = AuthState(restored, validity, p[signedOutKey] ?: false,
-                p[dataOwnerKey] ?: saved.userId.takeIf { saved.signedIn })
+                p[dataOwnerKey] ?: saved.userId,
+                instanceId = ConnectionStore.state.value.instanceId,
+                dataOwnerInstance = p[dataOwnerInstanceKey] ?: saved.userId?.let { ConnectionConfig.default.instanceId })
             validity
         }
     }
 
-    suspend fun save(store: DataStore<Preferences>, value: AuthSession) = lock.withLock {
+    suspend fun save(store: DataStore<Preferences>, value: AuthSession,
+        expectedConnection: ConnectionState = ConnectionStore.state.value) = lock.withLock {
         require(value.usable) { "不完整的登录身份" }
+        check(expectedConnection == ConnectionStore.state.value && expectedConnection.config != null) { "连接已改变，请重新登录" }
+        val instance = checkNotNull(expectedConnection.instanceId)
         val committed = store.edit { p ->
-            val owner = p[dataOwnerKey] ?: p[userKey].takeIf { p[signedInKey] == true }
-                ?: value.userId.takeIf { value.signedIn }
+            val oldInstance = p[dataOwnerInstanceKey] ?: p[userKey]?.let { ConnectionConfig.default.instanceId }
+            check(oldInstance == null || oldInstance == instance) { "本机数据属于原实例，请连接原实例恢复同步" }
+            val retainedOwner = p[dataOwnerKey] ?: p[userKey]
+            val owner = if (value.signedIn && value.guestUserId != null && retainedOwner == value.guestUserId) {
+                value.userId // Existing backend-confirmed guest merge, within this instance only.
+            } else retainedOwner ?: value.userId
             p[tokenKey] = checkNotNull(value.token)
             p[userKey] = checkNotNull(value.userId)
             p[deviceKey] = checkNotNull(value.deviceId)
@@ -100,12 +111,13 @@ object TokenStore {
             p[signedInKey] = value.signedIn
             p[signedOutKey] = false
             owner?.let { p[dataOwnerKey] = it }
+            p[dataOwnerInstanceKey] = oldInstance ?: instance
         }
         // 成功落盘后一次性发布，避免请求看到半份身份或虚假的登录成功。
         synchronized(stateLock) {
             mutableState.value = AuthState(value,
                 if (jwtExpiredLocally(value.token, System.currentTimeMillis() / 1000)) AuthValidity.EXPIRED_LOCAL else AuthValidity.UNKNOWN,
-                dataOwner = committed[dataOwnerKey])
+                dataOwner = committed[dataOwnerKey], instanceId = instance, dataOwnerInstance = committed[dataOwnerInstanceKey])
         }
     }
 
@@ -114,12 +126,40 @@ object TokenStore {
         val committed = store.edit { p ->
             val owner = p[dataOwnerKey] ?: p[userKey].takeIf { p[signedInKey] == true }
             owner?.let { p[dataOwnerKey] = it }
+            state.value.dataOwnerInstance?.let { p[dataOwnerInstanceKey] = it }
             p.remove(tokenKey); p.remove(userKey); p.remove(deviceKey); p.remove(signedInKey)
             p[signedOutKey] = true
         }
         synchronized(stateLock) {
             mutableState.value = AuthState(AuthSession(guestUserId = committed[guestKey]),
-                signedOut = true, dataOwner = committed[dataOwnerKey])
+                signedOut = true, dataOwner = committed[dataOwnerKey], instanceId = ConnectionStore.state.value.instanceId,
+                dataOwnerInstance = committed[dataOwnerInstanceKey] ?: state.value.dataOwnerInstance)
+        }
+    }
+
+    /** Caller also holds AppSync's session lock, so no old-instance transfer can overlap this commit. */
+    suspend fun changeConnection(store: DataStore<Preferences>, next: ConnectionConfig?) = lock.withLock {
+        val config = next?.validated()
+        val previous = ConnectionStore.state.value
+        val switched = previous.instanceId != config?.instanceId
+        val committed = store.edit { p ->
+            if (switched) {
+                val owner = p[dataOwnerKey] ?: p[userKey]
+                val mustLogin = p[signedOutKey] == true || p[signedInKey] == true
+                owner?.let { p[dataOwnerKey] = it }
+                if (owner != null && p[dataOwnerInstanceKey] == null) {
+                    (state.value.dataOwnerInstance ?: previous.instanceId)?.let { p[dataOwnerInstanceKey] = it }
+                }
+                p.remove(tokenKey); p.remove(userKey); p.remove(deviceKey); p.remove(guestKey); p.remove(signedInKey)
+                p[signedOutKey] = mustLogin
+            }
+            p[ConnectionStore.localOnlyKey] = config == null
+            config?.let { p[ConnectionStore.configKey] = it.encode() } ?: p.remove(ConnectionStore.configKey)
+        }
+        synchronized(stateLock) {
+            if (switched) mutableState.value = AuthState(signedOut = committed[signedOutKey] ?: false, dataOwner = committed[dataOwnerKey],
+                instanceId = config?.instanceId, dataOwnerInstance = committed[dataOwnerInstanceKey])
+            ConnectionStore.publish(config)
         }
     }
 

@@ -1,27 +1,24 @@
 package com.planlock.design
 
-import android.os.Build
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialExpressiveTheme
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.getValue
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -31,14 +28,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.shape.RoundedCornerShape
 
 object PlanLockColors {
     val Brand = V2Tokens.brand
     val BrandContainer = V2Tokens.brandContainer
-    val Executing = V2Tokens.brand
+    val Executing = Ink.vermilion
     val Upcoming = V2Tokens.upcoming
     val Paused = V2Tokens.paused
     val Completed = V2Tokens.completed
@@ -46,53 +42,132 @@ object PlanLockColors {
     val Warning = V2Tokens.unlock
 }
 
+/** 宣纸：墨为主色，朱为强调（secondary），青为第三色。 */
 private val LightColors = lightColorScheme(
-    primary = PlanLockColors.Brand,
-    onPrimary = V2Tokens.onBrand,
-    primaryContainer = PlanLockColors.BrandContainer,
-    onPrimaryContainer = V2Tokens.onBrandContainer,
-    secondary = Color(0xFF4C635B),
-    tertiary = Color(0xFF3F6374),
-    error = PlanLockColors.Danger,
-    background = V2Tokens.light.surface,
-    onBackground = V2Tokens.light.text,
-    surface = V2Tokens.light.surface,
-    onSurface = V2Tokens.light.text,
-    surfaceVariant = V2Tokens.light.surfaceContainer,
-    onSurfaceVariant = V2Tokens.light.muted,
-    surfaceContainerLowest = Color.White,
-    surfaceContainerLow = V2Tokens.light.surfaceLow,
+    primary = Ink.ink,
+    onPrimary = Ink.paperRaised,
+    primaryContainer = Color(0xFFE4DCCB),
+    onPrimaryContainer = Ink.ink,
+    inversePrimary = Ink.moon,
+    secondary = Ink.vermilion,
+    onSecondary = Color(0xFFFFF6EE),
+    secondaryContainer = V2Tokens.brandContainer,
+    onSecondaryContainer = V2Tokens.onBrandContainer,
+    tertiary = Ink.jade,
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFD5E8DE),
+    onTertiaryContainer = Color(0xFF0B2C21),
+    error = Ink.crimson,
+    onError = Color.White,
+    errorContainer = Color(0xFFF4D5D3),
+    onErrorContainer = Color(0xFF410008),
+    background = Ink.paper,
+    onBackground = Ink.ink,
+    surface = Ink.paper,
+    onSurface = Ink.ink,
+    surfaceVariant = Ink.paperSunk,
+    onSurfaceVariant = Ink.inkSoft,
+    surfaceTint = Color.Transparent,
+    inverseSurface = Ink.ink,
+    inverseOnSurface = Ink.paper,
+    surfaceBright = Ink.paperRaised,
+    surfaceDim = Ink.paperDeep,
+    surfaceContainerLowest = Color(0xFFFFFDF9),
+    surfaceContainerLow = Ink.paperRaised,
     surfaceContainer = V2Tokens.light.surfaceContainer,
-    surfaceContainerHigh = V2Tokens.light.surfaceHigh,
-    surfaceContainerHighest = V2Tokens.light.surfaceHighest,
-    outline = V2Tokens.light.outline,
-    outlineVariant = V2Tokens.light.outlineVariant,
+    surfaceContainerHigh = Ink.paperSunk,
+    surfaceContainerHighest = Ink.paperDeep,
+    outline = Ink.inkFaint,
+    outlineVariant = Ink.hairline,
+    scrim = Color(0xFF0E1210),
 )
 
+/** 夜墨：月白为主色，亮朱为强调。 */
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFF8DD7BD),
-    onPrimary = Color(0xFF00382A),
-    primaryContainer = Color(0xFF07513F),
-    onPrimaryContainer = Color(0xFFA7F3D0),
-    secondary = Color(0xFFB3CCC1),
-    tertiary = Color(0xFFA7CDDF),
-    error = Color(0xFFFFB4AB),
-    background = V2Tokens.dark.surface,
-    onBackground = V2Tokens.dark.text,
-    surface = V2Tokens.dark.surface,
-    onSurface = V2Tokens.dark.text,
-    surfaceVariant = V2Tokens.dark.surfaceContainer,
-    onSurfaceVariant = V2Tokens.dark.muted,
-    surfaceContainerLowest = Color(0xFF101612),
-    surfaceContainerLow = V2Tokens.dark.surfaceLow,
+    primary = Ink.moon,
+    onPrimary = Ink.night,
+    primaryContainer = Color(0xFF2E3531),
+    onPrimaryContainer = Ink.moon,
+    inversePrimary = Ink.ink,
+    secondary = Ink.vermilionNight,
+    onSecondary = Color(0xFF3A0B02),
+    secondaryContainer = Color(0xFF4A2117),
+    onSecondaryContainer = Color(0xFFFFDBD0),
+    tertiary = Ink.jadeNight,
+    onTertiary = Color(0xFF00382A),
+    tertiaryContainer = Color(0xFF16302A),
+    onTertiaryContainer = Color(0xFFBDEBD7),
+    error = Ink.crimsonNight,
+    onError = Color(0xFF5C0010),
+    errorContainer = Color(0xFF3B1A1C),
+    onErrorContainer = Color(0xFFFFDAD6),
+    background = Ink.night,
+    onBackground = Ink.moon,
+    surface = Ink.night,
+    onSurface = Ink.moon,
+    surfaceVariant = Ink.nightHigh,
+    onSurfaceVariant = Ink.moonSoft,
+    surfaceTint = Color.Transparent,
+    inverseSurface = Ink.moon,
+    inverseOnSurface = Ink.night,
+    surfaceBright = Ink.nightHighest,
+    surfaceDim = Ink.nightSunk,
+    surfaceContainerLowest = Ink.nightSunk,
+    surfaceContainerLow = Ink.nightRaised,
     surfaceContainer = V2Tokens.dark.surfaceContainer,
-    surfaceContainerHigh = V2Tokens.dark.surfaceHigh,
-    surfaceContainerHighest = V2Tokens.dark.surfaceHighest,
-    outline = V2Tokens.dark.outline,
-    outlineVariant = V2Tokens.dark.outlineVariant,
+    surfaceContainerHigh = Ink.nightHigh,
+    surfaceContainerHighest = Ink.nightHighest,
+    outline = Ink.moonFaint,
+    outlineVariant = Ink.nightHairline,
+    scrim = Color.Black,
 )
 
 internal fun brandColorScheme(dark: Boolean): ColorScheme = if (dark) DarkColors else LightColors
+
+/** 非墨序主题：由色板推导 Material 配色，保证系统组件（开关、对话框、输入框）与主题一致。 */
+internal fun paletteColorScheme(p: InkPalette): ColorScheme {
+    val base = if (p.isDark) darkColorScheme() else lightColorScheme()
+    return base.copy(
+        primary = p.text, onPrimary = p.raised, primaryContainer = p.highest, onPrimaryContainer = p.text,
+        inversePrimary = p.raised,
+        secondary = p.accent, onSecondary = p.onAccent,
+        secondaryContainer = p.accent.copy(alpha = if (p.isDark) .28f else .16f).compositeOver(p.raised),
+        onSecondaryContainer = p.text,
+        tertiary = p.jade, onTertiary = p.onAccent,
+        tertiaryContainer = p.jade.copy(alpha = .2f).compositeOver(p.raised), onTertiaryContainer = p.text,
+        error = p.crimson, onError = if (p.isDark) p.ground else Color.White,
+        errorContainer = p.crimson.copy(alpha = .18f).compositeOver(p.raised), onErrorContainer = p.text,
+        background = p.ground, onBackground = p.text,
+        surface = p.ground, onSurface = p.text,
+        surfaceVariant = p.sunk, onSurfaceVariant = p.soft,
+        surfaceTint = Color.Transparent,
+        inverseSurface = p.inverse, inverseOnSurface = p.onInverse,
+        surfaceBright = p.raised, surfaceDim = p.sunk,
+        surfaceContainerLowest = p.raised, surfaceContainerLow = p.raised,
+        surfaceContainer = p.raised, surfaceContainerHigh = p.high, surfaceContainerHighest = p.highest,
+        outline = p.faint, outlineVariant = p.hairline,
+        scrim = Color.Black,
+    )
+}
+
+/** 按色板换字体：衬线位换成主题标题字体，正文位换成主题正文字体（若有）。 */
+private fun themedTypography(p: InkPalette): Typography {
+    if (p.display == FontFamily.Serif && p.body == null && p.meta == FontFamily.Monospace) return PlanTypography
+    fun TextStyle.swap(): TextStyle = when (fontFamily) {
+        FontFamily.Serif -> copy(fontFamily = p.display)
+        FontFamily.Monospace -> copy(fontFamily = p.meta)
+        null -> if (p.body != null) copy(fontFamily = p.body) else this
+        else -> this
+    }
+    val t = PlanTypography
+    return Typography(
+        displayLarge = t.displayLarge.swap(), displayMedium = t.displayMedium.swap(), displaySmall = t.displaySmall.swap(),
+        headlineLarge = t.headlineLarge.swap(), headlineMedium = t.headlineMedium.swap(), headlineSmall = t.headlineSmall.swap(),
+        titleLarge = t.titleLarge.swap(), titleMedium = t.titleMedium.swap(), titleSmall = t.titleSmall.swap(),
+        bodyLarge = t.bodyLarge.swap(), bodyMedium = t.bodyMedium.swap(), bodySmall = t.bodySmall.swap(),
+        labelLarge = t.labelLarge.swap(), labelMedium = t.labelMedium.swap(), labelSmall = t.labelSmall.swap(),
+    )
+}
 
 internal data class SecondaryControlColors(
     val accent: Color,
@@ -102,22 +177,26 @@ internal data class SecondaryControlColors(
 )
 
 internal val LocalSecondaryControlColors = staticCompositionLocalOf {
-    SecondaryControlColors(
-        PlanLockColors.Brand,
-        Color.White,
-        PlanLockColors.BrandContainer,
-        Color(0xFF002019),
-    )
+    SecondaryControlColors(Ink.vermilion, Color.White, V2Tokens.brandContainer, V2Tokens.onBrandContainer)
 }
 
+private val serif = Ink.display
 private val PlanTypography = Typography(
+    displayLarge = TextStyle(fontFamily = serif, fontSize = 52.sp, lineHeight = 58.sp, fontWeight = FontWeight.Bold),
+    displayMedium = TextStyle(fontFamily = serif, fontSize = 42.sp, lineHeight = 48.sp, fontWeight = FontWeight.Bold),
+    displaySmall = TextStyle(fontFamily = serif, fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.Bold),
+    headlineLarge = TextStyle(fontFamily = serif, fontSize = 30.sp, lineHeight = 38.sp, fontWeight = FontWeight.Bold),
     headlineMedium = V2Tokens.headlineMedium,
+    headlineSmall = TextStyle(fontFamily = serif, fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Bold),
     titleLarge = V2Tokens.titleLarge,
     titleMedium = V2Tokens.titleMedium,
+    titleSmall = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
     bodyLarge = V2Tokens.bodyLarge,
     bodyMedium = V2Tokens.bodyMedium,
+    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 18.sp),
     labelLarge = V2Tokens.labelLarge,
     labelMedium = V2Tokens.labelMedium,
+    labelSmall = TextStyle(fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium, letterSpacing = .4.sp),
 )
 
 private val PlanShapes = Shapes(
@@ -125,14 +204,18 @@ private val PlanShapes = Shapes(
     small = RoundedCornerShape(V2Tokens.shapeSm),
     medium = RoundedCornerShape(V2Tokens.shapeMd),
     large = RoundedCornerShape(V2Tokens.shapeLg),
-    extraLarge = RoundedCornerShape(V2Tokens.shapeXl)
+    extraLarge = RoundedCornerShape(V2Tokens.shapeXl),
 )
 
+/**
+ * dynamicColor 参数保留以兼容调用方；v3.0 起不再采用系统取色——「墨序」的印色是品牌本身，
+ * 跟随壁纸会把朱印变成别的颜色。
+ */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun PlanLockTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
-    dynamicColor: Boolean = true,
+    @Suppress("UNUSED_PARAMETER") dynamicColor: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
@@ -146,64 +229,63 @@ fun PlanLockTheme(
         context.contentResolver.registerContentObserver(Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE), false, observer)
         onDispose { context.contentResolver.unregisterContentObserver(observer) }
     }
-    val darkTheme = themeMode.isDark(isSystemInDarkTheme())
-    val colors = brandColorScheme(darkTheme)
-    val secondaryColors = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        else -> colors
-    }
-    // 在同一棵 UI 上混合色板，避免主题 Crossfade 重建导航或重复发起业务请求。
+    val style = ThemeStyleStore.current
+    val darkTheme = style.isDark(themeMode, isSystemInDarkTheme())
+    val targetPalette = InkPalettes.of(style, darkTheme)
+    // 墨序沿用经过验收的配色靶值；其他主题由色板推导
+    val colors = if (style == ThemeStyle.INK) brandColorScheme(darkTheme) else paletteColorScheme(targetPalette)
+    // 在同一棵 UI 上混合色板（「墨入纸」420ms），避免主题 Crossfade 重建导航或重复发起业务请求。
+    val ms = if (reducedMotion) 0 else 420
+    @Composable fun blend(target: Color, label: String) = animateColorAsState(target, tween(ms, easing = Ink.Easing), label = label).value
     val blended = colors.copy(
-        primary = animateColorAsState(colors.primary, tween(if (reducedMotion) 0 else 250), label = "theme-primary").value,
-        onPrimary = animateColorAsState(colors.onPrimary, tween(if (reducedMotion) 0 else 250), label = "theme-onPrimary").value,
-        primaryContainer = animateColorAsState(colors.primaryContainer, tween(if (reducedMotion) 0 else 250), label = "theme-primaryContainer").value,
-        onPrimaryContainer = animateColorAsState(colors.onPrimaryContainer, tween(if (reducedMotion) 0 else 250), label = "theme-onPrimaryContainer").value,
-        inversePrimary = animateColorAsState(colors.inversePrimary, tween(if (reducedMotion) 0 else 250), label = "theme-inversePrimary").value,
-        secondary = animateColorAsState(colors.secondary, tween(if (reducedMotion) 0 else 250), label = "theme-secondary").value,
-        onSecondary = animateColorAsState(colors.onSecondary, tween(if (reducedMotion) 0 else 250), label = "theme-onSecondary").value,
-        secondaryContainer = animateColorAsState(colors.secondaryContainer, tween(if (reducedMotion) 0 else 250), label = "theme-secondaryContainer").value,
-        onSecondaryContainer = animateColorAsState(colors.onSecondaryContainer, tween(if (reducedMotion) 0 else 250), label = "theme-onSecondaryContainer").value,
-        tertiary = animateColorAsState(colors.tertiary, tween(if (reducedMotion) 0 else 250), label = "theme-tertiary").value,
-        onTertiary = animateColorAsState(colors.onTertiary, tween(if (reducedMotion) 0 else 250), label = "theme-onTertiary").value,
-        tertiaryContainer = animateColorAsState(colors.tertiaryContainer, tween(if (reducedMotion) 0 else 250), label = "theme-tertiaryContainer").value,
-        onTertiaryContainer = animateColorAsState(colors.onTertiaryContainer, tween(if (reducedMotion) 0 else 250), label = "theme-onTertiaryContainer").value,
-        background = animateColorAsState(colors.background, tween(if (reducedMotion) 0 else 250), label = "theme-background").value,
-        onBackground = animateColorAsState(colors.onBackground, tween(if (reducedMotion) 0 else 250), label = "theme-onBackground").value,
-        surface = animateColorAsState(colors.surface, tween(if (reducedMotion) 0 else 250), label = "theme-surface").value,
-        onSurface = animateColorAsState(colors.onSurface, tween(if (reducedMotion) 0 else 250), label = "theme-onSurface").value,
-        surfaceVariant = animateColorAsState(colors.surfaceVariant, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceVariant").value,
-        onSurfaceVariant = animateColorAsState(colors.onSurfaceVariant, tween(if (reducedMotion) 0 else 250), label = "theme-onSurfaceVariant").value,
-        surfaceTint = animateColorAsState(colors.surfaceTint, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceTint").value,
-        inverseSurface = animateColorAsState(colors.inverseSurface, tween(if (reducedMotion) 0 else 250), label = "theme-inverseSurface").value,
-        inverseOnSurface = animateColorAsState(colors.inverseOnSurface, tween(if (reducedMotion) 0 else 250), label = "theme-inverseOnSurface").value,
-        error = animateColorAsState(colors.error, tween(if (reducedMotion) 0 else 250), label = "theme-error").value,
-        onError = animateColorAsState(colors.onError, tween(if (reducedMotion) 0 else 250), label = "theme-onError").value,
-        errorContainer = animateColorAsState(colors.errorContainer, tween(if (reducedMotion) 0 else 250), label = "theme-errorContainer").value,
-        onErrorContainer = animateColorAsState(colors.onErrorContainer, tween(if (reducedMotion) 0 else 250), label = "theme-onErrorContainer").value,
-        outline = animateColorAsState(colors.outline, tween(if (reducedMotion) 0 else 250), label = "theme-outline").value,
-        outlineVariant = animateColorAsState(colors.outlineVariant, tween(if (reducedMotion) 0 else 250), label = "theme-outlineVariant").value,
-        scrim = animateColorAsState(colors.scrim, tween(if (reducedMotion) 0 else 250), label = "theme-scrim").value,
-        surfaceBright = animateColorAsState(colors.surfaceBright, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceBright").value,
-        surfaceDim = animateColorAsState(colors.surfaceDim, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceDim").value,
-        surfaceContainer = animateColorAsState(colors.surfaceContainer, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceContainer").value,
-        surfaceContainerHigh = animateColorAsState(colors.surfaceContainerHigh, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceContainerHigh").value,
-        surfaceContainerHighest = animateColorAsState(colors.surfaceContainerHighest, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceContainerHighest").value,
-        surfaceContainerLow = animateColorAsState(colors.surfaceContainerLow, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceContainerLow").value,
-        surfaceContainerLowest = animateColorAsState(colors.surfaceContainerLowest, tween(if (reducedMotion) 0 else 250), label = "theme-surfaceContainerLowest").value
+        primary = blend(colors.primary, "primary"),
+        onPrimary = blend(colors.onPrimary, "onPrimary"),
+        primaryContainer = blend(colors.primaryContainer, "primaryContainer"),
+        onPrimaryContainer = blend(colors.onPrimaryContainer, "onPrimaryContainer"),
+        inversePrimary = blend(colors.inversePrimary, "inversePrimary"),
+        secondary = blend(colors.secondary, "secondary"),
+        onSecondary = blend(colors.onSecondary, "onSecondary"),
+        secondaryContainer = blend(colors.secondaryContainer, "secondaryContainer"),
+        onSecondaryContainer = blend(colors.onSecondaryContainer, "onSecondaryContainer"),
+        tertiary = blend(colors.tertiary, "tertiary"),
+        onTertiary = blend(colors.onTertiary, "onTertiary"),
+        tertiaryContainer = blend(colors.tertiaryContainer, "tertiaryContainer"),
+        onTertiaryContainer = blend(colors.onTertiaryContainer, "onTertiaryContainer"),
+        background = blend(colors.background, "background"),
+        onBackground = blend(colors.onBackground, "onBackground"),
+        surface = blend(colors.surface, "surface"),
+        onSurface = blend(colors.onSurface, "onSurface"),
+        surfaceVariant = blend(colors.surfaceVariant, "surfaceVariant"),
+        onSurfaceVariant = blend(colors.onSurfaceVariant, "onSurfaceVariant"),
+        inverseSurface = blend(colors.inverseSurface, "inverseSurface"),
+        inverseOnSurface = blend(colors.inverseOnSurface, "inverseOnSurface"),
+        error = blend(colors.error, "error"),
+        onError = blend(colors.onError, "onError"),
+        errorContainer = blend(colors.errorContainer, "errorContainer"),
+        onErrorContainer = blend(colors.onErrorContainer, "onErrorContainer"),
+        outline = blend(colors.outline, "outline"),
+        outlineVariant = blend(colors.outlineVariant, "outlineVariant"),
+        surfaceBright = blend(colors.surfaceBright, "surfaceBright"),
+        surfaceDim = blend(colors.surfaceDim, "surfaceDim"),
+        surfaceContainer = blend(colors.surfaceContainer, "surfaceContainer"),
+        surfaceContainerHigh = blend(colors.surfaceContainerHigh, "surfaceContainerHigh"),
+        surfaceContainerHighest = blend(colors.surfaceContainerHighest, "surfaceContainerHighest"),
+        surfaceContainerLow = blend(colors.surfaceContainerLow, "surfaceContainerLow"),
+        surfaceContainerLowest = blend(colors.surfaceContainerLowest, "surfaceContainerLowest"),
     )
+    val palette = animatePalette(targetPalette, ms)
+    val typography = remember(targetPalette.display, targetPalette.body, targetPalette.meta) { themedTypography(targetPalette) }
     CompositionLocalProvider(
+        LocalInkPalette provides palette,
         LocalDarkTheme provides darkTheme,
         LocalReducedMotion provides reducedMotion,
         LocalSecondaryControlColors provides SecondaryControlColors(
-            secondaryColors.primary,
-            secondaryColors.onPrimary,
-            secondaryColors.primaryContainer,
-            secondaryColors.onPrimaryContainer,
+            palette.accent,
+            if (style == ThemeStyle.INK) (if (darkTheme) Color(0xFF3A0B02) else Color.White) else palette.onAccent,
+            colors.secondaryContainer,
+            colors.onSecondaryContainer,
         ),
     ) {
-        MaterialExpressiveTheme(colorScheme = blended, typography = PlanTypography, shapes = PlanShapes, content = content)
+        MaterialExpressiveTheme(colorScheme = blended, typography = typography, shapes = PlanShapes, content = content)
     }
 }

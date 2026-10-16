@@ -1,5 +1,5 @@
 <resources>
-    <!-- Matches V2Tokens.dark.surface and V2Tokens.dark.text. -->
-    <color name="oriva_splash_background">#181F1A</color>
-    <color name="oriva_splash_ink">#E6EAE4</color>
+    <!-- 墨序 v3.0：开屏底色 = Ink.night（夜墨），文字 = Ink.moon。 -->
+    <color name="oriva_splash_background">#0E1210</color>
+    <color name="oriva_splash_ink">#ECE5D8</color>
 </resources>

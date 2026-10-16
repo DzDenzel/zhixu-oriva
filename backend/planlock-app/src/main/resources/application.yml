@@ -1,6 +1,8 @@
 server:
   address: 0.0.0.0
   port: 8080
+  # Source trust is handled only by DeploymentAuthLimiter; never rewrite remoteAddr globally.
+  forward-headers-strategy: none
 
 spring:
   application:
@@ -28,6 +30,12 @@ mybatis:
   type-aliases-package: com.planlock
 
 planlock:
+  version: ${PLANLOCK_VERSION:2.1.0}
+  deployment:
+    enabled: ${PLANLOCK_DEPLOYMENT_ENABLED:false}
+    trusted-proxies: ${PLANLOCK_TRUSTED_PROXIES:}
+    setup-token: ${PLANLOCK_SETUP_TOKEN:}
+    public-plugins-catalog-url: ${PLANLOCK_PUBLIC_PLUGINS_CATALOG_URL:}
   plugins:
     directory: ${PLANLOCK_PLUGIN_DIRECTORY:plugins}
   jwt:
@@ -37,3 +45,5 @@ planlock:
 logging:
   level:
     com.planlock: debug
+    # User insert parameters contain password hashes; never print them in deployment logs.
+    com.planlock.account.mapper: info

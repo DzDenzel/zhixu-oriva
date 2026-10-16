@@ -82,6 +82,13 @@ import com.planlock.design.ThemeMode
 import com.planlock.design.SettingSwitch
 import com.planlock.design.planLockAtmosphere
 import com.planlock.design.PageAtmosphere
+import com.planlock.design.SettingsCaption
+import com.planlock.design.SettingsDivider
+import com.planlock.design.SettingsGroup
+import com.planlock.design.SettingsHero
+import com.planlock.design.SettingsItem
+import com.planlock.design.SettingsStateTag
+import com.planlock.design.SettingsSwitchItem
 import com.planlock.app.security.BackupPasswordStore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -125,9 +132,16 @@ fun SettingsDetailScreen(
     var basicToolsEnabled by remember { mutableStateOf(true) }
     var actionGateEnabled by remember { mutableStateOf(false) }
     var weatherLocation by remember { mutableStateOf<WeatherLocation?>(null) }
+    var hasPassword by remember { mutableStateOf<Boolean?>(null) }
+    // 设备只在「已登录且未退出」时可管理；退出后不展示上一个账号残留的设备快照（v4.1）。
+    val canManageDevices = settingsDevicesManageable(authState)
 
     suspend fun loadDevices() {
         loadingDevices = true
+        if (!settingsDevicesManageable(TokenStore.state.value)) {
+            devices = emptyList(); deviceReadError = null; loadingDevices = false
+            return
+        }
         try {
             devices = sync.cache.read(TokenStore.userId).devices.orEmpty()
             deviceReadError = null
@@ -135,9 +149,10 @@ fun SettingsDetailScreen(
         catch (_: Exception) { deviceReadError = "本机设备快照读取失败，可重试同步" }
         loadingDevices = false
     }
-    LaunchedEffect(syncState.revision) {
+    LaunchedEffect(syncState.revision, canManageDevices) {
         loadDevices()
         weatherLocation = weatherStore.location()
+        hasPassword = runCatching { passwordStore.hasPassword() }.getOrDefault(false)
     }
     LaunchedEffect(context) {
         try {
@@ -167,6 +182,7 @@ fun SettingsDetailScreen(
                     val attempt = loginAttempts.begin()
                     dialogError = null
                     loginJob = scope.launch {
+                        val loginConnection = com.planlock.app.api.ConnectionStore.state.value
                         try {
                             val deviceUid = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "android-dev"
                             val result = try {
@@ -188,7 +204,7 @@ fun SettingsDetailScreen(
                                     val merged = sync.withSessionChange {
                                         if (!loginAttempts.isCurrent(attempt)) throw CancellationException("登录操作已取消")
                                         TokenStore.save(context.planLockPreferences,
-                                            AuthSession(auth.token, auth.userId, auth.deviceId, auth.guestUserId, true))
+                                            AuthSession(auth.token, auth.userId, auth.deviceId, auth.guestUserId, true), loginConnection)
                                         try { auth.guestUserId?.takeIf { TokenStore.canSync }?.let { api.merge(MergeRequest(it)).data?.get("mergedPlans") } }
                                         catch (cancelled: CancellationException) { throw cancelled }
                                         catch (_: Exception) { null }
@@ -216,6 +232,7 @@ fun SettingsDetailScreen(
                     scope.launch {
                         val ok = runCatching { api.setBackupPassword(BackupPasswordSetRequest(password, question, answer)).code == 0 }.getOrDefault(false)
                         if (ok) passwordStore.set(password)
+                        if (ok) hasPassword = true
                         if (ok) feedback("备用密码已设置") else dialogError = "设置失败，请检查输入或网络"
                         if (ok) dialog = null
                     }
@@ -229,6 +246,7 @@ fun SettingsDetailScreen(
                         val request = BackupPasswordResetRequest(account, code = credential.takeIf { useCode }, securityAnswer = credential.takeUnless { useCode }, newBackupPassword = password)
                         val ok = runCatching { api.resetBackupPassword(request).code == 0 }.getOrDefault(false)
                         if (ok) passwordStore.set(password)
+                        if (ok) hasPassword = true
                         if (ok) feedback("备用密码已重置") else dialogError = "重置失败，请检查验证码或密保答案"
                         if (ok) dialog = null
                     }
@@ -262,10 +280,9 @@ fun SettingsDetailScreen(
         modifier = Modifier.planLockAtmosphere(PageAtmosphere.QUIET),
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = { com.planlock.design.InkSnackbarHost(snackbar) },
         topBar = {
-            TopAppBar(
-                title = { Text(domain.title) },
+            TopAppBar(colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent), title = {},
                 navigationIcon = {
                     androidx.compose.material3.IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
@@ -279,16 +296,69 @@ fun SettingsDetailScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            val mark = settingsMark(domain)
+            item {
+                when (domain) {
+                    SettingsDomain.THEME -> com.planlock.design.ThemeStyleStore.current.let { style ->
+                        SettingsHero(mark.glyph, mark.hue, domain.title, style.label, true, style.motto)
+                    }
+                    SettingsDomain.BASIC_TOOLS -> SettingsHero(mark.glyph, mark.hue, domain.title,
+                        if (basicToolsEnabled) "已开启" else "已关闭", basicToolsEnabled, "常用工具不计入分心")
+                    SettingsDomain.WEATHER -> SettingsHero(mark.glyph, mark.hue, domain.title,
+                        if (weatherLocation == null) "未设置" else "已设置", weatherLocation != null,
+                        weatherLocation?.displayName ?: "未设置时今日页不显示天气")
+                    SettingsDomain.ACCOUNT -> SettingsHero(mark.glyph, mark.hue, domain.title, accountUi.title,
+                        authState.session.signedIn && !authState.signedOut && !authState.expired && !authState.ownershipMismatch,
+                        accountUi.description)
+                    SettingsDomain.PASSWORD -> SettingsHero(mark.glyph, mark.hue, domain.title,
+                        when (hasPassword) { null -> "读取中"; true -> "已设置"; false -> "未设置" }, hasPassword == true,
+                        if (actionGateEnabled) "执行期确认已开启" else "执行期确认未开启")
+                    SettingsDomain.DEVICES -> SettingsHero(mark.glyph, mark.hue, domain.title,
+                        when { !canManageDevices -> "未登录"; loadingDevices -> "读取中"; else -> "${devices.size} 台" },
+                        canManageDevices, if (canManageDevices) "已关联到当前账号的设备" else "登录后可查看和管理")
+                    SettingsDomain.PLUGINS, SettingsDomain.CONNECTION -> SettingsHero(mark.glyph, mark.hue, domain.title)
+                }
+            }
             when (domain) {
-                SettingsDomain.THEME -> item {
-                    SettingsCard {
-                        Text("主题模式", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        ChoiceChips(ThemeMode.entries.map { it to it.label }, themeMode, onThemeModeChange)
+                SettingsDomain.THEME -> {
+                    item {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SettingsCaption("主题")
+                        SettingsGroup {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                com.planlock.design.ThemeStyleCards(inkDark = themeMode.isDark(androidx.compose.foundation.isSystemInDarkTheme()))
+                                Text("每套主题有自己的底色、字体与背景；切换时颜色渐变，不会重新加载页面。",
+                                    style = com.planlock.design.InkText.meta, color = com.planlock.design.InkTone.faint)
+                            }
+                        }
+                        }
+                    }
+                    if (com.planlock.design.ThemeStyleStore.current == com.planlock.design.ThemeStyle.INK) {
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            SettingsCaption("墨序 · 明暗")
+                            SettingsGroup {
+                                Column(Modifier.padding(14.dp)) { com.planlock.design.ThemeSwatches(themeMode, onThemeModeChange) }
+                            }
+                            }
+                        }
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            SettingsCaption("墨序 · 背景")
+                            SettingsGroup {
+                                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    com.planlock.design.BackdropSwatches()
+                                    Text("背景铺在整个应用之下，切换页面时保持不动；晨雾会缓慢飘移，系统减弱动画时静止。",
+                                        style = com.planlock.design.InkText.meta, color = com.planlock.design.InkTone.faint)
+                                }
+                            }
+                            }
+                        }
                     }
                 }
                 SettingsDomain.BASIC_TOOLS -> item {
-                    SettingsCard {
-                        SettingSwitch("基础工具默认不计入分心", "保留常用工具；系统必要功能始终不计入分心", basicToolsEnabled) { enabled ->
+                    SettingsGroup {
+                        SettingsSwitchItem("基础工具默认不计入分心", "保留常用工具；系统必要功能始终不计入分心", basicToolsEnabled) { enabled ->
                             scope.launch {
                                 try {
                                     context.planLockPreferences.edit { it[PlanLockPreferenceKeys.basicToolsEnabled] = enabled }
@@ -302,63 +372,88 @@ fun SettingsDetailScreen(
                     }
                 }
                 SettingsDomain.WEATHER -> item {
-                    SettingsCard {
-                        CompactInfoRow("天气城市", weatherLocation?.displayName ?: "未设置时今日页不显示天气")
-                        Button(onClick = { dialog = Dialog.WEATHER_CITY }) { Text(if (weatherLocation == null) "设置城市" else "更改城市") }
+                    SettingsGroup {
+                        SettingsItem(
+                            title = if (weatherLocation == null) "设置城市" else "更改城市",
+                            detail = weatherLocation?.let { "当前：${it.displayName}" } ?: "搜索城市名称，今日页显示当地天气",
+                            onClick = { dialog = Dialog.WEATHER_CITY },
+                        )
                     }
                 }
                 SettingsDomain.ACCOUNT -> item {
-                    StatusCard(accountUi.title, accountUi.description) {
-                        StatusActionRow(
-                            primaryLabel = accountUi.loginLabel.takeIf { it.isNotEmpty() },
-                            onPrimary = { dialog = Dialog.LOGIN },
-                            secondaryLabel = if (accountUi.showSignOut) "退出登录" else null,
-                            onSecondary = {
-                            loginAttempts.invalidate()
-                            loginJob?.cancel()
-                            scope.launch {
-                                try {
-                                    sync.withSessionChange { TokenStore.signOut(context.planLockPreferences) }
-                                    feedback("已退出登录，本地数据已保留")
-                                } catch (cancelled: CancellationException) { throw cancelled }
-                                catch (_: Exception) { feedback("退出登录保存失败，请重试") }
-                            }
-                            },
-                        )
+                    if (accountUi.loginLabel.isNotEmpty() || accountUi.showSignOut) SettingsGroup {
+                        if (accountUi.loginLabel.isNotEmpty()) {
+                            SettingsItem(accountUi.loginLabel, "手机号或邮箱，密码或验证码", onClick = { dialog = Dialog.LOGIN })
+                        }
+                        if (accountUi.loginLabel.isNotEmpty() && accountUi.showSignOut) SettingsDivider(inset = 14.dp)
+                        if (accountUi.showSignOut) {
+                            SettingsItem("退出登录", "本地计划与记录会保留", titleColor = MaterialTheme.colorScheme.error, onClick = {
+                                loginAttempts.invalidate()
+                                loginJob?.cancel()
+                                scope.launch {
+                                    try {
+                                        sync.withSessionChange { TokenStore.signOut(context.planLockPreferences) }
+                                        feedback("已退出登录，本地数据已保留")
+                                    } catch (cancelled: CancellationException) { throw cancelled }
+                                    catch (_: Exception) { feedback("退出登录保存失败，请重试") }
+                                }
+                            })
+                        }
                     }
                 }
-                SettingsDomain.PASSWORD -> item {
-                    SettingsCard {
-                        Text("用于敏感操作确认；执行期确认默认关闭。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        SettingSwitch("执行期动作确认", "开启后，执行期间暂停、编辑或删除计划需要备用密码", actionGateEnabled) { enabled ->
-                            scope.launch {
-                                runCatching { context.planLockPreferences.edit { it[PlanLockPreferenceKeys.actionGateEnabled] = enabled } }
-                                    .onFailure { feedback("动作确认设置保存失败，请重试") }
+                SettingsDomain.PASSWORD -> {
+                    item {
+                        SettingsGroup {
+                            SettingsSwitchItem(
+                                "执行期动作确认",
+                                if (hasPassword == false) "需先设置备用密码；开启后，执行期间暂停、编辑或删除计划需要输入"
+                                else "开启后，执行期间暂停、编辑或删除计划需要备用密码",
+                                actionGateEnabled,
+                            ) { enabled ->
+                                scope.launch {
+                                    runCatching { context.planLockPreferences.edit { it[PlanLockPreferenceKeys.actionGateEnabled] = enabled } }
+                                        .onFailure { feedback("动作确认设置保存失败，请重试") }
+                                }
                             }
                         }
-                        StatusActionRow(primaryLabel = "设置密码", onPrimary = { dialog = Dialog.SET_PASSWORD },
-                            secondaryLabel = "重置密码", onSecondary = { dialog = Dialog.RESET_PASSWORD })
+                    }
+                    item {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SettingsCaption("密码")
+                        SettingsGroup {
+                            if (hasPassword == true) {
+                                SettingsItem("修改备用密码", "设置一个新的 4–16 位密码", onClick = { dialog = Dialog.SET_PASSWORD })
+                                SettingsDivider(inset = 14.dp)
+                                SettingsItem("忘记密码", "通过验证码或密保问题重置", onClick = { dialog = Dialog.RESET_PASSWORD })
+                            } else {
+                                SettingsItem("设置备用密码", "4–16 位，用于敏感操作确认", onClick = { dialog = Dialog.SET_PASSWORD })
+                                SettingsDivider(inset = 14.dp)
+                                SettingsItem("已在其他设备设置过", "通过验证码或密保问题重置后在本机使用", onClick = { dialog = Dialog.RESET_PASSWORD })
+                            }
+                        }
+                        }
                     }
                 }
                 SettingsDomain.DEVICES -> {
-                    item {
-                        SettingsCard {
-                            GroupHeader("已关联设备", if (loadingDevices) "读取中" else "${devices.size} 台")
-                            when {
-                                loadingDevices -> Text("正在读取设备…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                devices.isEmpty() -> CompactInfoRow("暂无可管理设备", "登录并联网后可查看和管理设备")
-                            }
+                    if (!canManageDevices) item {
+                        SettingsGroup {
+                            SettingsItem("登录账号", "登录并联网后可查看和管理已关联设备", onClick = { dialog = Dialog.LOGIN })
+                        }
+                    } else {
+                        item { SettingsCaption(if (loadingDevices) "正在读取设备…" else "已关联设备") }
+                        if (!loadingDevices && devices.isEmpty()) item {
+                            SettingsGroup { SettingsItem("暂无可管理设备", "联网同步后会显示在这里") }
+                        }
+                        if (!loadingDevices) items(devices, key = { it.id }) { device ->
+                            DeviceRow(
+                                device,
+                                onPrimary = { scope.launch { runCatching { api.setPrimaryDevice(device.id) }; sync.coordinator.refresh()?.join(); loadDevices() } },
+                                onUnbind = { scope.launch { runCatching { api.unbindDevice(device.id) }; sync.coordinator.refresh()?.join(); loadDevices() } },
+                            )
                         }
                     }
-                    if (!loadingDevices) items(devices, key = { it.id }) { device ->
-                        DeviceRow(
-                            device,
-                            onPrimary = { scope.launch { runCatching { api.setPrimaryDevice(device.id) }; sync.coordinator.refresh()?.join(); loadDevices() } },
-                            onUnbind = { scope.launch { runCatching { api.unbindDevice(device.id) }; sync.coordinator.refresh()?.join(); loadDevices() } },
-                        )
-                    }
                 }
-                SettingsDomain.PLUGINS -> Unit
+                SettingsDomain.PLUGINS, SettingsDomain.CONNECTION -> Unit
             }
             (if (domain == SettingsDomain.DEVICES) deviceReadError else preferencesReadError)?.let {
                 item { PersistentStatus("设置读取异常 · 详情", it) }
@@ -406,19 +501,24 @@ private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     PresentationCard(content = content)
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DeviceRow(device: DeviceDto, onPrimary: () -> Unit, onUnbind: () -> Unit) {
-    SettingsCard {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column(Modifier.weight(1f)) { Text(device.deviceName ?: "未命名设备", style = MaterialTheme.typography.titleMedium); Text(devicePlatformLabel(device.platform), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            Text(if (device.online == true) "在线" else "离线", color = if (device.online == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (device.isPrimary == true) Text("主设备", color = MaterialTheme.colorScheme.primary)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (device.isPrimary != true) OutlinedButton(onClick = onPrimary, modifier = Modifier.heightIn(min = 48.dp)) { Text("设为主设备") }
-            OutlinedButton(onClick = onUnbind, modifier = Modifier.heightIn(min = 48.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("解绑") }
+    val online = device.online == true
+    val primary = device.isPrimary == true
+    SettingsGroup {
+        SettingsItem(
+            title = device.deviceName ?: "未命名设备",
+            detail = devicePlatformLabel(device.platform) + if (primary) " · 主设备" else "",
+            glyph = if (primary) "主" else "机",
+            hue = if (primary) com.planlock.design.InkHue.seal else com.planlock.design.InkHue.amber,
+            trailing = { SettingsStateTag(if (online) "在线" else "离线", online) },
+        )
+        SettingsDivider(inset = 14.dp)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp), horizontalArrangement = Arrangement.End) {
+            if (!primary) TextButton(onClick = onPrimary, modifier = Modifier.heightIn(min = 48.dp)) { Text("设为主设备") }
+            TextButton(onClick = onUnbind, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text("解绑", color = MaterialTheme.colorScheme.error)
+            }
         }
     }
 }

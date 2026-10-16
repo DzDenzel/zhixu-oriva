@@ -61,6 +61,12 @@ import com.planlock.plugin.projectContributions
 import com.planlock.plugin.visibleContributions
 import com.planlock.design.rememberPermissionPresentation
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.heightIn
+import com.planlock.design.InkLedger
+import com.planlock.design.InkText
+import com.planlock.design.InkTone
+import com.planlock.design.PageAtmosphere
+import com.planlock.design.planLockAtmosphere
 import com.planlock.app.api.ApiClient
 import com.planlock.app.api.planLockPreferences
 import com.planlock.app.engine.executionHaptic
@@ -183,11 +189,14 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
     }
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
+        modifier = Modifier.planLockAtmosphere(PageAtmosphere.QUIET),
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        snackbarHost = { com.planlock.design.InkSnackbarHost(snackbar) },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
         TopAppBar(
-            title = { Text("计划详情") },
+            colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
+            title = { Text("计划详情", style = MaterialTheme.typography.titleLarge) },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
             actions = { IconButton(onClick = onEdit) { Icon(Icons.Filled.Edit, "编辑") } },
             windowInsets = WindowInsets(0, 0, 0, 0),
@@ -218,7 +227,7 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
                             PlanCard(value.toCardData(if (value.status == 1) PlanVisualState.UPCOMING else PlanVisualState.PAUSED), onClick = onEdit, sharedKey = "plan-${value.id}")
                         }
                     }
-                    item { DetailSection("基本信息", listOf("类型" to value.type, "重复" to repeatLabel(value.repeatRule), "提醒" to (value.remindAdvanceMin?.let { "提前 $it 分钟" } ?: "未设置"), "跨天" to if ((PlanTime.minutesOfDay(value.endTime) ?: 0) <= (PlanTime.minutesOfDay(value.startTime) ?: 0)) "是" else "否")) }
+                    item { DetailSection("基本信息", latin = "PROFILE", rows =  listOf("类型" to value.type, "重复" to repeatLabel(value.repeatRule), "提醒" to (value.remindAdvanceMin?.let { "提前 $it 分钟" } ?: "未设置"), "跨天" to if ((PlanTime.minutesOfDay(value.endTime) ?: 0) <= (PlanTime.minutesOfDay(value.startTime) ?: 0)) "是" else "否")) }
                     item { StrategySection(strategy) }
                     if (contributions.isNotEmpty()) item {
                         PluginContributionContent(contributions, granted,
@@ -235,9 +244,12 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
                         if (actionRunning) Text("正在执行操作…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     item {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            FilledTonalButton(onClick = { requestAction(value, ProtectedPlanAction.PAUSE) }, modifier = Modifier.weight(1f)) { Text(if (value.status == 1) "提前结束" else "恢复") }
-                            FilledTonalButton(onClick = { showDelete = true }, modifier = Modifier.weight(1f)) { Icon(Icons.Filled.Delete, null); Text("删除", color = MaterialTheme.colorScheme.error) }
+                        Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            androidx.compose.material3.Button(onClick = { requestAction(value, ProtectedPlanAction.PAUSE) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (value.status == 1) "提前结束" else "恢复") }
+                            androidx.compose.material3.OutlinedButton(onClick = { showDelete = true }, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = .5f))) {
+                                Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error); Text(" 删除", color = MaterialTheme.colorScheme.error)
+                            }
                         }
                     }
                 }
@@ -249,35 +261,20 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
 @Composable
 private fun StrategySection(strategy: StrategySnapshotEntity?) {
     val whitelist = parseAppReferences(strategy?.whitelistApps)
-    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("执行范围", style = MaterialTheme.typography.titleMedium)
-            Row(Modifier.fillMaxWidth()) {
-                Text("免打扰", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(strategyStateText(strategy?.autoDnd))
-            }
-            Row(Modifier.fillMaxWidth()) {
-                Text("通知静默", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(strategyStateText(strategy?.notifySilence))
-            }
-            Text(if (whitelist.isEmpty()) "全部应用" else "不计入分心：${whitelist.joinToString("、") { it.name }}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
+    InkLedger(
+        title = "执行范围",
+        latin = "SCOPE",
+        rows = listOf(
+            "免打扰" to strategyStateText(strategy?.autoDnd),
+            "通知静默" to strategyStateText(strategy?.notifySilence),
+            "不计入分心" to if (whitelist.isEmpty()) "全部应用计入" else whitelist.joinToString("、") { it.name },
+        ),
+    )
 }
 
 @Composable
-private fun DetailSection(title: String, rows: List<Pair<String, String>>) {
-    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            rows.forEach { (label, value) ->
-                Row(Modifier.fillMaxWidth()) {
-                    Text(label, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(value, Modifier.weight(2f))
-                }
-            }
-        }
-    }
+private fun DetailSection(title: String, latin: String, rows: List<Pair<String, String>>) {
+    InkLedger(title = title, rows = rows, latin = latin)
 }
 
 internal data class AppReference(val id: String, val name: String)

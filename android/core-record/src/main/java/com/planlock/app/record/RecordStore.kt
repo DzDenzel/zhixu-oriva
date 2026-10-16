@@ -24,8 +24,17 @@ import java.util.UUID
 /**
  * 本地记录采集 + 计划/策略快照缓存 + 离线补传队列（Room）。
  */
-class RecordStore(private val database: PlanLockDatabase) {
-    constructor(context: Context) : this(PlanLockDatabase.get(context))
+class RecordStore(private val database: PlanLockDatabase, private val cancelReminder: (Long) -> Unit = {}) {
+    val localRevision get() = database.localRevision
+    constructor(context: Context) : this(PlanLockDatabase.get(context), { ScheduleReminderScheduler(context).cancel(it) })
+    private val reconciler by lazy { SnapshotReconciler(database, this, cancelReminder) }
+    fun observeConfirmations() = reconciler.observeConfirmations()
+    fun observeBulkDeletion() = reconciler.observeBulkDeletion()
+    suspend fun confirmations() = reconciler.confirmations()
+    suspend fun bulkDeletion() = reconciler.bulkDeletion()
+    suspend fun markConflict(row: PendingRecordEntity, remote: SyncPullResponse) = reconciler.markConflict(row, remote)
+    suspend fun resolveConfirmation(expected: SyncConfirmation, keepMine: Boolean) = reconciler.resolve(expected, keepMine)
+    suspend fun approveBulkDeletion(expected: BulkDeletion) = reconciler.approveBulkDeletion(expected)
     private val planDao = database.planSnapshotDao()
     private val strategyDao = database.strategySnapshotDao()
     private val pendingDao = database.pendingRecordDao()
@@ -33,42 +42,9 @@ class RecordStore(private val database: PlanLockDatabase) {
     private val aggregateDao = database.behaviorAggregateDao()
     private val retention = BehaviorRetentionPolicy()
 
-    suspend fun saveSnapshots(plans: List<SyncPlanView>, strategies: List<SyncStrategyView>, schedules: List<SyncScheduleView> = emptyList()) = database.withTransaction {
-        val pending = pendingDao.all()
-        val protection = SnapshotProtection.from(pending)
-        val planKeys = pending.filter { it.type == "plan_upsert" }.mapNotNull { Json.decodeFromString<SyncPlanItem>(it.payload.orEmpty()).clientId }.toSet()
-        val scheduleKeys = pending.filter { it.type == "schedule_upsert" }.mapNotNull { Json.decodeFromString<SchedulePendingUpsert>(it.payload.orEmpty()).request.clientId }.toSet()
-        planDao.upsertAll(plans.filterNot { it.id in protection.plans || it.clientId != null && it.clientId in planKeys }.map {
-            PlanSnapshotEntity(
-                id = it.id,
-                userId = it.userId,
-                name = it.name,
-                type = it.type,
-                startTime = it.startTime,
-                endTime = it.endTime,
-                repeatRule = it.repeatRule,
-                color = it.color,
-                icon = it.icon,
-                remindAdvanceMin = it.remindAdvanceMin,
-                remindMethods = it.remindMethods,
-                status = it.status,
-                version = it.version
-            )
-        })
-        val protectedRemotePlanIds = plans.filter { it.clientId != null && it.clientId in planKeys }.map { it.id }.toSet()
-        strategyDao.upsertRemote(strategies.filterNot { it.planId in protection.plans || it.planId in protectedRemotePlanIds }.map {
-            StrategySnapshotEntity(
-                id = it.id,
-                planId = it.planId,
-                blacklistApps = null,
-                whitelistApps = it.whitelistApps,
-                autoDnd = it.autoDnd,
-                notifySilence = it.notifySilence,
-                version = it.version
-            )
-        })
-        scheduleDao.upsertAll(schedules.filterNot { it.id in protection.schedules || it.clientId != null && it.clientId in scheduleKeys }.map { it.toEntity() })
-    }
+    /** Caller must supply a complete, successful, owner-checked snapshot. */
+    suspend fun saveSnapshots(plans: List<SyncPlanView>, strategies: List<SyncStrategyView>, schedules: List<SyncScheduleView> = emptyList()) =
+        reconciler.reconcile(plans, strategies, schedules)
 
     suspend fun enqueueExecution(req: ExecutionRecordRequest) {
         insertPending(
@@ -113,9 +89,18 @@ class RecordStore(private val database: PlanLockDatabase) {
         )
     }
 
-    suspend fun pending(): List<PendingRecordEntity> = pendingDao.all().filterNot { it.type in METADATA_TYPES }
+    suspend fun pending(): List<PendingRecordEntity> {
+        val rows = pendingDao.all()
+        val blocked = rows.filter { it.type == "sync_conflict" }.map { Json.decodeFromString<SyncConfirmation>(it.payload.orEmpty()).key }.toSet()
+        return rows.filterNot { it.type in METADATA_TYPES || it.syncEntityKey() in blocked }
+    }
 
-    suspend fun pendingById(id: Long): PendingRecordEntity? = pendingDao.byId(id)?.takeUnless { it.type in METADATA_TYPES }
+    suspend fun pendingById(id: Long): PendingRecordEntity? {
+        val row = pendingDao.byId(id) ?: return null
+        if (row.type in METADATA_TYPES) return null
+        val key = row.syncEntityKey()
+        return row.takeUnless { key != null && pendingDao.byClientId("conflict:$key") != null }
+    }
 
     private suspend fun resolveId(id: Long, type: String): Long {
         if (id > 0) return id
@@ -123,8 +108,33 @@ class RecordStore(private val database: PlanLockDatabase) {
         check(aliases.mapNotNull { it.planId }.distinct().size <= 1) { "Conflicting identity mapping" }
         return aliases.firstOrNull()?.planId?.also { require(it > 0) { "Identity mapping must be canonical" } } ?: id
     }
-    suspend fun resolvePlanId(id: Long): Long = resolveId(id, "plan_identity")
-    suspend fun resolveScheduleId(id: Long): Long = resolveId(id, "schedule_identity")
+    private suspend fun resolveRestoredId(id: Long, kind: String): Long {
+        var current = resolveId(id, "${kind}_identity")
+        val visited = mutableSetOf<Long>()
+        while (visited.add(current)) {
+            val next = pendingDao.byClientId("$kind-restoration:$current")?.planId ?: return current
+            current = resolveId(next, "${kind}_identity")
+        }
+        error("Conflicting restored identity")
+    }
+    suspend fun resolvePlanId(id: Long): Long = resolveRestoredId(id, "plan")
+    suspend fun resolveScheduleId(id: Long): Long = resolveRestoredId(id, "schedule")
+
+    internal suspend fun rememberPlanDeleted(id: Long) {
+        val previous = confirmation("plan", id) ?: LocalConfirmation("plan", 0, 0)
+        saveConfirmation("plan", id, previous.copy(deleted = true))
+    }
+    internal suspend fun rememberRestoredSchedule(oldId: Long, newId: Long) {
+        pendingDao.insert(PendingRecordEntity(type = "schedule_restoration", planId = newId, clientId = "schedule-restoration:$oldId", payload = oldId.toString()))
+    }
+    internal suspend fun moveRestoredPlanRecords(oldId: Long, newId: Long) {
+        pendingDao.insert(PendingRecordEntity(type = "plan_restoration", planId = newId, clientId = "plan-restoration:$oldId", payload = oldId.toString()))
+        pendingDao.all().filter { it.planId == oldId && it.type in setOf("execution", "violation", "unlock") }.forEach {
+            pendingDao.update(it.copy(planId = newId))
+        }
+        aggregateDao.all().filter { it.planId == oldId }.forEach { aggregateDao.upsertAll(listOf(it.copy(planId = newId))) }
+        aggregateDao.deleteByPlanId(oldId)
+    }
 
     private fun confirmationKey(kind: String, id: Long) = "local-confirmation:$kind:$id"
     private suspend fun confirmationRow(kind: String, id: Long) = pendingDao.byClientId(confirmationKey(kind, id))?.also {
@@ -247,7 +257,7 @@ class RecordStore(private val database: PlanLockDatabase) {
     suspend fun deletePlan(inputId: Long): String = database.withTransaction {
         val id = resolvePlanId(inputId)
         val marker = "plan-delete-${UUID.randomUUID()}"
-        pendingDao.insert(PendingRecordEntity(type = "plan_delete", planId = id, clientId = marker))
+        pendingDao.insert(PendingRecordEntity(type = "plan_delete", planId = id, clientId = marker, baseVersion = planDao.byId(id)?.version, localSnapshot = Json.encodeToString(DeletedSnapshot(plan = planDao.byId(id), strategy = strategyDao.byPlanId(id)))))
         val previous = confirmation("plan", id) ?: LocalConfirmation("plan", 0, 0)
         saveConfirmation("plan", id, previous.copy(deleted = true))
         scheduleDao.markPlanDeleted(id)
@@ -289,6 +299,8 @@ class RecordStore(private val database: PlanLockDatabase) {
                 pendingDao.update(row.copy(clientId = key))
             }
         }
+        // A restored backup can reuse the old numeric ID; a self-alias must disappear.
+        pendingDao.all().filter { it.type == "plan_restoration" && it.planId == localId && it.payload == serverId.toString() }.forEach { pendingDao.delete(listOf(it.id)) }
         pendingDao.replaceProtectedPlanId(localId, serverId)
         pendingDao.all().forEach { p ->
             val payload = when (p.type) {
@@ -308,6 +320,7 @@ class RecordStore(private val database: PlanLockDatabase) {
         recordAcknowledgement("plan", serverId, Json.decodeFromString<SyncPlanItem>(sent.payload.orEmpty()).baseVersion, version)
         planDao.updateVersion(serverId, version)
         pendingDao.delete(listOf(sent.id))
+        pendingDao.all().filter { it.type == "plan_delete" && it.planId == serverId }.forEach { pendingDao.update(it.copy(baseVersion = version)) }
         pendingDao.all().filter { it.type == "plan_upsert" && it.planId == serverId }.forEach { p ->
             val item = Json.decodeFromString<SyncPlanItem>(p.payload.orEmpty())
             pendingDao.update(p.copy(payload = Json.encodeToString(item.copy(id = serverId, baseVersion = version))))
@@ -381,7 +394,7 @@ class RecordStore(private val database: PlanLockDatabase) {
 
     suspend fun enqueueScheduleDelete(inputId: Long) = database.withTransaction {
         val id = resolveScheduleId(inputId)
-        pendingDao.insert(PendingRecordEntity(type = "schedule_delete", planId = null, clientId = "schedule-delete-${UUID.randomUUID()}", payload = id.toString()))
+        pendingDao.insert(PendingRecordEntity(type = "schedule_delete", planId = null, clientId = "schedule-delete-${UUID.randomUUID()}", payload = id.toString(), baseVersion = scheduleDao.byId(id)?.version, localSnapshot = Json.encodeToString(DeletedSnapshot(schedule = scheduleDao.byId(id)))))
         scheduleDao.delete(id)
     }
 
@@ -402,18 +415,22 @@ class RecordStore(private val database: PlanLockDatabase) {
         pendingDao.delete(listOf(sent.id))
         pendingDao.all().forEach { p ->
             when (p.type) {
+                "schedule_restoration" -> if (p.planId == item.localId) {
+                    if (p.payload == serverId.toString()) pendingDao.delete(listOf(p.id))
+                    else pendingDao.update(p.copy(planId = serverId))
+                }
                 "schedule_upsert" -> {
                     val later = Json.decodeFromString<SchedulePendingUpsert>(p.payload.orEmpty())
                     if (later.localId == item.localId) pendingDao.update(p.copy(payload = Json.encodeToString(later.copy(localId = serverId, baseVersion = version))))
                 }
-                "schedule_delete" -> if (p.payload == item.localId.toString()) pendingDao.update(p.copy(payload = serverId.toString()))
+                "schedule_delete" -> if (p.payload == item.localId.toString()) pendingDao.update(p.copy(payload = serverId.toString(), baseVersion = version))
             }
         }
     }
 
     companion object {
         private val pendingMutex = Mutex()
-        private val METADATA_TYPES = setOf("plan_identity", "schedule_identity", "local_confirmation")
+        private val METADATA_TYPES = setOf("plan_identity", "schedule_identity", "local_confirmation", "sync_conflict", "bulk_delete", "plan_restoration", "schedule_restoration")
     }
 }
 

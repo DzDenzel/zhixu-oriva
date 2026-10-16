@@ -1,0 +1,26 @@
+# Optional overlay; no proxy starts unless this file is explicitly selected.
+services:
+  backend:
+    environment:
+      PLANLOCK_TRUSTED_PROXIES: caddy
+    ports: !override
+      - "127.0.0.1:${ORIVA_PORT:-8080}:8080"
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      ORIVA_DOMAIN: ${ORIVA_DOMAIN:?Set your domain in .env before enabling HTTPS}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+volumes:
+  caddy-data:
+  caddy-config:

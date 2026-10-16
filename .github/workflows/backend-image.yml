@@ -1,0 +1,125 @@
+name: Publish ORIVA backend image
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version (e.g. 2.1.0); no latest alias'
+        required: true
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: backend-image-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.0.43
+        env:
+          MYSQL_ROOT_PASSWORD: ci-f37-only-password
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Backend regression
+        env:
+          F37_ENABLED: 'true'
+          F37_DB_HOST: 127.0.0.1
+          F37_DB_PORT: '3306'
+          F37_DB_USER: root
+          F37_DB_PASSWORD: ci-f37-only-password
+          PLANLOCK_JWT_SECRET: ci-f37-synthetic-signing-key-not-for-production
+          PLANLOCK_REDIS_PASSWORD: ''
+        run: mvn -B -ntp -f backend/pom.xml clean verify
+      - name: Require migration and idempotency tests to execute
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          for name in ('DatabaseMigrationTest', 'CreationIdempotencyTest'):
+              path = Path('backend/planlock-app/target/surefire-reports') / ('TEST-com.planlock.migration.' + name + '.xml')
+              suite = ET.parse(path).getroot()
+              assert int(suite.get('tests', '0')) > 0, name + ' did not execute'
+              assert all(int(suite.get(key, '0')) == 0 for key in ('failures', 'errors', 'skipped')), name + ' was not fully green'
+              print(name, suite.get('tests'), 'executed; no skips')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: backend/**/target/surefire-reports/
+      - name: Installer regression
+        run: python3 -m unittest discover -s deploy/tests -v
+      - name: Resolve immutable image version
+        id: image
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          version="${REQUESTED_VERSION:-${GITHUB_REF_NAME#v}}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]] || exit 1
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zhixu-oriva-backend"
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse reusing an existing image version
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
+        run: sh deploy/require-new-image-tag.sh "$IMAGE"
+      - name: Build and push linux/amd64
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.image.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+      - name: Release manifest
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_VERSION: ${{ steps.image.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          migrations = [{"file": p.name, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+                        for p in sorted(Path('backend/planlock-app/src/main/resources/db/migration').glob('V*__*.sql'))]
+          data = {"sourceCommit": os.environ['GITHUB_SHA'], "image": os.environ['IMAGE_NAME'],
+                  "version": os.environ['IMAGE_VERSION'], "digest": os.environ['IMAGE_DIGEST'],
+                  "platforms": ["linux/amd64"], "arm64Verified": False, "migrations": migrations}
+          Path('backend-image-manifest.json').write_text(json.dumps(data, indent=2)+'\n', encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-image-manifest-${{ steps.image.outputs.version }}
+          path: backend-image-manifest.json
+      - name: First publication visibility reminder
+        run: |
+          echo 'After first publication, the maintainer must set the GHCR package to Public and verify anonymous pull by digest.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'arm64 has not been validated; this workflow publishes linux/amd64 only.' >> "$GITHUB_STEP_SUMMARY"

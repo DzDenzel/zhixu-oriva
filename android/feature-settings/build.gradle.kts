@@ -17,6 +17,7 @@ android {
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 
 dependencies {
+    implementation("com.google.zxing:core:3.5.3")
     implementation(project(":core-sync"))
     implementation(project(":core-api"))
     implementation(project(":core-security"))

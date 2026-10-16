@@ -8,7 +8,7 @@ class BrandResourcesTest {
     private val res = File("src/main/res")
     @Test fun iconVariantsAndBrandColorAreConsistent() {
         val color = File("../core-design/src/main/res/values/oriva_brand.xml").readText()
-        assertTrue(color.contains("#182F20"))
+        assertTrue(color.contains("#1A1D1B"))
         // Launcher artwork now has the user-approved independent light palette;
         // BrandVisualAssetsTest checks the rendered fallbacks, not the old alias.
         assertTrue(File(res, "values/oriva_splash.xml").readText().contains("@color/oriva_brand"))

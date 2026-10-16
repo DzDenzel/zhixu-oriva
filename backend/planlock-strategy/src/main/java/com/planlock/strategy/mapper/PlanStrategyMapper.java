@@ -21,7 +21,8 @@ public interface PlanStrategyMapper {
     PlanStrategy findByPlanId(@Param("planId") Long planId);
 
     @Insert("INSERT INTO plan_strategies(plan_id, blacklist_apps, whitelist_apps, auto_dnd, notify_silence, version) "
-            + "VALUES(#{planId}, #{blacklistApps}, #{whitelistApps}, #{autoDnd}, #{notifySilence}, #{version})")
+            + "SELECT #{planId}, #{blacklistApps}, #{whitelistApps}, #{autoDnd}, #{notifySilence}, #{version} "
+            + "FROM plans WHERE id = #{planId} FOR SHARE")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(PlanStrategy strategy);
 

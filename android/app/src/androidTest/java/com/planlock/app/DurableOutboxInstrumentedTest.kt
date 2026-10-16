@@ -20,7 +20,7 @@ import java.util.UUID
 /** Real on-device SQLite transactions; never opens the installed user's database. */
 class DurableOutboxInstrumentedTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext.also {
-        check(it.packageName == "com.planlock.qareq031") { "Isolated QA application required" }
+        check(it.packageName in setOf("com.planlock.qareq031", "com.planlock.qapack3a")) { "Isolated QA application required" }
     }
     private fun database(name: String) = Room.databaseBuilder(context, PlanLockDatabase::class.java, name).build()
     private fun plan(id: Long = -101) = PlanSnapshotEntity(id,1,"original","study","10:00:00","11:00:00",null,null,null,15,null,1,0)
@@ -129,8 +129,9 @@ class DurableOutboxInstrumentedTest {
         assertTrue(store.pending().isEmpty()); assertEquals(1L,store.plan(41)!!.version)
         store.updateLocalPlan(store.plan(41)!!.copy(name="my-next"))
         remote.plans[41]=remote.plans[41]!!.copy(name="other-device",version=2)
-        assertTrue(runCatching { SyncClient(remote,store).pushPendingRecords() }.isFailure)
-        assertEquals("my-next",store.plan(41)!!.name); assertEquals(1,store.pending().size)
+        SyncClient(remote,store).pushPendingRecords()
+        assertEquals("my-next",store.plan(41)!!.name); assertTrue(store.pending().isEmpty())
+        assertEquals(1,store.confirmations().size)
     } }
 
     @Test fun legacyMarkersUpgradeToDurablePlanAndStrategyWithoutLosingProtection() = runBlocking { withStore { store,db ->
@@ -346,8 +347,11 @@ class DurableOutboxInstrumentedTest {
         assertEquals(0L,Json.decodeFromString<SyncPlanItem>(store.pending().first { it.type=="plan_upsert" }.payload!!).baseVersion)
         assertEquals(0L,Json.decodeFromString<SyncStrategyItem>(store.pending().first { it.type=="strategy_upsert" }.payload!!).baseVersion)
         assertEquals(0L,Json.decodeFromString<SchedulePendingUpsert>(store.pending().first { it.type=="schedule_upsert" }.payload!!).baseVersion)
-        assertTrue(runCatching { client.pushPendingRecords() }.isFailure)
-        assertEquals("other-device",remote.plans[41]!!.name); assertEquals("other-device",remote.schedules[51]!!.title); assertEquals(3,store.pending().size)
+        client.pushPendingRecords()
+        assertEquals("other-device",remote.plans[41]!!.name); assertEquals("other-device",remote.schedules[51]!!.title)
+        assertTrue(store.pending().isEmpty()); assertEquals(2,store.confirmations().size)
+        assertEquals("B",store.confirmations().first { it.kind=="plan" }.localPlan!!.name)
+        assertEquals("B",store.confirmations().first { it.kind=="schedule" }.localSchedule!!.title)
     } }
 
     @Test fun equalPayloadRemoteVersionGapDoesNotProveLocalVersionSteps() = runBlocking { withStore { store,_ ->
@@ -357,8 +361,10 @@ class DurableOutboxInstrumentedTest {
         assertEquals(3L,store.plan(41)!!.version); assertTrue(store.pending().isEmpty())
         store.updateLocalPlan(captured.copy(name="B"))
         assertEquals(0L,Json.decodeFromString<SyncPlanItem>(store.pending().single().payload!!).baseVersion)
-        assertTrue(runCatching { SyncClient(remote,store).pushPendingRecords() }.isFailure)
+        SyncClient(remote,store).pushPendingRecords()
         assertEquals("A",remote.plans[41]!!.name)
+        assertEquals("B",store.confirmations().single().localPlan!!.name)
+        assertTrue(store.pending().isEmpty())
     } }
 
     @Test fun failedLinkedScheduleRetriesDetachedAfterPositiveOrMappedParentDeletion() = runBlocking {
@@ -443,7 +449,7 @@ class DurableOutboxInstrumentedTest {
         } finally { com.planlock.app.engine.ExecutionEngine.stop() }
     } }
 
-    private class Remote : PlanLockApi by MockApi() {
+    internal class Remote : PlanLockApi by MockApi() {
         val plans=linkedMapOf<Long,SyncPlanView>()
         val schedules=linkedMapOf<Long,ScheduleDto>()
         private val planIds=mutableMapOf<String,Long>()
@@ -469,7 +475,7 @@ class DurableOutboxInstrumentedTest {
             dropped(); return ApiResponse(data=SyncPushResponse(listOf(result)))
         }
         override suspend fun syncPull()=ApiResponse(data=SyncPullResponse(plans=plans.values.toList(),strategies=strategies.values.toList(),schedules=schedules.values.map { SyncScheduleView(it.id,it.userId,it.title,it.startDate,it.startTime,it.endDate,it.endTime,it.allDay,it.location,it.note,it.remindAdvanceMin,it.repeatRule,it.linkedPlanId,it.tzId,it.status,it.version,it.clientId) }))
-        override suspend fun deletePlan(id: Long): ApiResponse<Unit> { plans.remove(id); strategies.remove(id); schedules.replaceAll { _,s -> if(s.linkedPlanId==id) s.copy(linkedPlanId=null) else s }; return ApiResponse(data=Unit) }
+        override suspend fun deletePlan(id: Long, baseVersion: Long?): ApiResponse<Unit> { if (baseVersion != null && plans[id] != null && plans[id]?.version != baseVersion) return ApiResponse(code=1409); plans.remove(id); strategies.remove(id); schedules.replaceAll { _,s -> if(s.linkedPlanId==id) s.copy(linkedPlanId=null) else s }; return ApiResponse(data=Unit) }
         override suspend fun createSchedule(req: ScheduleUpsertRequest): ApiResponse<ScheduleDto> {
             if(failNextSchedule) { failNextSchedule=false; throw IOException("schedule temporarily offline") }
             if(req.linkedPlanId!=null && req.linkedPlanId !in plans) return ApiResponse(code=1002,message="foreign key")
@@ -483,7 +489,7 @@ class DurableOutboxInstrumentedTest {
             if(schedules[id]?.version!=baseVersion) return ApiResponse(code=1409,message="conflict")
             val saved=dto(id,baseVersion+1,req); schedules[id]=saved; dropped(); return ApiResponse(data=saved)
         }
-        override suspend fun deleteSchedule(id: Long): ApiResponse<Unit> { schedules.remove(id); return ApiResponse(data=Unit) }
+        override suspend fun deleteSchedule(id: Long, baseVersion: Long?): ApiResponse<Unit> { if (baseVersion != null && schedules[id] != null && schedules[id]?.version != baseVersion) return ApiResponse(code=1409); schedules.remove(id); return ApiResponse(data=Unit) }
         private fun dto(id: Long,version: Long,r: ScheduleUpsertRequest)=ScheduleDto(id,1,r.title,r.startDate,r.startTime,r.endDate,r.endTime,r.allDay,r.location,r.note,r.remindAdvanceMin,r.repeatRule,r.linkedPlanId,r.tzId,1,version,r.clientId)
     }
 }

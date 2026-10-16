@@ -1,13 +1,45 @@
 package com.planlock.feature.stats
 
 import com.planlock.design.ChoiceChips
+import com.planlock.design.SundialDial
+import com.planlock.design.DialArc
+import com.planlock.app.record.DayTimeline
+import com.planlock.app.record.TimelineState
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.animation.togetherWith
+import com.planlock.app.api.dto.StatsResponse
+import com.planlock.app.api.dto.DailyStat
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.draw.clip
+import com.planlock.design.LocalReducedMotion
+import com.planlock.design.V2Tokens
+import com.planlock.design.InkHue
+import com.planlock.design.color
+import com.planlock.design.tint
+import com.planlock.design.inkTint
+import com.planlock.design.Ink
+import com.planlock.design.InkMasthead
+import com.planlock.design.InkRing
+import com.planlock.design.InkSegmented
+import com.planlock.design.InkText
+import com.planlock.design.InkTone
+import com.planlock.design.themed
+import com.planlock.design.LocalDarkTheme
+import com.planlock.design.inkReveal
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.itemsIndexed
 import com.planlock.design.SectionHeading
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,7 +53,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -71,9 +102,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.planlock.app.api.ApiClient
 import com.planlock.app.api.dto.ApiResponse
-import com.planlock.app.api.dto.DailyStat
 import com.planlock.app.api.dto.ExecutionRecordDto
-import com.planlock.app.api.dto.StatsResponse
 import com.planlock.app.api.dto.ViolationAppStat
 import com.planlock.app.api.dto.TodaySummary
 import com.planlock.app.record.RecordStore
@@ -83,7 +112,6 @@ import com.planlock.app.record.entity.PlanSnapshotEntity
 import com.planlock.design.StatTile
 import com.planlock.design.UIStatePanel
 import com.planlock.design.UiState
-import com.planlock.design.V2Tokens
 import com.planlock.design.planLockAtmosphere
 import com.planlock.design.PageAtmosphere
 import kotlinx.coroutines.Dispatchers
@@ -172,28 +200,27 @@ fun StatsScreen() {
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri -> uri?.let { scope.launch { export(it, "csv") } } }
     val jsonLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> uri?.let { scope.launch { export(it, "json") } } }
 
-    LaunchedEffect(syncState.revision) { load() }
+    val localRevision by store.localRevision.collectAsState()
+    LaunchedEffect(syncState.revision, localRevision) { load() }
 
     Scaffold(
         modifier = Modifier.planLockAtmosphere(PageAtmosphere.STATS),
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = { com.planlock.design.InkSnackbarHost(snackbar) },
     ) { padding ->
         SyncRefreshHost(syncState.running, syncState.error, { sync.coordinator.refresh() },
+            loginRequired = syncState.loginRequired,
             errorEventKey = "${com.planlock.app.api.TokenStore.userId}:${syncState.attempts}") { syncStatus ->
         when {
             loading -> {
                 UIStatePanel(UiState.LOADING, "正在汇总本周数据", modifier = Modifier.padding(padding))
                 androidx.compose.foundation.layout.Box(Modifier.align(Alignment.TopEnd).padding(end = 22.dp, top = 26.dp)) { syncStatus() }
             }
+            // 没有任何数据：只留页头。读取失败时才说明。
             reports.isEmpty() && behavior.isEmpty() -> LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 22.dp)) {
                 item { StatsStatusHeader(syncStatus) }
-                item { ObservationNotice(observation) }
-                item { UIStatePanel(if (readError != null) UiState.ERROR else UiState.EMPTY,
-                    readError ?: "尚无统计快照，下拉同步后查看",
-                    onAction = { scope.launch { load() }; sync.coordinator.refresh() }) }
-                items(behavior) { item -> BehaviorRow(item, planNames[item.planId]) }
+                if (readError != null) item { UIStatePanel(UiState.ERROR, readError, onAction = { scope.launch { load() }; sync.coordinator.refresh() }) }
             }
             else -> {
                 val value = reports[selectedPeriod]
@@ -203,44 +230,60 @@ fun StatsScreen() {
                 val reportRows = value?.let {
                     planReportRows(plans, it.planExecution, scopeDates(selectedPeriod, OccurrenceDate.from(Calendar.getInstance())))
                 }.orEmpty()
-                LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 22.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     item {
                         StatsStatusHeader(syncStatus)
-                        ChoiceChips(listOf("day" to "今日", "week" to "本周", "month" to "本月"),
-                            selectedPeriod, { selectedPeriod = it })
+                        Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            InkSegmented(listOf("day" to "今日", "week" to "本周", "month" to "本月"),
+                                selectedPeriod, { selectedPeriod = it }, Modifier.weight(1f).inkReveal(1))
+                        }
                         Text(
                             when {
                                 offline || presentation.local -> localDataLabel(cachedAt)
                                 cachedAt != null -> "更新于 ${formatClock(cachedAt!!)}"
                                 else -> "尚未同步"
                             },
-                            color = if (offline || presentation.local) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (offline || presentation.local) InkTone.brass else InkTone.faint,
+                            style = InkText.meta.copy(fontSize = 11.sp), modifier = Modifier.padding(top = 6.dp),
                         )
                     }
-                    item { ObservationNotice(observation) }
+                    if (observation != ObservationAvailability.PRECISE) item { ObservationNotice(observation) }
                     readError?.let { error -> item { PersistentStatus("统计读取异常 · 详情", error) } }
-                    item { DurationHero(violationDuration, ranking.sumOf { it.count }, ranking.size, periodLabel(selectedPeriod), presentation.local) }
+                    // 每个时间尺度一张自己的图：今日 = 日晷，本周 = 七日柱，本月 = 月历
+                    item {
+                        androidx.compose.animation.AnimatedContent(
+                            targetState = selectedPeriod,
+                            transitionSpec = {
+                                val order = listOf("day", "week", "month")
+                                val forward = order.indexOf(targetState) > order.indexOf(initialState)
+                                (androidx.compose.animation.fadeIn(tween(280)) + androidx.compose.animation.slideInHorizontally(tween(320, easing = Ink.Easing)) { if (forward) it / 4 else -it / 4 })
+                                    .togetherWith(androidx.compose.animation.fadeOut(tween(160)))
+                            },
+                            label = "period-chart",
+                        ) { period -> PeriodChart(period, reports[period], plans) }
+                    }
+                    // 全站唯一的一块墨：这段时间被打断了多久
+                    item { DurationHero(violationDuration, ranking.sumOf { it.count }, ranking.size, periodLabel(selectedPeriod), presentation.local, periodHue(selectedPeriod)) }
                     item {
                         val earlyCount = value?.planExecution?.sumOf { it.earlyEndedCount } ?: 0
                         ReportTiles(value?.continuousDays ?: 0, value?.completedCount ?: 0,
                             earlyCount, periodLabel(selectedPeriod))
                     }
-                    item { SectionTitle("分心来源排行", if (value == null) "本地累计" else scopeDateRangeLabel(selectedPeriod, OccurrenceDate.from(Calendar.getInstance()))) }
-                    if (ranking.isEmpty()) item { Text("这段时间没有分心记录", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    else items(ranking, key = { it.packageName }) { item -> ViolationRankRow(item) }
-                    item { SectionTitle("完成情况", "计划时长 vs 实际时长") }
-                    if (value == null) item { Text("离线快照未包含计划执行明细", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    else if (reportRows.isEmpty()) item { UIStatePanel(UiState.EMPTY, "这段时间没有可统计的计划") }
-                    else items(reportRows, key = { it.planId }) { PlanReportRowView(it) }
+                    if (ranking.isNotEmpty()) {
+                        item { SectionTitle("分心来源", if (value == null) "本地累计" else scopeDateRangeLabel(selectedPeriod, OccurrenceDate.from(Calendar.getInstance()))) }
+                        val maxDuration = ranking.maxOf { it.totalDurationMs }.coerceAtLeast(1L)
+                        itemsIndexed(ranking, key = { _, stat -> stat.packageName }) { index, item -> ViolationRankRow(index + 1, item, maxDuration) }
+                    }
+                    if (reportRows.isNotEmpty()) {
+                        item { SectionTitle("完成情况", "计划 vs 实际") }
+                        items(reportRows, key = { it.planId }) { PlanReportRowView(it) }
+                    }
                     if (!value?.earlyEndings.isNullOrEmpty()) {
                         item { SectionTitle("提前结束", "最近 ${value!!.earlyEndings.size} 条") }
                         items(value!!.earlyEndings, key = { "${it.planId}-${it.at}-${it.method}" }) { ending ->
-                            Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-                                Column(Modifier.padding(14.dp)) {
-                                    Text(planNames[ending.planId] ?: "计划 #${ending.planId}", fontWeight = FontWeight.Bold)
-                                    Text("${ending.at ?: "时间未知"} · ${ending.method ?: "主动结束（未要求密码确认）"}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
+                            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                Text(planNames[ending.planId] ?: "计划 #${ending.planId}", style = MaterialTheme.typography.titleMedium, color = InkTone.text)
+                                Text("${ending.at ?: "时间未知"} · ${ending.method ?: "主动结束（未要求密码确认）"}", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
                             }
                         }
                     }
@@ -251,27 +294,25 @@ fun StatsScreen() {
                         }
                     }
                     if ((value?.legacyViolationCount ?: 0) > 0) item {
-                        Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-                            Column(Modifier.padding(14.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("旧版违规记录", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                    TextButton(onClick = { legacyExpanded = !legacyExpanded }) { Text(if (legacyExpanded) "收起" else "查看") }
-                                }
-                                if (legacyExpanded) Text("${value!!.legacyViolationCount} 次 · v1.0 为被拦下的未遂尝试，只读展示，不计入上方时长与排行。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Column(Modifier.fillMaxWidth()) {
+                            TextButton(onClick = { legacyExpanded = !legacyExpanded }, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+                                Text("旧版违规记录 ${if (legacyExpanded) "↑" else "↓"}", color = InkTone.soft)
+                            }
+                            if (legacyExpanded) Text("${value!!.legacyViolationCount} 次 · v1.0 为被拦下的未遂尝试，只读展示，不计入上方时长与排行。", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
+                        }
+                    }
+                    item {
+                        // 数据归你：三种格式一行排开
+                        val busy = exportState == ExportState.EXPORTING
+                        Column(Modifier.padding(top = 18.dp, bottom = 24.dp)) {
+                            Text(if (busy) "导出中…" else "导出", style = MaterialTheme.typography.titleMedium, color = InkTone.text)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                                ExportChip("ICS", "日历", busy) { icsLauncher.launch("planlock-plans.ics") }
+                                ExportChip("CSV", "表格", busy) { csvLauncher.launch("planlock-records.csv") }
+                                ExportChip("JSON", "完整", busy) { jsonLauncher.launch("planlock-records.json") }
                             }
                         }
                     }
-                    item { Text("带走你的数据", style = MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=8.dp)) }
-                    item {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("选择适合用途的文件格式", style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Button(enabled = exportState != ExportState.EXPORTING, onClick = { icsLauncher.launch("planlock-plans.ics") }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (exportState == ExportState.EXPORTING) "导出中" else "导入日历 · ICS") }
-                            Button(enabled = exportState != ExportState.EXPORTING, onClick = { csvLauncher.launch("planlock-records.csv") }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (exportState == ExportState.EXPORTING) "导出中" else "用表格查看 · CSV") }
-                            Button(enabled = exportState != ExportState.EXPORTING, onClick = { jsonLauncher.launch("planlock-records.json") }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (exportState == ExportState.EXPORTING) "导出中" else "保存完整记录 · JSON") }
-                        }
-                    }
-
                 }
             }
         }
@@ -297,18 +338,47 @@ private fun ObservationNotice(availability: ObservationAvailability) {
 }
 
 @Composable
-private fun DurationHero(durationMs: Long, count: Int, appCount: Int, scopeLabel: String, local: Boolean) {
-    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp, 28.dp, 28.dp, 10.dp), color = MaterialTheme.colorScheme.primary) {
-        Box(Modifier.background(Brush.linearGradient(listOf(V2Tokens.brandBright, V2Tokens.brandDeep))).padding(22.dp)) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(if (local) "本地累计分心时长（时:分:秒）" else "分心时长（时:分:秒）", style = MaterialTheme.typography.labelLarge, color = androidx.compose.ui.graphics.Color.White.copy(alpha = .72f))
-                AdaptiveDuration(reportDurationLabel(durationMs))
-                Text(
-                    if (count == 0) "这段时间没有分心记录" else "${if (local) "本地累计" else scopeLabel}分心 $count 次 · 来自 $appCount 个应用",
-                    color = androidx.compose.ui.graphics.Color.White.copy(alpha = .82f),
-                )
-                if (local) Text("本地累计，未按当前时间范围筛选", color = androidx.compose.ui.graphics.Color.White.copy(alpha = .72f), style = MaterialTheme.typography.bodyMedium)
-            }
+private fun DurationHero(durationMs: Long, count: Int, appCount: Int, scopeLabel: String, local: Boolean, hue: InkHue.Hue = InkHue.seal) {
+    val shape = RoundedCornerShape(20.dp, 20.dp, 20.dp, 6.dp)
+    val on = InkTone.onSlab
+    // 墨块上的强调色取亮色版本，保证在深底上看得清
+    val accent by androidx.compose.animation.animateColorAsState(hue.dark, tween(320), label = "hero-accent")
+    Box(Modifier.fillMaxWidth().inkReveal(2).clip(shape).background(InkTone.slab).padding(22.dp)) {
+        // 水印字只作底纹：放进 matchParentSize 的层里，不撑高墨块（否则底部留出一大块空白）
+        Box(Modifier.matchParentSize()) {
+            Text("衡", modifier = Modifier.align(Alignment.TopEnd).offset(x = 26.dp, y = (-50).dp).wrapContentSize(unbounded = true),
+                fontFamily = InkTone.display, fontWeight = FontWeight.Black, fontSize = 160.sp, color = on.copy(alpha = .05f))
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(if (local) "DISTRACTION · 本地累计（时:分:秒）" else "DISTRACTION · 分心时长（时:分:秒）", style = InkText.eyebrow, color = accent)
+            AdaptiveDuration(reportDurationLabel(durationMs))
+            Text(
+                if (count == 0) "这段时间没有分心记录" else "${if (local) "本地累计" else scopeLabel}分心 $count 次 · 来自 $appCount 个应用",
+                color = on.copy(alpha = .82f), style = MaterialTheme.typography.bodyMedium,
+            )
+            if (local) Text("本地累计，未按当前时间范围筛选", color = on.copy(alpha = .6f), style = InkText.meta)
+            ScaleRuler(count, on, accent)
+        }
+    }
+}
+
+/** 衡尺：24 格刻度，按分心次数点亮朱色刻度——一眼看出「这段时间被打断了多少次」。 */
+@Composable
+private fun ScaleRuler(count: Int, on: androidx.compose.ui.graphics.Color, accent: androidx.compose.ui.graphics.Color) {
+    val reduced = LocalReducedMotion.current
+    val grow = remember { Animatable(if (reduced) 1f else 0f) }
+    LaunchedEffect(count) { if (!reduced) { grow.snapTo(0f); grow.animateTo(1f, tween(900, easing = Ink.Easing)) } }
+    Canvas(Modifier.fillMaxWidth().height(26.dp).padding(top = 8.dp)) {
+        val ticks = 24
+        val lit = (count.coerceAtMost(ticks) * grow.value).toInt()
+        val step = size.width / (ticks - 1)
+        for (i in 0 until ticks) {
+            val x = i * step
+            val major = i % 6 == 0
+            val h = if (major) size.height else size.height * .55f
+            drawLine(if (i < lit) accent else on.copy(alpha = .25f),
+                androidx.compose.ui.geometry.Offset(x, size.height - h), androidx.compose.ui.geometry.Offset(x, size.height),
+                strokeWidth = if (i < lit) 3.dp.toPx() else 1.5.dp.toPx())
         }
     }
 }
@@ -317,11 +387,43 @@ private fun DurationHero(durationMs: Long, count: Int, appCount: Int, scopeLabel
 private fun AdaptiveDuration(value: String) {
     val measurer = rememberTextMeasurer()
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val styles = listOf(V2Tokens.numeralHero, V2Tokens.numeralLarge, V2Tokens.numeralMedium,
+        val styles = listOf(V2Tokens.numeralHero.themed(), V2Tokens.numeralLarge.themed(), V2Tokens.numeralMedium.themed(),
             MaterialTheme.typography.bodyLarge)
         val style = styles.firstOrNull { measurer.measure(value, it, softWrap = false).size.width <= constraints.maxWidth }
             ?: styles.last()
-        Text(value, style = style, color = androidx.compose.ui.graphics.Color.White)
+        Text(value, style = style, color = InkTone.onSlab)
+    }
+}
+
+@Composable
+private fun ExportChip(tag: String, label: String, busy: Boolean, onClick: () -> Unit) {
+    val hue = when (tag) { "ICS" -> InkHue.study; "CSV" -> InkHue.work; else -> InkHue.sleep }.color()
+    Surface(onClick = onClick, enabled = !busy, shape = RoundedCornerShape(14.dp), color = hue.inkTint()) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+            Text(tag, style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = hue)
+            Text(label, style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.faint)
+        }
+    }
+}
+
+@Composable
+private fun ExportRow(tag: String, title: String, detail: String, busy: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick, enabled = !busy,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp),
+        shape = MaterialTheme.shapes.medium, color = InkTone.raised,
+        border = androidx.compose.foundation.BorderStroke(1.dp, InkTone.hairline),
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(54.dp).background(InkTone.slab, RoundedCornerShape(8.dp)).padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                Text(tag, style = InkText.eyebrow.copy(letterSpacing = 1.sp), color = InkTone.onSlab)
+            }
+            Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                Text(if (busy) "导出中…" else title, style = MaterialTheme.typography.titleMedium)
+                Text(detail, style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
+            }
+            androidx.compose.material3.Icon(Icons.Filled.Download, null, tint = InkTone.vermilion)
+        }
     }
 }
 
@@ -331,15 +433,15 @@ private fun ReportTiles(streak: Int, completed: Int, early: Int, period: String)
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         if (maxWidth < 340.dp || fontScale > 1.15f) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                AnimatedStatTile(streak, " 天", "连续达成", period, modifier = Modifier.fillMaxWidth())
-                AnimatedStatTile(completed, label = "完成", trend = period, modifier = Modifier.fillMaxWidth())
-                AnimatedStatTile(early, label = "提前结束", trend = period, danger = early > 0, modifier = Modifier.fillMaxWidth())
+                AnimatedStatTile(streak, " 天", "连续达成", period, hue = InkHue.sport.color(), modifier = Modifier.fillMaxWidth())
+                AnimatedStatTile(completed, label = "完成", trend = period, hue = InkHue.study.color(), modifier = Modifier.fillMaxWidth())
+                AnimatedStatTile(early, label = "提前结束", trend = period, danger = early > 0, hue = InkHue.amber.color(), modifier = Modifier.fillMaxWidth())
             }
         } else {
             Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AnimatedStatTile(streak, " 天", "连续达成", period, modifier = Modifier.weight(1f).fillMaxHeight())
-                AnimatedStatTile(completed, label = "完成", trend = period, modifier = Modifier.weight(1f).fillMaxHeight())
-                AnimatedStatTile(early, label = "提前结束", trend = period, danger = early > 0, modifier = Modifier.weight(1f).fillMaxHeight())
+                AnimatedStatTile(streak, " 天", "连续达成", period, hue = InkHue.sport.color(), modifier = Modifier.weight(1f).fillMaxHeight())
+                AnimatedStatTile(completed, label = "完成", trend = period, hue = InkHue.study.color(), modifier = Modifier.weight(1f).fillMaxHeight())
+                AnimatedStatTile(early, label = "提前结束", trend = period, danger = early > 0, hue = InkHue.amber.color(), modifier = Modifier.weight(1f).fillMaxHeight())
             }
         }
     }
@@ -351,25 +453,47 @@ private fun SectionTitle(title: String, detail: String) {
 }
 
 @Composable
-private fun ViolationRankRow(item: ViolationAppStat) {
-    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(item.appName?.takeIf { it.isNotBlank() } ?: item.packageName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("${item.count} 次${if (item.approxDurationMs > 0) " · 含近似" else " · 精确记录"}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun ViolationRankRow(rank: Int, item: ViolationAppStat, maxDuration: Long) {
+    val share = (item.totalDurationMs.toFloat() / maxDuration).coerceIn(0f, 1f)
+    val reduced = LocalReducedMotion.current
+    val grow = remember { Animatable(if (reduced) share else 0f) }
+    LaunchedEffect(share) { if (!reduced) grow.animateTo(share, tween(700, delayMillis = rank * 60, easing = Ink.Easing)) else grow.snapTo(share) }
+    val accent = listOf(InkHue.seal, InkHue.amber, InkHue.rose, InkHue.sleep, InkHue.study, InkHue.work)[(rank - 1).coerceIn(0, 5)].color()
+    Row(Modifier.fillMaxWidth().inkReveal(rank).padding(vertical = 4.dp).clip(RoundedCornerShape(16.dp)).background(accent.inkTint())
+        .padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("%02d".format(rank), style = InkText.numeral.copy(fontSize = 22.sp), color = accent,
+            modifier = Modifier.width(40.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(item.appName?.takeIf { it.isNotBlank() } ?: item.packageName, style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f), maxLines = 1)
+                Text(reportDurationLabel(item.totalDurationMs), style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = accent)
             }
-            Text(reportDurationLabel(item.totalDurationMs), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            Box(Modifier.fillMaxWidth().height(4.dp).background(accent.copy(alpha = .18f), RoundedCornerShape(2.dp))) {
+                Box(Modifier.fillMaxWidth(grow.value).height(4.dp).background(accent, RoundedCornerShape(2.dp)))
+            }
+            Text("${item.count} 次${if (item.approxDurationMs > 0) " · 含近似" else " · 精确记录"}", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
         }
     }
 }
 
 @Composable
 private fun PlanReportRowView(item: PlanReportRow) {
-    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(item.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("计划 ${reportDurationLabel(item.plannedDurationMs)} · 实际 ${reportDurationLabel(item.actualDurationMs)}", color = MaterialTheme.colorScheme.primary)
-            Text("完成 ${item.completedCount} · 提前结束 ${item.earlyEndedCount} · 未执行 ${item.missedCount}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val ratio = if (item.plannedDurationMs > 0) (item.actualDurationMs.toFloat() / item.plannedDurationMs).coerceIn(0f, 1f) else 0f
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = InkHue.sport.tint()) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(item.name, style = MaterialTheme.typography.titleMedium)
+                Text("计划 ${reportDurationLabel(item.plannedDurationMs)}  /  实际 ${reportDurationLabel(item.actualDurationMs)}", style = InkText.meta, color = InkTone.soft)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("完成 ${item.completedCount}", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.jade)
+                    Text("提前结束 ${item.earlyEndedCount}", style = InkText.meta.copy(fontSize = 11.sp), color = if (item.earlyEndedCount > 0) InkTone.brass else InkTone.faint)
+                    Text("未执行 ${item.missedCount}", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
+                }
+            }
+            InkRing(ratio, Modifier.size(54.dp), color = InkHue.sport.color(), track = InkHue.sport.color().copy(alpha = .18f), stroke = 4.dp) {
+                Text("${(ratio * 100).toInt()}%", style = InkText.meta.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold), color = InkTone.text)
+            }
         }
     }
 }
@@ -385,13 +509,13 @@ private fun formatClock(epochMs: Long): String = SimpleDateFormat("HH:mm", Local
 @Composable
 private fun BehaviorRow(item: BehaviorAggregateEntity, planName: String?) {
     val source = if (item.sourceLevel == "ACCESSIBILITY") "精确 · 无障碍" else "近似 · 使用情况访问估算"
-    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = androidx.compose.ui.graphics.Color.Transparent) {
         Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Column(Modifier.weight(1f)) {
                 Text(item.packageName, style = MaterialTheme.typography.titleMedium)
                 Text("${planName ?: "计划 #${item.planId}"} · $source · ${item.occurrenceCount} 次", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(formatDuration(item.totalDurationMs), color = MaterialTheme.colorScheme.primary)
+            Text(formatDuration(item.totalDurationMs), style = InkText.meta, color = InkTone.vermilion)
         }
     }
 }
@@ -412,14 +536,14 @@ internal fun statsSnapshot(
 @Composable
 private fun InsightHero(streak: Int, completed: Int, daily: List<DailyStat>) {
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp, 28.dp, 28.dp, 10.dp), color = MaterialTheme.colorScheme.primary) {
-        Box(Modifier.background(Brush.linearGradient(listOf(V2Tokens.brandBright, V2Tokens.brandDeep))).padding(22.dp)) {
+        Box(Modifier.background(InkTone.slab).padding(22.dp)) {
             Column {
-                Text("本周", style = V2Tokens.labelMicro, color = androidx.compose.ui.graphics.Color.White.copy(alpha = .72f))
+                Text("本周", style = V2Tokens.labelMicro.themed(), color = InkTone.onSlab.copy(alpha = .72f))
                 Row(verticalAlignment = Alignment.Bottom) {
-                    Text("$streak", style = V2Tokens.numeralHero, color = androidx.compose.ui.graphics.Color.White)
-                    Text(" 天连续", color = androidx.compose.ui.graphics.Color.White.copy(alpha = .82f), modifier = Modifier.padding(start = 8.dp, bottom = 9.dp))
+                    Text("$streak", style = V2Tokens.numeralHero.themed(), color = InkTone.onSlab)
+                    Text(" 天连续", color = InkTone.onSlab.copy(alpha = .82f), modifier = Modifier.padding(start = 8.dp, bottom = 9.dp))
                 }
-                Text("本周完成 $completed 次 · 每一次完成都会留下刻度", color = androidx.compose.ui.graphics.Color.White.copy(alpha = .8f))
+                Text("本周完成 $completed 次 · 每一次完成都会留下刻度", color = InkTone.onSlab.copy(alpha = .8f))
                 WeekChart(daily, true)
             }
         }
@@ -433,19 +557,20 @@ private fun AnimatedStatTile(
     label: String,
     trend: String,
     danger: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    hue: androidx.compose.ui.graphics.Color? = null,
 ) {
     var started by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { started = true }
     val animatedValue by animateIntAsState(targetValue = if (started) value else 0, animationSpec = tween(450), label = "stat-number")
-    StatTile("$animatedValue$suffix", label, trend, danger, modifier)
+    StatTile("$animatedValue$suffix", label, trend, danger, modifier, hue)
 }
 
 @Composable
 private fun WeekChart(daily: List<DailyStat>, onBrand: Boolean = false) {
     val growth = remember { Animatable(0f) }
     LaunchedEffect(daily) { growth.snapTo(0f); growth.animateTo(1f, tween(500)) }
-    val primary = if (onBrand) androidx.compose.ui.graphics.Color.White else MaterialTheme.colorScheme.primary
+    val primary = if (onBrand) InkTone.onSlab else MaterialTheme.colorScheme.primary
     val surface = MaterialTheme.colorScheme.surfaceContainerHigh
     Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large, color = if (onBrand) androidx.compose.ui.graphics.Color.Transparent else surface.copy(alpha = .45f)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -458,7 +583,7 @@ private fun WeekChart(daily: List<DailyStat>, onBrand: Boolean = false) {
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-                daily.forEach { Text(weekdayLabel(it.date), style = MaterialTheme.typography.labelMedium, color = if (onBrand) androidx.compose.ui.graphics.Color.White.copy(alpha = .75f) else MaterialTheme.colorScheme.onSurface) }
+                daily.forEach { Text(weekdayLabel(it.date), style = MaterialTheme.typography.labelMedium, color = if (onBrand) InkTone.onSlab.copy(alpha = .75f) else MaterialTheme.colorScheme.onSurface) }
             }
         }
     }
@@ -466,10 +591,10 @@ private fun WeekChart(daily: List<DailyStat>, onBrand: Boolean = false) {
 
 @Composable
 private fun ExecutionRow(record: ExecutionRecordDto, planName: String?) {
-    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = androidx.compose.ui.graphics.Color.Transparent) {
         Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Column(Modifier.weight(1f)) { Text(planName ?: "计划 #${record.planId}", style = MaterialTheme.typography.titleMedium); Text(record.startedAt ?: "未记录开始时间", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            Text(executionStatusLabel(record.status), color = MaterialTheme.colorScheme.primary)
+            Text(executionStatusLabel(record.status), style = InkText.eyebrow, color = InkTone.jade)
         }
     }
 }
@@ -502,9 +627,129 @@ private fun weekdayLabel(value: String?): String {
 // Keep the same title/status geometry for cached reports and empty/error states.
 @Composable
 private fun StatsStatusHeader(syncStatus: @Composable () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 26.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("执行报告", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black,
-            modifier = Modifier.weight(1f))
-        syncStatus()
+    InkMasthead(eyebrow = "", title = "统计", modifier = Modifier.padding(top = 20.dp).inkReveal(0), trailing = { syncStatus() })
+}
+
+/** 每个时间尺度的主色：今日 = 朱，本周 = 靛，本月 = 黛。 */
+private fun periodHue(period: String): InkHue.Hue = when (period) {
+    "day" -> InkHue.seal
+    "month" -> InkHue.work
+    else -> InkHue.study
+}
+
+/**
+ * 时间尺度图：三种尺度三张不同的图，切换时左右滑入——
+ * 今日 = 日晷（今天的计划落在 24 小时圆环上），本周 = 七日完成柱，本月 = 月历点阵。
+ */
+@Composable
+private fun PeriodChart(period: String, report: StatsResponse?, plans: List<PlanSnapshotEntity>) {
+    val hue = periodHue(period)
+    val color = hue.color()
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(hue.tint()).padding(16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(color))
+            Text(when (period) { "day" -> "  今日的安排"; "month" -> "  本月的节奏"; else -> "  本周的完成" },
+                style = MaterialTheme.typography.titleMedium, color = InkTone.text)
+            Spacer(Modifier.weight(1f))
+            Text("完成 ${report?.completedCount ?: 0}", style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = color)
+        }
+        when (period) {
+            "day" -> DayDial(plans, report)
+            "month" -> MonthGrid(report?.daily.orEmpty(), color)
+            else -> WeekBars(normalizedWeek(report?.daily.orEmpty()), color)
+        }
+    }
+}
+
+@Composable
+private fun DayDial(plans: List<PlanSnapshotEntity>, report: StatsResponse?) {
+    val now = Calendar.getInstance()
+    val nowMinutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+    val todayKey = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(now.time) }
+    val entries = remember(plans, todayKey) { DayTimeline.build(todayKey, plans, emptyList(), nowMinutes, collapseOverlaps = false) }
+    val arcs = entries.map { entry ->
+        val type = plans.firstOrNull { it.id == entry.id }?.type
+        DialArc(entry.startMin.coerceAtLeast(0), entry.endMin.coerceAtMost(1440),
+            (if (entry.state == TimelineState.RUNNING) InkHue.seal else InkHue.forType(type)).color(),
+            emphasized = entry.state == TimelineState.RUNNING)
+    }
+    Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
+        SundialDial(arcs, nowMinutes, Modifier.size(220.dp), ringWidth = 12.dp) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("${entries.size}", style = V2Tokens.numeralLarge.themed().copy(fontSize = 40.sp), color = InkTone.text)
+                Text("项计划", style = InkText.meta, color = InkTone.soft)
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeekBars(days: List<DailyStat>, color: androidx.compose.ui.graphics.Color) {
+    val reduced = LocalReducedMotion.current
+    val grow = remember { Animatable(if (reduced) 1f else 0f) }
+    LaunchedEffect(days) { if (!reduced) { grow.snapTo(0f); grow.animateTo(1f, tween(700, easing = Ink.Easing)) } }
+    val max = (days.maxOfOrNull { it.completed } ?: 0).coerceAtLeast(1)
+    val todayKey = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(java.util.Date()) }
+    Row(Modifier.fillMaxWidth().height(150.dp).padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Bottom) {
+        days.forEach { day ->
+            val isToday = day.date == todayKey
+            Column(Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Bottom) {
+                if (day.completed > 0) Text("${day.completed}", style = InkText.meta.copy(fontSize = 10.sp), color = color)
+                Box(
+                    Modifier.fillMaxWidth().fillMaxHeight(((day.completed.toFloat() / max) * .78f * grow.value).coerceAtLeast(.03f))
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isToday) color else color.copy(alpha = .45f))
+                )
+                Text(weekdayLabel(day.date), style = InkText.meta.copy(fontSize = 10.sp, fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal),
+                    color = if (isToday) color else InkTone.faint, modifier = Modifier.padding(top = 6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun MonthGrid(daily: List<DailyStat>, color: androidx.compose.ui.graphics.Color) {
+    val cal = Calendar.getInstance()
+    val today = cal.get(Calendar.DAY_OF_MONTH)
+    val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+    val first = (cal.clone() as Calendar).apply { set(Calendar.DAY_OF_MONTH, 1) }
+    val lead = (first.get(Calendar.DAY_OF_WEEK) + 5) % 7 // 周一开头
+    val prefix = SimpleDateFormat("yyyy-MM-", Locale.US).format(cal.time)
+    val byDay = daily.mapNotNull { d -> d.date?.takeIf { it.startsWith(prefix) }?.substring(8)?.toIntOrNull()?.let { it to d.completed } }.toMap()
+    val max = (byDay.values.maxOrNull() ?: 0).coerceAtLeast(1)
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth()) {
+            listOf("一", "二", "三", "四", "五", "六", "日").forEach {
+                Text(it, style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.faint, modifier = Modifier.weight(1f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            }
+        }
+        val cells = lead + daysInMonth
+        (0 until (cells + 6) / 7).forEach { week ->
+            Row(Modifier.fillMaxWidth()) {
+                (0 until 7).forEach { col ->
+                    val day = week * 7 + col - lead + 1
+                    Box(Modifier.weight(1f).aspectRatio(1f).padding(3.dp), contentAlignment = Alignment.Center) {
+                        if (day in 1..daysInMonth) {
+                            val done = byDay[day] ?: 0
+                            val fill = if (done > 0) color.copy(alpha = .25f + .75f * done / max) else androidx.compose.ui.graphics.Color.Transparent
+                            Box(
+                                Modifier.fillMaxSize().clip(androidx.compose.foundation.shape.CircleShape).background(fill)
+                                    .then(if (day == today) Modifier.border(1.5.dp, color, androidx.compose.foundation.shape.CircleShape) else Modifier),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("$day", style = InkText.meta.copy(fontSize = 11.sp),
+                                    color = when { done > 0 && done * 2 >= max -> com.planlock.design.InkTone.onAccent
+                                        day > today -> InkTone.faint.copy(alpha = .5f); else -> InkTone.soft })
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

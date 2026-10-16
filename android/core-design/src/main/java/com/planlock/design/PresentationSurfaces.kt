@@ -3,6 +3,10 @@ package com.planlock.design
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -17,6 +21,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.text.ParsePosition
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -28,9 +33,25 @@ import java.util.TimeZone
 /** Shared surface geometry; callers retain domain state and actions. */
 @Composable
 fun PresentationCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Surface(modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerLow) {
+    Surface(modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = InkTone.raised) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    }
+}
+
+/** 账页：小标题 + 逐行「标签 …… 值」。不画框，行间留白。 */
+@Composable
+fun InkLedger(title: String, rows: List<Pair<String, String>>, modifier: Modifier = Modifier, latin: String? = null,
+    footer: (@Composable ColumnScope.() -> Unit)? = null) {
+    Column(modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, color = InkTone.text)
+        rows.forEach { (label, value) ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 9.dp), verticalAlignment = Alignment.Top) {
+                Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = InkTone.faint)
+                Text(value, Modifier.weight(2f), style = MaterialTheme.typography.bodyMedium, color = InkTone.text,
+                    textAlign = TextAlign.End)
+            }
+        }
+        footer?.invoke(this)
     }
 }
 
@@ -53,24 +74,21 @@ fun <T> ChoiceChips(options: List<Pair<T, String>>, selected: T, onSelect: (T) -
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SectionHeading(title: String, detail: String? = null) {
-    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(title, style = MaterialTheme.typography.titleLarge)
-        detail?.let { Text(it, style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 2.dp), verticalAlignment = Alignment.Bottom) {
+        Text(title, style = MaterialTheme.typography.titleMedium, color = InkTone.text)
+        detail?.let { Text("  $it", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint, modifier = Modifier.padding(bottom = 2.dp)) }
     }
 }
 
 @Composable
 fun PickerField(title: String, value: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Surface(modifier.fillMaxWidth().heightIn(min = 64.dp).semantics { role = Role.Button }
-        .clickable(onClick = onClick), shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        .clickable(onClick = onClick), shape = RoundedCornerShape(14.dp),
+        color = InkTone.raised) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(title, style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(title, style = InkText.eyebrow, color = InkTone.faint)
                 Text(value.ifBlank { "请选择" }, style = MaterialTheme.typography.bodyLarge)
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "选择$title")

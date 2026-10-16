@@ -78,6 +78,10 @@ class PluginInstaller(
 
 class HttpPluginDownloader : PluginDownloader {
     override fun download(url: String, target: File): Long {
+        PluginPublicTransport.get?.let { get ->
+            target.writeBytes(get(url))
+            return target.length()
+        }
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
         connection.readTimeout = 30_000

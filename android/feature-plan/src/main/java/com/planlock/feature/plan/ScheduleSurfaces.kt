@@ -1,5 +1,24 @@
 package com.planlock.feature.plan
 
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import com.planlock.design.InkFullScreenPage
+import com.planlock.design.PresentationCard
+import com.planlock.design.SettingSwitch
 import com.planlock.design.PickerField
 import com.planlock.design.PlanDatePicker
 import com.planlock.design.PlanTimePicker
@@ -31,6 +50,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import com.planlock.app.api.dto.ScheduleUpsertRequest
 import com.planlock.app.api.AssistantScheduleDraft
 import com.planlock.app.record.DayTimeline
@@ -51,12 +78,8 @@ internal fun CreateActionSheet(onDismiss: () -> Unit, onPlan: () -> Unit, onSche
         title = { Text("新建") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Surface(Modifier.fillMaxWidth().heightIn(min = 64.dp).clickable(onClick = onPlan), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                    Column(Modifier.padding(16.dp)) { Text("计划"); Text("需要执行与进度追踪的时间块", style = MaterialTheme.typography.bodyMedium) }
-                }
-                Surface(Modifier.fillMaxWidth().heightIn(min = 64.dp).clickable(onClick = onSchedule), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                    Column(Modifier.padding(16.dp)) { Text("日程"); Text("事件、纪念日与提醒", style = MaterialTheme.typography.bodyMedium) }
-                }
+                CreateChoice("行", "计划", "需要执行与进度追踪的时间块", com.planlock.design.InkTone.slab, onPlan)
+                CreateChoice("记", "日程", "事件、纪念日与提醒", com.planlock.design.InkTone.brass, onSchedule)
             }
         },
         confirmButton = {},
@@ -64,8 +87,27 @@ internal fun CreateActionSheet(onDismiss: () -> Unit, onPlan: () -> Unit, onSche
     )
 }
 
+@Composable
+private fun CreateChoice(glyph: String, title: String, detail: String, seal: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
+    Surface(
+        Modifier.fillMaxWidth().heightIn(min = 72.dp).clickable(onClick = onClick),
+        shape = MaterialTheme.shapes.medium,
+        color = com.planlock.design.InkTone.raised,
+        border = androidx.compose.foundation.BorderStroke(1.dp, com.planlock.design.InkTone.hairline),
+    ) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            com.planlock.design.InkSeal(glyph, sealSize = 42.dp, color = seal)
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
 private data class RepeatOption(val label: String, val type: String?)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScheduleEditorSheet(
     current: ScheduleSnapshotEntity?,
@@ -119,12 +161,28 @@ fun ScheduleEditorSheet(
         endDate >= startDate &&
         editDraft.timesValid(allDay) && editDraft.reminderValid && editDraft.ruleCanBeSaved
 
-    AlertDialog(
-        onDismissRequest = { if (!saving) onDismiss() },
-        title = { Text(if (current == null) "新建日程" else "编辑日程") },
-        text = {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                item { OutlinedTextField(title, { title = it }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
+    // v4.1：与「新建计划」一致的全屏编辑页，而不是弹窗。
+    InkFullScreenPage(onDismissRequest = { if (!saving) onDismiss() }) {
+        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).imePadding()) {
+            TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
+                title = { Text(if (current == null) "新建日程" else "编辑日程", style = MaterialTheme.typography.titleLarge) },
+                navigationIcon = { IconButton(enabled = !saving, onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
+                actions = {
+                    onDelete?.let {
+                        TextButton(modifier = Modifier.heightIn(min = 48.dp), enabled = !saving, onClick = it) {
+                            Text("删除", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                },
+                windowInsets = WindowInsets(0, 0, 0, 0),
+            )
+            LazyColumn(
+                Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item { OutlinedTextField(title, { title = it }, label = { Text("日程标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
                 if (draft != null && (validStartDate == null || validEndDate == null)) item {
                     Text("日期尚未确定，请选择开始与结束日期后保存。", color = MaterialTheme.colorScheme.error)
                 }
@@ -132,21 +190,27 @@ fun ScheduleEditorSheet(
                     Text("时刻尚未确定，请选择开始与结束时间，或选择全天。", color = MaterialTheme.colorScheme.error)
                 }
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        PickerField("开始日期", startDate) { dateField = "start" }
-                        PickerField("结束日期", endDate) { dateField = "end" }
+                    ScheduleSection("日期") {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            PickerField("开始", startDate, Modifier.weight(1f)) { dateField = "start" }
+                            PickerField("结束", endDate, Modifier.weight(1f)) { dateField = "end" }
+                        }
+                        if (validStartDate != null && validEndDate != null && endDate < startDate) {
+                            Text("结束日期不能早于开始日期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                        }
+                        SettingSwitch("全天", "不设具体时刻，整天显示在日程里", allDay) { allDay = it }
                     }
                 }
-                item { Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(allDay, { allDay = it }); Text("全天") } }
                 if (!allDay) item {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        PickerField("开始时间", startTime.ifEmpty { "未设置" }) { timeField = "start" }
-                        PickerField("结束时间", endTime.ifEmpty { "未设置" }) { timeField = "end" }
+                    ScheduleSection("时间") {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            PickerField("开始", startTime.ifEmpty { "未设置" }, Modifier.weight(1f)) { timeField = "start" }
+                            PickerField("结束", endTime.ifEmpty { "未设置" }, Modifier.weight(1f)) { timeField = "end" }
+                        }
                     }
                 }
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("重复")
+                    ScheduleSection("重复") {
                         val preserved = "preserved"
                         val options = repeatOptions.map { it.type to it.label }
                         if (editDraft.showsPreservedRule) {
@@ -159,43 +223,51 @@ fun ScheduleEditorSheet(
                         )
                     }
                 }
-                item { OutlinedTextField(reminder, { editDraft = editDraft.withReminder(it.filter(Char::isDigit)) },
-                    label = { Text("提前提醒（分钟）") }, placeholder = { Text("未设置") },
-                    isError = !editDraft.reminderValid,
-                    supportingText = { Text(if (editDraft.reminderValid) "留空表示不提醒" else "请输入有效的非负整数") },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true) }
-                item { OutlinedTextField(location, { location = it }, label = { Text("地点") }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
-                item { OutlinedTextField(note, { note = it }, label = { Text("备注") }, modifier = Modifier.fillMaxWidth()) }
-                if (plans.isNotEmpty()) item {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("关联计划（仅作提示）")
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            FilterChip(selected = linkedPlanId == null, onClick = { linkedPlanId = null }, label = { Text("不关联") })
-                            plans.take(2).forEach { plan ->
-                                FilterChip(
-                                    selected = linkedPlanId == plan.id,
-                                    onClick = { linkedPlanId = plan.id },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    label = { Text(plan.name, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) },
-                                )
-                            }
-                        }
+                item {
+                    ScheduleSection("提醒") {
+                        OutlinedTextField(reminder, { editDraft = editDraft.withReminder(it.filter(Char::isDigit)) },
+                            label = { Text("提前提醒（分钟）") }, placeholder = { Text("未设置") },
+                            isError = !editDraft.reminderValid,
+                            supportingText = { Text(if (editDraft.reminderValid) "留空表示不提醒" else "请输入有效的非负整数") },
+                            modifier = Modifier.fillMaxWidth(), singleLine = true)
                     }
                 }
+                item {
+                    ScheduleSection("地点与备注") {
+                        OutlinedTextField(location, { location = it }, label = { Text("地点") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                        OutlinedTextField(note, { note = it }, label = { Text("备注") }, modifier = Modifier.fillMaxWidth())
+                    }
+                }
+                if (plans.isNotEmpty()) item {
+                    ScheduleSection("关联计划（仅作提示）") {
+                        ChoiceChips(
+                            listOf<Pair<Long?, String>>(null to "不关联") + plans.take(6).map { it.id to it.name },
+                            linkedPlanId,
+                            { linkedPlanId = it },
+                        )
+                    }
+                }
+                item {
+                    Button(
+                        shape = RoundedCornerShape(20.dp),
+                        enabled = valid && !saving,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        onClick = {
+                            onSave(editDraft.request(title.trim(), startDate, endDate, allDay, location, note, linkedPlanId, TimeZone.getDefault().id))
+                        },
+                    ) { Text(if (saving) "保存中…" else "保存日程") }
+                }
             }
-        },
-        confirmButton = {
-            Button(modifier = Modifier.heightIn(min = 48.dp), enabled = valid && !saving, onClick = {
-                onSave(editDraft.request(title.trim(), startDate, endDate, allDay, location, note, linkedPlanId, TimeZone.getDefault().id))
-            }) { Text("保存") }
-        },
-        dismissButton = {
-            Row {
-                onDelete?.let { TextButton(modifier = Modifier.heightIn(min = 48.dp), enabled = !saving, onClick = it) { Text("删除", color = MaterialTheme.colorScheme.error) } }
-                TextButton(modifier = Modifier.heightIn(min = 48.dp), enabled = !saving, onClick = onDismiss) { Text("取消") }
-            }
-        },
-    )
+        }
+    }
+}
+
+@Composable
+private fun ScheduleSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    PresentationCard {
+        Text(title, style = com.planlock.design.InkText.meta, color = com.planlock.design.InkTone.faint)
+        content()
+    }
 }
 
 @Composable
@@ -206,19 +278,47 @@ internal fun TimelineCanvas(
     onSchedule: (Long) -> Unit,
 ) {
     val window = remember(entries, nowMinutes) { DayTimeline.window(entries, nowMinutes) }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("${clock(window.startMin)}—${clock(window.endMin)}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        entries.forEach { entry ->
-            Surface(
-                modifier = Modifier.fillMaxWidth().clickable { if (entry.kind == TimelineKind.PLAN) onPlan(entry.id) else onSchedule(entry.id) },
-                shape = MaterialTheme.shapes.medium,
-                color = if (entry.kind == TimelineKind.PLAN) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
+    val tone = com.planlock.design.InkTone
+    val line = tone.hairline
+    Column(Modifier.fillMaxWidth()) {
+        Text("${clock(window.startMin)} — ${clock(window.endMin)}", style = com.planlock.design.InkText.eyebrow,
+            color = tone.faint, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
+        entries.forEachIndexed { index, entry ->
+            val running = entry.state == com.planlock.app.record.TimelineState.RUNNING
+            val color = when (entry.state) {
+                com.planlock.app.record.TimelineState.RUNNING -> tone.vermilion
+                com.planlock.app.record.TimelineState.UPCOMING -> if (entry.kind == TimelineKind.PLAN) tone.text else tone.brass
+                com.planlock.app.record.TimelineState.ENDED -> tone.faint
+                com.planlock.app.record.TimelineState.PAUSED -> com.planlock.design.Ink.stone
+            }
+            Row(
+                Modifier.fillMaxWidth().height(androidx.compose.foundation.layout.IntrinsicSize.Min)
+                    .clickable { if (entry.kind == TimelineKind.PLAN) onPlan(entry.id) else onSchedule(entry.id) },
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(DayTimeline.rangeLabel(entry), style = MaterialTheme.typography.labelMedium)
-                    Column(Modifier.weight(1f)) { Text(entry.title); Text(entry.sourceLabel, style = MaterialTheme.typography.bodyMedium) }
+                Text(clock(entry.startMin.coerceIn(0, 1439)), style = com.planlock.design.InkText.meta,
+                    color = if (running) color else tone.soft, modifier = Modifier.widthIn(min = 48.dp).padding(end = 4.dp))
+                Box(Modifier.width(22.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    Box(Modifier.width(1.dp).fillMaxHeight().background(line))
+                    Box(Modifier.size(if (running) 10.dp else 8.dp).background(color, androidx.compose.foundation.shape.RoundedCornerShape(2.dp)))
+                }
+                Surface(
+                    modifier = Modifier.weight(1f).padding(vertical = 4.dp),
+                    shape = MaterialTheme.shapes.medium,
+                    color = if (running) tone.vermilion.copy(alpha = .08f) else tone.raised,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (running) color.copy(alpha = .4f) else line),
+                ) {
+                    Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.width(3.dp).height(30.dp).background(color, androidx.compose.foundation.shape.RoundedCornerShape(2.dp)))
+                        Column(Modifier.weight(1f)) {
+                            Text(entry.title, style = MaterialTheme.typography.titleMedium)
+                            Text(DayTimeline.rangeLabel(entry) + " · " + entry.sourceLabel, style = com.planlock.design.InkText.meta.copy(fontSize = 11.sp),
+                                color = tone.faint)
+                        }
+                    }
                 }
             }
+            if (index == entries.lastIndex) Spacer(Modifier.height(4.dp))
         }
     }
 }

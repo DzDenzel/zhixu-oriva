@@ -132,6 +132,32 @@ class PublishRecoveryTests(unittest.TestCase):
 class AuditAndWindowsTests(unittest.TestCase):
  setUp=ReleaseTests.setUp
  git=ReleaseTests.git
+ def test_only_approved_readme_screenshots_are_public(self):
+  approved=('today-ink.png','today-atlas.png','today-phosphor.png')
+  buffer=r.io.BytesIO()
+  with zipfile.ZipFile(buffer,'w') as z:
+   for name in approved:z.writestr('zhixu-oriva-2.1.0/docs/screenshots/'+name,b'PNG fixture')
+  with zipfile.ZipFile(r.io.BytesIO(buffer.getvalue())) as z:
+   self.assertEqual(r.audit_archive(z),3)
+  for private in ('docs/task.md','docs/screenshots/private.png','docs/screenshots/nested/today-ink.png'):
+   with self.subTest(private=private):
+    buffer=r.io.BytesIO()
+    with zipfile.ZipFile(buffer,'w') as z:z.writestr('zhixu-oriva-2.1.0/'+private,'private')
+    with zipfile.ZipFile(r.io.BytesIO(buffer.getvalue())) as z:
+     with self.assertRaises(r.ReleaseError):r.audit_archive(z)
+ def test_deployment_and_workflow_sources_are_public_but_governance_is_private(self):
+  buffer=r.io.BytesIO()
+  with zipfile.ZipFile(buffer,'w') as z:
+   z.writestr('zhixu-oriva-2.1.0/deploy/install.sh','#!/bin/sh\n')
+   z.writestr('zhixu-oriva-2.1.0/.github/workflows/backend-image.yml','name: Publish backend\npassword: ${{ secrets.GITHUB_TOKEN }}\n')
+  with zipfile.ZipFile(r.io.BytesIO(buffer.getvalue())) as z:
+   self.assertEqual(r.audit_archive(z),2)
+  for private in ('Obsidian/task.md','work/evidence.json','.secrets/password.txt','.github/private.txt'):
+   with self.subTest(private=private):
+    buffer=r.io.BytesIO()
+    with zipfile.ZipFile(buffer,'w') as z:z.writestr('zhixu-oriva-2.1.0/'+private,'private')
+    with zipfile.ZipFile(r.io.BytesIO(buffer.getvalue())) as z:
+     with self.assertRaises(r.ReleaseError):r.audit_archive(z)
  def test_credentials_are_rejected(self):
   samples=[b'jarsigner -store'+b'pass example-only-password',b'https'+b'://example-user:example-password@example.invalid/path',b'password: example-only-password']
   for sample in samples:

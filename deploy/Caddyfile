@@ -1,0 +1,7 @@
+{$ORIVA_DOMAIN} {
+    reverse_proxy backend:8080
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+}

@@ -6,15 +6,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Values approved in UI 设计规范 v2.0. Keep this the single source for Compose surfaces. */
+/**
+ * 兼容层：v2 页面仍按 V2Tokens 取值；所有值已改由 UI 设计规范 v3.0「墨序」定义（源头见 [Ink]）。
+ * brand 系列 = 墨块，brandBright = 朱，brandContainer = 朱雾。
+ */
 object V2Tokens {
-    val brand = Color(0xFF182F20)
-    val brandDeep = Color(0xFF173F35)
-    val brandBright = Color(0xFF2E7A66)
-    val onBrand = Color.White
-    val brandContainer = Color(0xFFA8F2D8)
-    val onBrandContainer = Color(0xFF002019)
-    val brandGlow = brand.copy(alpha = .14f)
+    val brand = Ink.ink
+    val brandDeep = Color(0xFF2A2F2C)
+    val brandBright = Ink.vermilion
+    val onBrand = Ink.paperRaised
+    val brandContainer = Color(0xFFF2DCD1)
+    val onBrandContainer = Color(0xFF3D1209)
+    val brandGlow = Ink.vermilion.copy(alpha = .16f)
 
     data class Palette(
         val surface: Color, val surfaceLow: Color, val surfaceContainer: Color,
@@ -25,59 +28,59 @@ object V2Tokens {
     )
 
     val light = Palette(
-        Color(0xFFFBFDF9), Color(0xFFF3F5F1), Color(0xFFEDF0EB),
-        Color(0xFFE4E8E2), Color(0xFFDCE1DA),
-        Color(0xFF191C1A), Color(0xFF414946), Color(0xFF717A76), Color(0xFFC0C9C4),
-        Color(0xFFDCF2E8), Color(0xFFD7F0E2), Color(0xFFFBD9D9),
-        Color(0xFFF7E3C0), Color(0xFFE4E7EA), Color(0xFFD6E3F0),
+        Ink.paper, Ink.paperRaised, Color(0xFFEEE8DC),
+        Ink.paperSunk, Ink.paperDeep,
+        Ink.ink, Ink.inkSoft, Ink.inkFaint, Ink.hairline,
+        Color(0xFFF5DFD5), Color(0xFFDCEAE2), Color(0xFFF4D5D3),
+        Color(0xFFF1E4C6), Color(0xFFE6E1D7), Color(0xFFDCE4EE),
     )
     val dark = Palette(
-        Color(0xFF181F1A), Color(0xFF1E2621), Color(0xFF242D27),
-        Color(0xFF2B352E), Color(0xFF333E36),
-        Color(0xFFE6EAE4), Color(0xFFA8B2AB), Color(0xFF889D8D), Color(0xFF3A443E),
-        Color(0xFF1F3A31), Color(0xFF1E3527), Color(0xFF3B1F1F),
-        Color(0xFF3A2C14), Color(0xFF2A2E31), Color(0xFF1D2A35),
+        Ink.night, Ink.nightRaised, Color(0xFF1A201C),
+        Ink.nightHigh, Ink.nightHighest,
+        Ink.moon, Ink.moonSoft, Ink.moonFaint, Ink.nightHairline,
+        Color(0xFF3A1F18), Color(0xFF16302A), Color(0xFF3B1A1C),
+        Color(0xFF352A14), Color(0xFF24272A), Color(0xFF1A2635),
     )
 
-    val completed = Color(0xFF2F6B4F)
-    val violation = Color(0xFFBA1A1A)
-    val unlock = Color(0xFF8A5700)
-    val paused = Color(0xFF6B7280)
-    val upcoming = Color(0xFF45617B)
+    val completed = Ink.jade
+    val violation = Ink.crimson
+    val unlock = Ink.brass
+    val paused = Ink.stone
+    val upcoming = Ink.indigo
 
-    val shapeXs = 8.dp
-    val shapeSm = 12.dp
-    val shapeMd = 16.dp
-    val shapeLg = 24.dp
-    val shapeXl = 28.dp
-    val shapeXxl = 36.dp
+    // 形状收紧：纸片感，不做大圆角气泡
+    val shapeXs = 4.dp
+    val shapeSm = 8.dp
+    val shapeMd = 12.dp
+    val shapeLg = 16.dp
+    val shapeXl = 20.dp
+    val shapeXxl = 28.dp
     val shapePill = 999.dp
 
-    val numeralHero = TextStyle(fontSize = 56.sp, lineHeight = 60.sp, fontWeight = FontWeight.Bold, fontFeatureSettings = "tnum")
-    val numeralLarge = TextStyle(fontSize = 40.sp, lineHeight = 44.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
-    val numeralMedium = TextStyle(fontSize = 28.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
-    val headlineMedium = TextStyle(fontSize = 28.sp, lineHeight = 36.sp, fontWeight = FontWeight.Bold)
-    val titleLarge = TextStyle(fontSize = 22.sp, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold)
-    val titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold)
-    val bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 24.sp)
-    val bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 21.sp)
-    val labelLarge = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold)
+    val numeralHero = TextStyle(fontFamily = Ink.display, fontSize = 56.sp, lineHeight = 60.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
+    val numeralLarge = TextStyle(fontFamily = Ink.display, fontSize = 40.sp, lineHeight = 44.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
+    val numeralMedium = TextStyle(fontFamily = Ink.display, fontSize = 28.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
+    val headlineMedium = TextStyle(fontFamily = Ink.display, fontSize = 28.sp, lineHeight = 36.sp, fontWeight = FontWeight.Bold)
+    val titleLarge = TextStyle(fontFamily = Ink.display, fontSize = 22.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold)
+    val titleMedium = TextStyle(fontFamily = Ink.display, fontSize = 17.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold)
+    val bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 25.sp)
+    val bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 22.sp)
+    val labelLarge = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = .2.sp)
     val labelMedium = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium)
-    val labelMicro = TextStyle(fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+    val labelMicro = TextStyle(fontFamily = Ink.meta, fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium, letterSpacing = .6.sp)
 
-    // CSS shadow targets: e1 1/3 .06 + 1/2 .04; e2 4/12 .08 + 1/3 .05;
-    // e3 12/32 .12 + 2/6 .06; brandE3 16/36 .18; glow 8/24 .10.
-    val e1 = Shadow(1.dp, 3.dp, .06f, 1.dp, 2.dp, .04f)
-    val e2 = Shadow(4.dp, 12.dp, .08f, 1.dp, 3.dp, .05f)
-    val e3 = Shadow(12.dp, 32.dp, .12f, 2.dp, 6.dp, .06f)
-    val brandE3 = Shadow(16.dp, 36.dp, .18f)
-    val glow = Shadow(8.dp, 24.dp, .10f)
+    // 纸面不靠投影分层，靠发丝线；投影只留给浮起的墨块与导航条。
+    val e1 = Shadow(1.dp, 2.dp, .04f)
+    val e2 = Shadow(2.dp, 8.dp, .06f)
+    val e3 = Shadow(10.dp, 28.dp, .14f, 2.dp, 6.dp, .06f)
+    val brandE3 = Shadow(14.dp, 32.dp, .22f)
+    val glow = Shadow(6.dp, 20.dp, .12f)
     data class Shadow(val y: androidx.compose.ui.unit.Dp, val blur: androidx.compose.ui.unit.Dp, val alpha: Float,
                       val secondY: androidx.compose.ui.unit.Dp = 0.dp,
                       val secondBlur: androidx.compose.ui.unit.Dp = 0.dp, val secondAlpha: Float = 0f)
 
-    const val bentoStaggerMs = 40
-    const val bentoMaxMs = 320
-    const val heroMorphMaxMs = 300
+    const val bentoStaggerMs = Ink.revealStepMs
+    const val bentoMaxMs = 460
+    const val heroMorphMaxMs = 320
     fun motionDuration(reduced: Boolean, durationMs: Int) = if (reduced) 0 else durationMs
 }

@@ -1,10 +1,19 @@
-# Public repository boundary: product source plus these three root files.
+# Public repository boundary: product source, deployment tools and release workflow.
 /*
 !/android/
 !/backend/
+!/deploy/
+!/.github/
 !/README.md
 !/LICENSE
 !/.gitignore
+!/docs/
+/docs/*
+!/docs/screenshots/
+/docs/screenshots/*
+!/docs/screenshots/today-ink.png
+!/docs/screenshots/today-atlas.png
+!/docs/screenshots/today-phosphor.png
 
 # Generated Android/Java builds and compiler state.
 **/build/
@@ -49,3 +58,4 @@
 /.secrets/
 **/work/
 **/tmp/
+/deploy/backups/

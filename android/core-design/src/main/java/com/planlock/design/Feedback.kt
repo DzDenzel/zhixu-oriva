@@ -1,5 +1,15 @@
 package com.planlock.design
 
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.PersonOff
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.animation.animateContentSize
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -30,19 +40,15 @@ internal val feedbackEvents = FeedbackEventLedger()
 fun PersistentStatus(label: String, detail: String, modifier: Modifier = Modifier, compact: Boolean = false) {
     var expanded by remember { mutableStateOf(false) }
     if (compact) {
-        Surface(onClick = { expanded = true },
-            modifier = modifier.fillMaxWidth().height(48.dp).semantics { contentDescription = label },
-            shape = RoundedCornerShape(V2Tokens.shapePill),
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
-            Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Icon(Icons.Outlined.Info, null, Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(label.removeSuffix(" · 详情"), Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelMedium, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+        // 同步异常：右上角一枚琥珀色小圆钮（云 + 斜线），点开看详情；不占标题位置
+        val warn = InkHue.amber.color()
+        Box(
+            modifier.size(36.dp).clip(CircleShape).background(warn.inkTint())
+                .clickable { expanded = true }
+                .semantics { contentDescription = label },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.CloudOff, null, Modifier.size(18.dp), tint = warn)
         }
     } else {
         TextButton(onClick = { expanded = true }, modifier = modifier) {
@@ -50,6 +56,68 @@ fun PersistentStatus(label: String, detail: String, modifier: Modifier = Modifie
         }
     }
     if (expanded) StatusDetailsDialog(label, detail) { expanded = false }
+}
+
+/**
+ * 同步失败的就地提示（v4.0.2）：不再从页面中部浮出提示条，而是让页头右上角的琥珀小圆钮
+ * 原地展开成一枚胶囊「同步未完成 · 重试」，停留 5 秒后收回成圆钮。
+ * 点胶囊正文看详情，点「重试」立即重新同步；位置与平时的同步状态是同一处，用户不用找。
+ */
+@Composable
+fun SyncFailureStatus(label: String, detail: String, announce: Boolean, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    var expanded by remember { mutableStateOf(false) }
+    val warn = InkHue.amber.color()
+    Row(
+        modifier.height(36.dp).clip(CircleShape)
+            .background(warn.inkTint())
+            .border(1.dp, warn.copy(alpha = if (announce) .35f else 0f), CircleShape)
+            .animateContentSize(androidx.compose.animation.core.tween(280, easing = Ink.Easing)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(36.dp).clip(CircleShape).clickable { expanded = true }.semantics { contentDescription = label },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.CloudOff, null, Modifier.size(18.dp), tint = warn)
+        }
+        if (announce) {
+            Text("同步未完成", style = MaterialTheme.typography.labelMedium, color = InkTone.text, maxLines = 1,
+                modifier = Modifier.clickable { expanded = true })
+            Box(Modifier.padding(horizontal = 8.dp).width(1.dp).height(14.dp).background(warn.copy(alpha = .4f)))
+            Text("重试", style = MaterialTheme.typography.labelMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold),
+                color = warn, maxLines = 1,
+                modifier = Modifier.clip(CircleShape).clickable(onClick = onRetry).padding(start = 2.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
+                    .semantics { contentDescription = "重试同步" })
+        }
+    }
+    if (expanded) StatusDetailsDialog(label, detail) { expanded = false }
+}
+
+/**
+ * 未登录胶囊（v4.1）：中性色，不是失败。平时是「未登录 · 登录」；
+ * 一次同步结束后展开为「未登录，未同步 · 登录」几秒。点任意处去账户页登录。
+ */
+@Composable
+fun SyncLoginStatus(announce: Boolean, onLogin: () -> Unit, modifier: Modifier = Modifier) {
+    val ink = InkTone.soft
+    Row(
+        modifier.height(36.dp).clip(CircleShape)
+            .background(InkTone.raised.copy(alpha = .92f))
+            .border(1.dp, if (announce) InkTone.soft.copy(alpha = .45f) else InkTone.hairline, CircleShape)
+            .clickable(onClick = onLogin)
+            .semantics(mergeDescendants = true) { contentDescription = if (announce) "未登录，本次没有同步，点按登录" else "未登录，点按登录" }
+            .animateContentSize(androidx.compose.animation.core.tween(280, easing = Ink.Easing))
+            .padding(start = 10.dp, end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.PersonOff, null, Modifier.size(16.dp), tint = ink)
+        Spacer(Modifier.width(6.dp))
+        Text(if (announce) "未登录，未同步" else "未登录", style = MaterialTheme.typography.labelMedium,
+            color = InkTone.text, maxLines = 1)
+        Box(Modifier.padding(horizontal = 8.dp).width(1.dp).height(14.dp).background(InkTone.hairline))
+        Text("登录", style = MaterialTheme.typography.labelMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold),
+            color = InkTone.accent, maxLines = 1)
+    }
 }
 
 class PluginPermissionPrompt(private val readGranted: () -> Set<PluginCapability>) {
