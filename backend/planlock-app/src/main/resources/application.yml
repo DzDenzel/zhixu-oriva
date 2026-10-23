@@ -30,7 +30,7 @@ mybatis:
   type-aliases-package: com.planlock
 
 planlock:
-  version: ${PLANLOCK_VERSION:2.1.0}
+  version: ${PLANLOCK_VERSION:2.1.1}
   deployment:
     enabled: ${PLANLOCK_DEPLOYMENT_ENABLED:false}
     trusted-proxies: ${PLANLOCK_TRUSTED_PROXIES:}
