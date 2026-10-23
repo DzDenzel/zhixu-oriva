@@ -84,7 +84,7 @@ fun SyncFailureStatus(label: String, detail: String, announce: Boolean, onRetry:
             Text("同步未完成", style = MaterialTheme.typography.labelMedium, color = InkTone.text, maxLines = 1,
                 modifier = Modifier.clickable { expanded = true })
             Box(Modifier.padding(horizontal = 8.dp).width(1.dp).height(14.dp).background(warn.copy(alpha = .4f)))
-            Text("重试", style = MaterialTheme.typography.labelMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold),
+            Text("重试", style = MaterialTheme.typography.labelMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
                 color = warn, maxLines = 1,
                 modifier = Modifier.clip(CircleShape).clickable(onClick = onRetry).padding(start = 2.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
                     .semantics { contentDescription = "重试同步" })
@@ -100,6 +100,19 @@ fun SyncFailureStatus(label: String, detail: String, announce: Boolean, onRetry:
 @Composable
 fun SyncLoginStatus(announce: Boolean, onLogin: () -> Unit, modifier: Modifier = Modifier) {
     val ink = InkTone.soft
+    // v4.5（BUG-110 K3 / 续派 U-a）：窄屏（< 380dp，如 320dp + 字体 1.3）只留 36dp 圆钮，
+    // 把宽度让给计划页「计划 / 日程」切换签——否则切换签的名称会被挤没。读屏仍念「未登录，点按登录」。
+    if (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 380) {
+        Box(
+            modifier.size(36.dp).clip(CircleShape)
+                .background(InkTone.raised.copy(alpha = .92f))
+                .border(1.dp, if (announce) InkTone.soft.copy(alpha = .45f) else InkTone.hairline, CircleShape)
+                .clickable(onClick = onLogin)
+                .semantics { contentDescription = if (announce) "未登录，本次没有同步，点按登录" else "未登录，点按登录" },
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Filled.PersonOff, null, Modifier.size(18.dp), tint = ink) }
+        return
+    }
     Row(
         modifier.height(36.dp).clip(CircleShape)
             .background(InkTone.raised.copy(alpha = .92f))
@@ -115,7 +128,7 @@ fun SyncLoginStatus(announce: Boolean, onLogin: () -> Unit, modifier: Modifier =
         Text(if (announce) "未登录，未同步" else "未登录", style = MaterialTheme.typography.labelMedium,
             color = InkTone.text, maxLines = 1)
         Box(Modifier.padding(horizontal = 8.dp).width(1.dp).height(14.dp).background(InkTone.hairline))
-        Text("登录", style = MaterialTheme.typography.labelMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold),
+        Text("登录", style = MaterialTheme.typography.labelMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
             color = InkTone.accent, maxLines = 1)
     }
 }

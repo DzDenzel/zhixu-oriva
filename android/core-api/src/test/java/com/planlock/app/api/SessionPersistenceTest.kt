@@ -40,6 +40,7 @@ class SessionPersistenceTest {
             assertFalse(TokenStore.hasSession)
             val request = Request.Builder().url("https://example.invalid/").build()
             assertNull(authorizedRequest(request).header("Authorization"))
+            importTestConnection(store)
             val theme = stringPreferencesKey("theme_mode")
             assertTrue(store.data.first()[PlanLockPreferenceKeys.basicToolsEnabled] ?: true)
             store.edit {
@@ -97,8 +98,9 @@ class SessionPersistenceTest {
             assertEquals(42L, TokenStore.state.value.dataOwner)
 
             TokenStore.save(store, AuthSession("other-account", 99, 9, signedIn = true))
-            assertTrue(TokenStore.state.value.ownershipMismatch)
-            assertFalse(TokenStore.canSync)
+            assertFalse(TokenStore.state.value.ownershipMismatch)
+            assertTrue(TokenStore.canSync)
+            assertEquals(99L, TokenStore.localDataUserId)
             TokenStore.observeResponse("test-only-token", 401, 1001)
             assertEquals(AuthValidity.UNKNOWN, TokenStore.state.value.validity)
             TokenStore.save(store, AuthSession("reauthenticated", 42, 8, signedIn = true))

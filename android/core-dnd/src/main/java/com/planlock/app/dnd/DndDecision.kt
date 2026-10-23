@@ -27,7 +27,9 @@ fun decideDndAction(state: DndState): DndAction = when {
         if (state.currentFilter == state.previousFilter) DndAction.Enable else DndAction.Keep
     }
     state.recordedPlanId != null && state.neededPlanId == null -> {
-        if (state.currentFilter == NotificationManager.INTERRUPTION_FILTER_ALARMS && state.previousFilter != null) DndAction.Restore(state.previousFilter)
+        // API 35+ changes our implicit rule, not the global filter contributed by other rules.
+        if (state.api35Plus) DndAction.Restore(NotificationManager.INTERRUPTION_FILTER_ALL)
+        else if (state.currentFilter == NotificationManager.INTERRUPTION_FILTER_ALARMS && state.previousFilter != null) DndAction.Restore(state.previousFilter)
         else DndAction.Clear
     }
     state.recordedPlanId == null && state.neededPlanId == null && state.api35Plus && state.hasPolicyAccess && !state.residualCleanupAttempted -> DndAction.Clear

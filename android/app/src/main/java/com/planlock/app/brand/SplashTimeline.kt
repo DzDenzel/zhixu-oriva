@@ -11,11 +11,11 @@ internal class ColdSplashEntry {
 internal val processSplashEntry = ColdSplashEntry()
 
 internal object SplashMotionTokens {
-    const val durationMs = 1200L
+    const val durationMs = 1600L
     const val backgroundRevealMs = 360L
     const val wordmarkStartMs = 180L
     const val wordmarkEndMs = 580L
-    const val exitStartMs = 980L
+    const val exitStartMs = 1250L
     const val backdropOverscan = .06f
     const val wordmarkRiseDp = 12f
     const val wordmarkWidthDp = 224

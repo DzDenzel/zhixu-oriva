@@ -9,7 +9,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DeviceRegistrationGateTest {
-    @Test fun explicitSignOutWaitsForLoginWithoutRegisteringAndOwnershipMismatchStillFails() = runBlocking {
+    @Test fun explicitSignOutWaitsForLoginOnEitherInstanceWithoutRegistering() = runBlocking {
         var calls = 0
         val coordinator = SyncCoordinator(this) {
             requireAutomaticRegistration(false, AuthState(signedOut = true))
@@ -25,8 +25,8 @@ class DeviceRegistrationGateTest {
         }
         protected.refresh().join()
         assertEquals(0, calls)
-        assertNotNull(protected.state.value.error)
-        assertFalse(protected.state.value.loginRequired)
+        assertNull(protected.state.value.error)
+        assertTrue(protected.state.value.loginRequired)
     }
     @Test fun explicitOwnerLoginRefusalWaitsWithoutFailureOrRepeatedRegistration() = runBlocking {
         val gate = DeviceRegistrationGate()

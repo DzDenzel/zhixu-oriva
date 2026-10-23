@@ -66,7 +66,7 @@ object PermissionIntent {
     fun forKind(context: Context, kind: PermissionKind): Intent = when (kind) {
         PermissionKind.USAGE_STATS -> Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, android.net.Uri.parse("package:${context.packageName}"))
         PermissionKind.ACCESSIBILITY -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-        PermissionKind.DND -> Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+        PermissionKind.DND -> CapabilityAccess(context).request(Capability.DND).settingsIntent
         PermissionKind.NOTIFICATIONS -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
             .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
         PermissionKind.LOCATION -> appDetails(context)

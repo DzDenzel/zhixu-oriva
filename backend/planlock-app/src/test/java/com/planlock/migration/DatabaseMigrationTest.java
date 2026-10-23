@@ -30,6 +30,62 @@ class DatabaseMigrationTest {
     private static final Path EVIDENCE = Path.of(System.getenv().getOrDefault("F37_EVIDENCE_DIR", "target/f37-evidence"));
 
     @Test
+    void customTypesRoundTripWithoutLeakingAcrossAccountsAndDeletionCannotResurrect() throws Exception {
+        try (Schema schema = new Schema("plan_types")) {
+            try (var app = start(schema)) {
+                schema.execute("INSERT INTO users(id,email) VALUES(8001,'types-one@example.invalid'),(8002,'types-two@example.invalid')");
+                var service = app.getBean(com.planlock.sync.service.SyncService.class);
+                String key = "custom:12345678-1234-1234-1234-123456789abc";
+                var type = new com.planlock.sync.dto.SyncPushRequest.PlanTypeItem();
+                type.setTypeKey(key); type.setName("写作"); type.setColor("rose"); type.setMutationId("create-type");
+                var request = new com.planlock.sync.dto.SyncPushRequest(); request.setPlanTypes(List.of(type));
+                assertThat(service.push(8001L,request).getResults().getFirst().isOk()).isTrue();
+                assertThat(service.push(8001L,request).getResults().getFirst().getVersion()).isZero();
+                assertThat(service.pull(8002L).getPlanTypes()).isEmpty();
+                assertThat(service.pull(8001L).getPlanTypes().getFirst().getName()).isEqualTo("写作");
+                schema.execute("INSERT INTO plans(user_id,name,type,start_time,end_time) VALUES(8001,'custom-plan','"+key+"','09:00','10:00'),(8001,'legacy-plan','sleep','11:00','12:00')");
+                type.setName("绘画"); type.setMutationId("rename-type");
+                assertThat(service.push(8001L,request).getResults().getFirst().getVersion()).isEqualTo(1L);
+                assertThat(schema.query("SELECT name,type FROM plans WHERE user_id=8001 ORDER BY id")).containsExactly("custom-plan|"+key,"legacy-plan|sleep");
+                type.setName("摄影"); type.setMutationId("second-owner");
+                service.push(8002L,request);
+                assertThat(service.pull(8002L).getPlanTypes().getFirst().getName()).isEqualTo("摄影");
+                type.setName("绘画"); type.setDeleted(true); type.setMutationId("delete-type");
+                assertThat(service.push(8001L,request).getResults().getFirst().isOk()).isTrue();
+                assertThat(schema.query("SELECT type,version FROM plans WHERE user_id=8001 ORDER BY id")).containsExactly("其他|1","sleep|0");
+                type.setDeleted(false); type.setName("离线改名"); type.setMutationId("stale-rename");
+                service.push(8001L,request);
+                var deleted = service.pull(8001L).getPlanTypes().getFirst();
+                assertThat(deleted.getDeleted()).isTrue(); assertThat(deleted.getName()).isEqualTo("绘画");
+                var plan = new com.planlock.sync.dto.SyncPushRequest.PlanItem();
+                plan.setName("offline-plan"); plan.setType(key); plan.setStartTime(java.time.LocalTime.of(9,0)); plan.setEndTime(java.time.LocalTime.of(10,0)); plan.setClientId("offline-create");
+                var planRequest = new com.planlock.sync.dto.SyncPushRequest(); planRequest.setPlans(List.of(plan));
+                assertThat(service.push(8001L,planRequest).getResults().getFirst().isOk()).isTrue();
+                assertThat(schema.query("SELECT type FROM plans WHERE user_id=8001 AND name='offline-plan'")).containsExactly("其他");
+                var ordinary = new com.planlock.plan.dto.PlanUpsertRequest();
+                ordinary.setName("ordinary-create"); ordinary.setType(key); ordinary.setStartTime(java.time.LocalTime.of(9,0)); ordinary.setEndTime(java.time.LocalTime.of(10,0));
+                assertThat(app.getBean(com.planlock.plan.service.PlanService.class).create(8001L,ordinary).getType()).isEqualTo("其他");
+                schema.execute("INSERT INTO plans(user_id,name,type,start_time,end_time) VALUES(8002,'guest-plan','"+key+"','09:00','10:00')");
+                var merge = app.getBean(com.planlock.account.mapper.MergeMapper.class);
+                merge.transferPlans(8002L,8001L); merge.transferPlanTypes(8002L,8001L); merge.clearGuestPlanTypes(8002L); merge.reassignDeletedPlanTypes(8001L);
+                assertThat(service.pull(8002L).getPlanTypes()).isEmpty();
+                assertThat(schema.query("SELECT type FROM plans WHERE name='guest-plan'")).containsExactly("其他");
+                for (String color : List.of("hobby", "other")) {
+                    var extra = new com.planlock.sync.dto.SyncPushRequest.PlanTypeItem();
+                    extra.setTypeKey("custom:" + color + "-qa"); extra.setName(color.equals("hobby") ? "橙色" : "灰色");
+                    extra.setColor(color); extra.setMutationId("new-color-" + color);
+                    var colorRequest = new com.planlock.sync.dto.SyncPushRequest(); colorRequest.setPlanTypes(List.of(extra));
+                    assertThat(service.push(8001L, colorRequest).getResults().getFirst().isOk()).isTrue();
+                    assertThat(schema.query("SELECT color FROM plan_types WHERE user_id=8001 AND type_key='custom:" + color + "-qa'"))
+                            .containsExactly(color);
+                }
+                evidence("type-colors-roundtrip.txt", String.join("\n", schema.query("SELECT type_key,color FROM plan_types WHERE user_id=8001 AND type_key LIKE 'custom:%-qa' ORDER BY type_key")) + "\n");
+                evidence("plan-types-roundtrip.txt","Real MySQL isolated schema: 43-character stable key, idempotent creation, rename, per-owner catalog, deletion reassignment, legacy sleep retained, stale rename/create tombstone protection, ordinary REST create, guest merge all passed.\n");
+            }
+        }
+    }
+
+    @Test
     void concurrentDeploymentInitializationCreatesExactlyOneOwnerAndKeepsIdentityAfterRestart() throws Exception {
         try (Schema schema = new Schema("setup_concurrent")) {
             String identity;
@@ -81,7 +137,7 @@ class DatabaseMigrationTest {
             try (var app = start(schema)) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1");
+                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
                 snapshot(schema, "empty");
             }
         }
@@ -97,20 +153,23 @@ class DatabaseMigrationTest {
                 ScriptUtils.executeSqlScript(c, new org.springframework.core.io.ByteArrayResource(tablesOnly.getBytes(StandardCharsets.UTF_8)));
             }
             schema.execute("INSERT INTO users(id,email) VALUES (9001,'f37-sentinel@example.invalid')");
+            schema.execute("INSERT INTO plans(id,user_id,name,type,start_time,end_time) VALUES (9001,9001,'f37-old-plan','学习','09:00:00','10:00:00')");
             snapshot(schema, "existing-before");
             List<String> after;
             List<String> dataBefore = rowCounts(schema);
             try (var app = start(schema, "--spring.flyway.baseline-on-migrate=true", "--spring.flyway.baseline-version=2")) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1");
+                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
                 after = snapshot(schema, "existing");
                 assertCreationIdentityStructure(schema);
+                assertThat(schema.query("SELECT name,ended_occurrence_date,status_log FROM plans WHERE id=9001"))
+                        .containsExactly("f37-old-plan|<NULL>|<NULL>");
                 assertThat(rowCounts(schema)).isEqualTo(dataBefore);
             }
             try (var app = start(schema)) {
                 assertThat(app.isActive()).isTrue();
-                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1");
+                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
                 assertThat(snapshot(schema, "restart")).isEqualTo(after);
                 assertThat(rowCounts(schema)).isEqualTo(dataBefore);
                 assertThat(schema.query("SELECT email FROM users WHERE id=9001")).containsExactly("f37-sentinel@example.invalid");
@@ -119,7 +178,7 @@ class DatabaseMigrationTest {
                 try (var app = start(fresh)) {
                     assertBusinessStructure(fresh);
                     assertThat(snapshot(fresh, "comparison-empty")).isEqualTo(after);
-                    evidence("structure-diff.txt", "fresh V4 == upgraded existing V2 == restart; difference: []\n");
+                    evidence("structure-diff.txt", "fresh V7 == upgraded existing V2 == restart; difference: []\n");
                 }
             }
         }
@@ -129,9 +188,9 @@ class DatabaseMigrationTest {
     void brokenMigrationStopsApplicationStartupWithFailedHistoryEntry() throws Exception {
         try (Schema schema = new Schema("broken")) {
             assertThatThrownBy(() -> start(schema, "--spring.flyway.locations=classpath:db/migration,classpath:db/f37-broken"))
-                    .hasStackTraceContaining("V5__intentional_syntax_error.sql")
+                    .hasStackTraceContaining("V8__intentional_syntax_error.sql")
                     .hasStackTraceContaining("SQL State");
-            assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|0");
+            assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1", "8|SQL|0");
             assertBusinessStructure(schema);
             snapshot(schema, "broken");
         }
@@ -143,8 +202,8 @@ class DatabaseMigrationTest {
             try (var app = start(schema, "--spring.flyway.baseline-on-migrate=true", "--spring.flyway.baseline-version=2")) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1");
-                evidence("baseline-empty.txt", "Completely empty schema: V1, V2, V3 and V4 executed despite baseline override.\n");
+                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
+                evidence("baseline-empty.txt", "Completely empty schema: V1 through V7 executed despite baseline override.\n");
             }
         }
     }
@@ -320,8 +379,10 @@ class DatabaseMigrationTest {
 
     private static void assertBusinessStructure(Schema schema) throws Exception {
         assertThat(schema.query("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='" + schema.name + "' AND TABLE_NAME <> 'flyway_schema_history' ORDER BY TABLE_NAME"))
-                .containsExactly("deployment_instance", "devices", "execution_records", "plan_strategies", "plans", "schedules", "unlock_records", "users", "violation_records");
+                .containsExactly("deployment_instance", "devices", "execution_records", "plan_strategies", "plan_types", "plans", "schedules", "unlock_records", "users", "violation_records");
         assertThat(schema.query("SELECT id, initialized, owner_user_id FROM deployment_instance")).containsExactly("1|0|<NULL>");
+        assertThat(schema.query("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{0}' AND TABLE_NAME='plans' AND COLUMN_NAME IN ('ended_occurrence_date','status_log') ORDER BY COLUMN_NAME".replace("{0}", schema.name)))
+                .containsExactly("ended_occurrence_date|date|YES", "status_log|json|YES");
         assertThat(schema.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" + schema.name + "' AND TABLE_NAME='deployment_instance' ORDER BY ORDINAL_POSITION"))
                 .containsExactly("id","instance_id","initialized","instance_label","owner_user_id","initialized_at");
         assertThat(schema.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" + schema.name + "' AND TABLE_NAME='violation_records' AND COLUMN_NAME IN ('started_at','ended_at','duration_ms','source_level') ORDER BY COLUMN_NAME"))

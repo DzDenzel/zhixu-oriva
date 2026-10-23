@@ -26,17 +26,18 @@ class ContentAdmissionTest {
     }
 
     @Test
-    fun `ordinary animation admits cheap real first frame after reveal`() {
+    fun `ready local data mounts final tree while splash is still opaque`() {
         val decision = startupContentDecision(true, true, true, key, ready)
-        assertEquals(StartupContentStage.FIRST_FRAME, decision.stage)
+        assertEquals(StartupContentStage.FULL, decision.stage)
         assertSame(read, decision.read)
     }
 
     @Test
-    fun `first frame and full content handoff retain the exact same local read`() {
+    fun `splash dismissal keeps final stage and the exact same local read`() {
         val first = startupContentDecision(true, true, true, key, ready)
         val full = startupContentDecision(true, false, true, key, ready)
         assertEquals(StartupContentStage.FULL, full.stage)
+        assertEquals(first.stage, full.stage)
         assertSame(first.read, full.read)
     }
 
@@ -66,7 +67,7 @@ class ContentAdmissionTest {
         val failedRead = TodayLocalRead(null, "本机数据读取失败，请重试")
         val failed = TodayLocalState(key, failedRead, TodayLocalPhase.READY)
         val decision = startupContentDecision(true, true, true, key, failed)
-        assertEquals(StartupContentStage.FIRST_FRAME, decision.stage)
+        assertEquals(StartupContentStage.FULL, decision.stage)
         assertSame(failedRead, decision.read)
     }
 

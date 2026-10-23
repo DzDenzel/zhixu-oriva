@@ -16,8 +16,8 @@ android {
         applicationId = "com.planlock.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 3
-        versionName = "2.1.0"
+        versionCode = 4
+        versionName = "2.1.1"
     }
 
     buildTypes {
@@ -78,4 +78,5 @@ dependencies {
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.room.runtime)
     androidTestImplementation(libs.androidx.room.ktx)
+    androidTestImplementation(libs.okhttp)
 }

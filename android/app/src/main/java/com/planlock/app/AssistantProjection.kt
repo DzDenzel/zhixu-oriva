@@ -10,6 +10,7 @@ import java.util.Locale
 
 /** One accepted projection shared by the assistant and JS queries; never requests refresh. */
 suspend fun loadAssistantSnapshot(store: RecordStore, sync: AppSync, requestedDate: String = ""): AssistantSnapshot {
+    val acceptedScope = store.currentScope()
     val userId = TokenStore.userId
     val plans = store.plans()
     val now = Calendar.getInstance()
@@ -21,13 +22,13 @@ suspend fun loadAssistantSnapshot(store: RecordStore, sync: AppSync, requestedDa
     val cached = sync.cache.read(userId)
     val reports = listOf("day", "week", "month").mapNotNull { period -> cached.stats(period)?.let { period to it } }.toMap()
     val schedules = store.schedules()
-    check(userId == TokenStore.userId) { "User changed during query" }
+    check(userId == TokenStore.userId && acceptedScope == store.currentScope()) { "User changed during query" }
     return AssistantSnapshot(
         today = date,
         arrangements = DayTimeline.build(date, plans, schedules, minutes, collapseOverlaps = false)
             .map { "${DayTimeline.rangeLabel(it)} · ${it.title}（${it.sourceLabel}）" },
         plans = plans.map { AssistantPlanState(it.id, it.name, it.status == 1,
-            date == currentDate && PlanOccurrence.isWithinOccurrence(it, minutes, OccurrenceDate.from(occurrence)),
+            date == currentDate && PlanOccurrence.isActive(it, minutes, OccurrenceDate.from(occurrence)),
             if (date == currentDate) PlanTime.remainingMinutes(it, minutes) else 0) },
         continuousDays = cached.stats("week")?.continuousDays, reports = reports,
         todayUnlocks = cached.today?.unlockCount.takeIf { date == currentDate },

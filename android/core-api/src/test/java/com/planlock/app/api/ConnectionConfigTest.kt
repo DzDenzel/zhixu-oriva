@@ -1,5 +1,6 @@
 package com.planlock.app.api
 
+import com.planlock.core.api.BuildConfig
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -38,6 +39,11 @@ class ConnectionConfigTest {
         assertTrue(lan.lanAllowed)
         try { ConnectionConfig.decode(valid.replace("https://example.org", "http://example.org").replace("false", "true")); fail("Public cleartext accepted") }
         catch (_: IllegalArgumentException) { }
-        assertEquals("http://10.0.2.2:8080/api/v1/", ConnectionConfig.default.apiBaseUrl)
+        if (BuildConfig.BUILD_TYPE == "release") {
+            assertEquals("", BuildConfig.API_BASE_URL)
+            assertNull(ConnectionConfig.initial)
+        } else {
+            assertEquals(BuildConfig.API_BASE_URL, ConnectionConfig.initial?.apiBaseUrl)
+        }
     }
 }

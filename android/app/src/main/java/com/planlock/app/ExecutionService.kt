@@ -16,6 +16,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.planlock.app.api.COLOROS_BASIC_TOOLS
 import com.planlock.app.api.DEFAULT_BASIC_TOOLS
 import com.planlock.app.api.PlanLockPreferenceKeys
@@ -36,7 +37,6 @@ import com.planlock.app.record.RecordEventFactory
 import com.planlock.app.record.ForegroundObservation
 import com.planlock.app.record.ForegroundUsageIntervalTracker
 import com.planlock.app.record.ObservationSource
-import com.planlock.app.record.ExecutionEdgeDetector
 import com.planlock.app.record.PlanOccurrence
 import com.planlock.app.record.OccurrenceDate
 import com.planlock.app.record.entity.PlanSnapshotEntity
@@ -51,7 +51,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 执行调度前台服务（BUG-008）：周期评估 Room 计划 + 本地时间（含跨天），
@@ -72,7 +74,11 @@ class ExecutionService : Service() {
     private val fallbackIntervals = ForegroundUsageIntervalTracker()
     private val recordFactory = RecordEventFactory()
     private val evaluateMutex = Mutex()
+    private val evaluationRequests = AtomicLong()
+    @Volatile private var latestStartId = 0
     private var lastActivePlan: PlanSnapshotEntity? = null
+    private var executionScope: String? = null
+    private var restoredExecutions = false
     private var lastPeriodicSyncAt = 0L
     private val dndFeedbackGate = DndFeedbackGate(FEEDBACK_INTERVAL_MS)
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -87,7 +93,7 @@ class ExecutionService : Service() {
 
     private val tick = object : Runnable {
         override fun run() {
-            scope.launch { evaluate() }
+            requestEvaluation()
             handler.postDelayed(this, TICK_MS)
         }
     }
@@ -104,34 +110,61 @@ class ExecutionService : Service() {
         accessibilityHealthStore = AccessibilityHealthStore(this)
         val request = NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
         connectivity.registerNetworkCallback(request, networkCallback)
+        running = this
         startForegroundCompat()
         handler.postDelayed(tick, TICK_MS)
+        scope.launch { com.planlock.app.api.TokenStore.state.collect { requestEvaluation() } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // App resume/permission return should reconcile immediately instead of
         // waiting for the next 15-second tick.
-        scope.launch { evaluate() }
+        latestStartId = startId
+        requestEvaluation()
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        android.util.Log.i("OrivaExecution", "service-destroyed")
         handler.removeCallbacks(tick)
+        if (running === this) running = null
         runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
         scope.cancel()
         exemptionResolver.close()
         ExecutionEngine.stop()
+        NotificationSilenceController.setRequired(false)
         dnd.reconcileBlocking(null)
         super.onDestroy()
     }
 
-    private suspend fun evaluate() = evaluateMutex.withLock {
+    private fun requestEvaluation() {
+        val request = evaluationRequests.incrementAndGet()
+        scope.launch { evaluate(request) }
+    }
+
+    private suspend fun evaluate(request: Long) = evaluateMutex.withLock { syncClient.withLocalMutation {
+        if (request != evaluationRequests.get()) return@withLocalMutation
+        val currentScope = recordStore.currentScope()
+        if (executionScope != currentScope) {
+            executionScope?.let { previousScope ->
+                val previousStore = recordStore.forScope(previousScope)
+                lastActivePlan?.let { previousStore.finishOccurrence(it.id, System.currentTimeMillis()) }
+                fallbackIntervals.close(System.currentTimeMillis())?.let { previousStore.enqueueViolation(recordFactory.behavior(it)) }
+            }
+            ExecutionEngine.stop()
+            NotificationSilenceController.setRequired(false)
+            lastActivePlan = null
+            restoredExecutions = false
+            dnd.reconcile(null)
+            executionScope = currentScope
+        }
         val rawPreviousId = ExecutionEngine.activePlanId()
         var feedbackPlanId = rawPreviousId ?: 0L
         try {
             val cal = Calendar.getInstance()
+            val evaluatedAt = cal.timeInMillis
             val nowMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
             val occurrenceDate = OccurrenceDate.from(cal)
             val allPlans = recordStore.plans()
@@ -140,14 +173,35 @@ class ExecutionService : Service() {
             val identity = activePlanIdentity(rawPreviousId, lastActivePlan, recordStore::resolvePlanId, selected?.id)
             val previousId = identity.previousId
             feedbackPlanId = previousId ?: 0L
-            val active = selected?.copy(id = requireNotNull(identity.activeId))
-            val edges = ExecutionEdgeDetector.detect(previousId, active?.id)
-            val previousPlan = identity.cachedPlan?.takeIf { it.id == edges.endedPlanId }
-                ?: allPlans.firstOrNull { it.id == edges.endedPlanId }
+            val candidate = selected?.copy(id = requireNotNull(identity.activeId))
+            val existingStart = candidate?.let { recordStore.activeExecution(it.id) }
+            // The transaction rechecks status/endedOccurrenceDate and reuses a persisted start after restart.
+            val active = candidate?.takeIf { recordStore.beginOccurrence(it.id, evaluatedAt) }
+            val previousPlan = allPlans.firstOrNull { it.id == previousId }
+                ?: identity.cachedPlan?.takeIf { it.id == previousId }
+
+            if (!restoredExecutions) {
+                // Recover executions left open while the sticky service/process was absent.
+                // RecordStore retains their original planDate, including a previous-day overnight start.
+                allPlans.filter { it.id != active?.id && it.id != previousId }.forEach { plan ->
+                    if (recordStore.activeExecution(plan.id) != null) PlanCompletion.finish(this, recordStore, plan, evaluatedAt)
+                }
+                restoredExecutions = true
+            }
+
+            // Close the outgoing record before platform calls, so a DND/observer failure cannot lose its edge.
+            if (previousId != null && previousId != active?.id) {
+                val completed = previousPlan?.status == 1 && !PlanOccurrence.isWithinOccurrence(previousPlan, nowMinutes, occurrenceDate)
+                // False means the UI transaction already ended it; never add a duplicate completion edge.
+                if (previousPlan != null && PlanCompletion.finish(this, recordStore, previousPlan, evaluatedAt)) {
+                    if (!completed) ExecutionFeedback.emit(previousId, FeedbackKind.PAUSED)
+                }
+            }
 
             if (active != null) {
                 feedbackPlanId = active.id
                 val strategy = recordStore.strategy(active.id)
+                NotificationSilenceController.setRequired(strategy?.notifySilence == true)
                 val whitePkgs = resolver.resolve(parseCsv(strategy?.whitelistApps))
                 val basicToolsEnabled = planLockPreferences.data.first()[PlanLockPreferenceKeys.basicToolsEnabled] ?: true
                 val exemptionSnapshot = exemptionResolver.resolveSnapshot(basicToolsEnabled)
@@ -159,8 +213,7 @@ class ExecutionService : Service() {
                     exemptionSnapshotGeneration = exemptionSnapshot.generation,
                 )
                 observeFallbackIfNeeded(active.id)
-                if (previousId != active.id) {
-                    recordStore.enqueueExecution(recordFactory.executionStarted(active, System.currentTimeMillis()))
+                if (previousId != active.id && existingStart == null) {
                     ExecutionFeedback.emit(active.id, FeedbackKind.STARTED)
                     executionHaptic(this)
                 }
@@ -174,34 +227,34 @@ class ExecutionService : Service() {
                 }
                 exemptionResolver.close()
                 ExecutionEngine.stop()
+                NotificationSilenceController.setRequired(false)
                 if (dnd.reconcile(null) == com.planlock.app.dnd.DndResult.PermissionMissing) {
                     emitDndPermissionMissing(previousId ?: 0L)
                 }
-            }
-            // 连续两个计划交接时也要反馈上一个的结束，不能只在“无下一项”时庆祝。
-            if (previousId != null && previousId != active?.id) {
-                val previous = previousPlan
-                val completed = previous?.status == 1 && !PlanOccurrence.isActive(previous, nowMinutes, occurrenceDate)
-                previous?.let {
-                    recordStore.enqueueExecution(recordFactory.executionEnded(it, System.currentTimeMillis(), completed))
-                }
-                ExecutionFeedback.emit(previousId, if (completed) FeedbackKind.COMPLETED else FeedbackKind.PAUSED)
-                if (completed) executionHaptic(this)
             }
             lastActivePlan = active
             val now = System.currentTimeMillis()
             if (now - lastPeriodicSyncAt >= SYNC_INTERVAL_MS) {
                 lastPeriodicSyncAt = now
-                syncClient.pushPendingRecords()
+                if (recordStore.pending().isNotEmpty()) syncClient.localChangesCommitted()
+            }
+            if (active == null) withContext(Dispatchers.Main.immediate) {
+                // A stale idle evaluation must not stop a newer start or local-commit request.
+                if (request == evaluationRequests.get() && stopSelfResult(latestStartId)) {
+                    android.util.Log.i("OrivaExecution", "idle-service-stopped")
+                    if (running === this@ExecutionService) running = null
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: SecurityException) {
             emitDndPermissionMissing(feedbackPlanId)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
             // A single evaluation failure must not kill the sticky foreground service.
+            android.util.Log.w("OrivaExecution", "Execution evaluation failed", error)
         }
-    }
+    } }
 
     private fun emitDndPermissionMissing(planId: Long) {
         if (dndFeedbackGate.shouldEmit(planId, System.currentTimeMillis())) {
@@ -240,7 +293,7 @@ class ExecutionService : Service() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
-                NotificationChannel(channelId, "执行调度", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(channelId, "计划进行中", NotificationManager.IMPORTANCE_LOW)
             )
         }
         val pi = PendingIntent.getActivity(
@@ -248,14 +301,35 @@ class ExecutionService : Service() {
         )
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("执行调度中")
+            .setContentText(PlanNotificationCopy.ongoing)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentIntent(pi)
             .build()
         startForeground(1, notification)
+        android.util.Log.i("OrivaExecution", "foreground-notification-started")
     }
 
     companion object {
+        @Volatile private var running: ExecutionService? = null
+
+        /** Idle has no service/notification. Future starts are owned by OS alarms. */
+        internal suspend fun reconcile(context: Context) {
+            running?.let { it.requestEvaluation(); return }
+            if (!AppVisibility.foreground) return
+            withContext(Dispatchers.IO) {
+                val clock = Calendar.getInstance()
+                val minute = clock.get(Calendar.HOUR_OF_DAY) * 60 + clock.get(Calendar.MINUTE)
+                val date = OccurrenceDate.from(clock)
+                if (RecordStore(context).plans().any { PlanOccurrence.isActive(it, minute, date) } && AppVisibility.foreground) {
+                    runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
+                        .onFailure { android.util.Log.w("OrivaExecution", "Execution service start deferred", it) }
+                }
+            }
+        }
+
         private const val TICK_MS = 15_000L
         private const val SYNC_INTERVAL_MS = 5 * 60 * 1000L
         private const val FEEDBACK_INTERVAL_MS = 60 * 60 * 1000L

@@ -29,13 +29,17 @@ class TodayLocalReader(
     private val schedules: suspend () -> List<ScheduleSnapshotEntity>,
     private val overview: suspend (Long?) -> SyncOverview,
     private val weather: suspend () -> WeatherSnapshot?,
+    private val scopedPlans: (suspend (String) -> List<PlanSnapshotEntity>)? = null,
+    private val scopedSchedules: (suspend (String) -> List<ScheduleSnapshotEntity>)? = null,
+    private val scopedOverview: (suspend (String) -> SyncOverview)? = null,
 ) {
     /** Shared disk-only path for cold preload and every subsequent page refresh. */
-    suspend fun read(userId: Long?, todayKey: String): TodayLocalRead = withContext(Dispatchers.IO) {
+    suspend fun read(userId: Long?, todayKey: String, scope: String = ""): TodayLocalRead = withContext(Dispatchers.IO) {
         try {
-            val localPlans = plans()
-            val localSchedules = schedules()
-            val cached = overview(userId)
+            val localPlans = if (scope.isNotEmpty() && scopedPlans != null) scopedPlans.invoke(scope) else plans()
+            val localSchedules = if (scope.isNotEmpty() && scopedSchedules != null) scopedSchedules.invoke(scope) else schedules()
+            check(scope.isEmpty() || localPlans.all { it.scope == scope } && localSchedules.all { it.scope == scope }) { "读取归属已变化" }
+            val cached = if (scope.isNotEmpty() && scopedOverview != null) scopedOverview.invoke(scope) else overview(userId)
             val today = cached.today?.takeIf { it.date == todayKey }
             TodayLocalRead(
                 data = TodayLocalData(
@@ -61,7 +65,8 @@ class TodayLocalReader(
             val store = RecordStore(app)
             val cache = AppSync.get(app).cache
             val weather = WeatherStore(app.planLockPreferences)
-            return TodayLocalReader(store::plans, store::schedules, cache::read, weather::cachedSnapshot)
+            return TodayLocalReader(store::plans, store::schedules, cache::read, weather::cachedSnapshot,
+                scopedPlans = { store.forScope(it).plans() }, scopedSchedules = { store.forScope(it).schedules() }, scopedOverview = cache::readScope)
         }
     }
 }

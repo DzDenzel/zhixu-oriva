@@ -186,7 +186,7 @@ private fun KindSeal(kind: AttachmentKind, edge: Dp) {
         Modifier.size(edge).clip(RoundedCornerShape(edge * .28f)).background(hue.inkTint()),
         contentAlignment = Alignment.Center,
     ) {
-        Text(kind.glyph, color = hue, fontFamily = InkTone.display, fontWeight = FontWeight.Bold,
+        Text(kind.glyph, color = hue, fontFamily = InkTone.display, fontWeight = FontWeight.SemiBold,
             fontSize = if (kind.glyph.length > 1) (edge.value * .26f).sp else (edge.value * .42f).sp)
     }
 }
@@ -217,7 +217,7 @@ private fun FileTile(attachment: AssistantAttachment, onInverse: Boolean) {
             Text(attachment.name, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 color = if (onInverse) InkTone.onInverse else InkTone.text)
             Text(listOf(attachment.kind.label, formatAttachmentSize(attachment.size)).filter { it.isNotEmpty() }.joinToString(" · "),
-                style = InkText.meta.copy(fontSize = 11.sp), color = if (onInverse) InkTone.onInverse.copy(alpha = .7f) else InkTone.faint)
+                style = InkText.caption, color = if (onInverse) InkTone.onInverse.copy(alpha = .7f) else InkTone.soft)
         }
     }
 }
@@ -235,7 +235,7 @@ internal fun AttachmentTray(attachments: List<AssistantAttachment>, onRemove: (A
                     onClick = { onRemove(attachment) }, shape = CircleShape, color = InkTone.inverse,
                     modifier = Modifier.align(Alignment.TopEnd).size(22.dp).semantics { contentDescription = "移除附件 ${attachment.name}" },
                 ) {
-                    Box(contentAlignment = Alignment.Center) { Text("×", color = InkTone.onInverse, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    Box(contentAlignment = Alignment.Center) { Text("×", color = InkTone.onInverse, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
                 }
             }
         }
@@ -268,7 +268,7 @@ internal fun AttachButton(enabled: Boolean, onPickImages: () -> Unit, onPickFile
                 .semantics { contentDescription = "添加附件" },
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text("附", fontFamily = InkTone.display, fontWeight = FontWeight.Black, fontSize = 22.sp,
+                Text("附", fontFamily = InkTone.display, fontWeight = FontWeight.Bold, fontSize = 22.sp,
                     color = if (enabled) InkTone.soft else InkTone.faint)
             }
         }
@@ -292,6 +292,6 @@ private fun MenuLine(title: String, note: String) {
     Column(Modifier.padding(vertical = 4.dp)) {
         Text(title, style = MaterialTheme.typography.titleSmall, color = InkTone.text)
         Spacer(Modifier.height(2.dp))
-        Text(note, style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
+        Text(note, style = InkText.caption, color = InkTone.soft)
     }
 }

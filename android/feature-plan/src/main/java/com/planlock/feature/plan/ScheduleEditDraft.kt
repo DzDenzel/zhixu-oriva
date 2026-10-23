@@ -48,7 +48,9 @@ internal data class ScheduleEditDraft(
             clock(startTime, original?.startTime, startTimeChanged), endDate,
             clock(endTime, original?.endTime, endTimeChanged), allDay,
             optional(location, original?.location), optional(note, original?.note),
-            reminder.toIntOrNull(), rule, linkedPlanId, if (original != null) original.tzId else tzId)
+            reminder.toIntOrNull(), rule, linkedPlanId, if (original != null) original.tzId else tzId,
+            locationLat = original?.locationLat?.takeIf { location == original.location.orEmpty() },
+            locationLon = original?.locationLon?.takeIf { location == original.location.orEmpty() })
     }
 
     companion object {

@@ -3,6 +3,7 @@ package com.planlock.record.controller;
 import com.planlock.common.ApiResponse;
 import com.planlock.common.auth.UserContext;
 import com.planlock.record.dto.ExecutionRecordRequest;
+import com.planlock.record.dto.RecordHistoryResponse;
 import com.planlock.record.dto.StatsResponse;
 import com.planlock.record.dto.TodaySummary;
 import com.planlock.record.dto.UnlockRecordRequest;
@@ -29,6 +30,16 @@ public class RecordController {
 
     private final RecordService recordService;
 
+    /** Called by the existing sync cycle, never by statistics pages. */
+    @GetMapping("/history")
+    public ApiResponse<RecordHistoryResponse> history(@RequestParam(defaultValue = "0") long executionAfterId,
+                                                     @RequestParam(defaultValue = "0") long unlockAfterId,
+                                                     @RequestParam(required = false) Long behaviorAfterId,
+                                                     @RequestParam(defaultValue = "200") int limit) {
+        return ApiResponse.ok(recordService.history(UserContext.userId(), executionAfterId, unlockAfterId,
+                behaviorAfterId == null ? -1 : Math.max(0, behaviorAfterId), limit));
+    }
+
     @PostMapping("/execution")
     public ApiResponse<Void> reportExecution(@Valid @RequestBody ExecutionRecordRequest req) {
         recordService.reportExecution(UserContext.userId(), UserContext.deviceId(), req);
@@ -53,6 +64,7 @@ public class RecordController {
     }
 
     @GetMapping("/stats")
+    @Deprecated(since = "2.1.1", forRemoval = false)
     public ApiResponse<StatsResponse> stats(@RequestParam(defaultValue = "week") String period) {
         return ApiResponse.ok(recordService.stats(UserContext.userId(), period));
     }

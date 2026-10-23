@@ -16,6 +16,11 @@ import java.util.List;
 @Mapper
 public interface ExecutionRecordMapper {
 
+    @Select("SELECT e.* FROM execution_records e JOIN plans p ON e.plan_id = p.id "
+            + "WHERE p.user_id = #{userId} AND e.id > #{afterId} ORDER BY e.id LIMIT #{limit}")
+    List<ExecutionRecord> findHistoryAfter(@Param("userId") Long userId,
+                                         @Param("afterId") long afterId, @Param("limit") int limit);
+
     @Insert("INSERT INTO execution_records(plan_id, device_id, plan_date, status, started_at, ended_at, client_id) "
             + "VALUES(#{planId}, #{deviceId}, #{planDate}, #{status}, #{startedAt}, #{endedAt}, #{clientId})")
     int insert(ExecutionRecord record);

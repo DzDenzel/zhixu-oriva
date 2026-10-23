@@ -15,6 +15,11 @@ import java.util.List;
 @Mapper
 public interface UnlockRecordMapper {
 
+    @Select("SELECT u.* FROM unlock_records u JOIN plans p ON u.plan_id = p.id "
+            + "WHERE p.user_id = #{userId} AND u.id > #{afterId} ORDER BY u.id LIMIT #{limit}")
+    List<UnlockRecord> findHistoryAfter(@Param("userId") Long userId,
+                                      @Param("afterId") long afterId, @Param("limit") int limit);
+
     @Insert("INSERT INTO unlock_records(plan_id, device_id, unlock_at, method, client_id) "
             + "VALUES(#{planId}, #{deviceId}, #{unlockAt}, #{method}, #{clientId})")
     int insert(UnlockRecord record);

@@ -3,6 +3,7 @@ package com.planlock.sync.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.planlock.common.BusinessException;
 import com.planlock.common.ErrorCode;
+import com.planlock.common.PlanStatusLogRules;
 import com.planlock.schedule.ScheduleRules;
 import com.planlock.schedule.dto.ScheduleUpsertRequest;
 import com.planlock.sync.dto.SyncItemResult;
@@ -31,6 +32,7 @@ public class SyncService {
                 .plans(syncMapper.pullPlans(userId))
                 .schedules(syncMapper.pullSchedules(userId))
                 .strategies(syncMapper.pullStrategies(userId))
+                .planTypes(syncMapper.pullPlanTypes(userId))
                 .recordCounts(Map.of(
                         "execution", syncMapper.countExecutions(userId),
                         "violation", syncMapper.countViolations(userId),
@@ -41,6 +43,19 @@ public class SyncService {
     @Transactional
     public SyncPushResponse push(Long userId, SyncPushRequest req) {
         List<SyncItemResult> results = new ArrayList<>();
+        if (req.getPlanTypes() != null) {
+            for (var item : req.getPlanTypes()) {
+                String key = "planType:" + item.getTypeKey();
+                try {
+                    com.planlock.sync.PlanTypeRules.validate(item.getTypeKey(), item.getName(), item.getColor(), item.getMutationId());
+                    item.setName(com.planlock.sync.PlanTypeRules.name(item.getName()));
+                    item.setDeleted(Boolean.TRUE.equals(item.getDeleted()));
+                    syncMapper.upsertPlanType(userId, item);
+                    syncMapper.reassignDeletedPlanType(userId, item.getTypeKey());
+                    results.add(SyncItemResult.builder().key(key).ok(true).code(0).message("ok").version(syncMapper.planTypeVersion(userId,item.getTypeKey())).clientId(item.getMutationId()).build());
+                } catch (BusinessException e) { results.add(fail(key,e,item.getMutationId())); }
+            }
+        }
         if (req.getPlans() != null) {
             for (var item : req.getPlans()) {
                 String key = "plan:" + item.getId();
@@ -91,6 +106,8 @@ public class SyncService {
         input.setStartTime(item.getStartTime());
         input.setEndTime(item.getEndTime());
         input.setAllDay(item.getAllDay());
+        input.setLocationLat(item.getLocationLat());
+        input.setLocationLon(item.getLocationLon());
         input.setRepeatRule(item.getRepeatRule());
         ScheduleRules.validate(input, objectMapper);
 
@@ -113,6 +130,8 @@ public class SyncService {
     }
 
     private void pushPlan(Long userId, SyncPushRequest.PlanItem item) {
+        if (item.getType() != null && item.getType().startsWith("custom:") && Integer.valueOf(1).equals(syncMapper.isDeletedPlanType(userId, item.getType()))) item.setType("其他");
+        PlanStatusLogRules.validate(item.getStatusLog(), objectMapper);
         validateClientId(item.getClientId());
         if (item.getRemindAdvanceMin() == null) {
             item.setRemindAdvanceMin(15);

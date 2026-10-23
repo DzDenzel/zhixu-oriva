@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.security.SecureRandom
 
 class BackupPasswordVerifierTest {
     private val hasher = Pbkdf2PasswordHasher(iterations = 1_000)
@@ -17,9 +18,28 @@ class BackupPasswordVerifierTest {
 
         assertNotEquals(first.saltEncoded, second.saltEncoded)
         assertNotEquals(first.hashEncoded, second.hashEncoded)
-        assertFalse(first.hashEncoded.contains("2468"))
+        assertTrue(first.hashEncoded.matches(Regex("[0-9a-f]{64}")))
+        assertNotEquals("2468", first.hashEncoded)
         assertTrue(hasher.matches("2468", first))
         assertFalse(hasher.matches("0000", first))
+    }
+
+    @Test
+    fun `valid PBKDF2 hash can coincidentally contain password digits`() {
+        // Independently generated PBKDF2-HMAC-SHA256 vector: 1,000 rounds, 256 bits.
+        val fixedRandom = object : SecureRandom() {
+            override fun nextBytes(bytes: ByteArray) {
+                bytes.fill(0)
+                bytes[14] = 0x03
+                bytes[15] = 0xf9.toByte()
+            }
+        }
+        val fixedHasher = Pbkdf2PasswordHasher(iterations = 1_000, random = fixedRandom)
+        val credential = fixedHasher.create("2468")
+        assertEquals("000000000000000000000000000003f9", credential.saltEncoded)
+        assertEquals("52adca10b02b79fcb983a111329093bfe596dd2d62468fc0ad3e499e7d583507", credential.hashEncoded)
+        assertTrue(fixedHasher.matches("2468", credential))
+        assertFalse(fixedHasher.matches("0000", credential))
     }
 
     @Test

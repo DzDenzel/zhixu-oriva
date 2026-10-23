@@ -11,6 +11,8 @@ import com.planlock.design.PresentationCard
 import com.planlock.design.SectionHeading
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -132,6 +134,13 @@ fun SettingsDetailScreen(
     var basicToolsEnabled by remember { mutableStateOf(true) }
     var actionGateEnabled by remember { mutableStateOf(false) }
     var weatherLocation by remember { mutableStateOf<WeatherLocation?>(null) }
+    var parkedCity by remember { mutableStateOf(ParkedCity.get(context)) }
+    // U5（v4.3）：天气城市二选一——当前位置（系统定位）或手动城市；手动优先（WeatherLocationChoice）
+    val locationGate = com.planlock.design.rememberCapabilityPermissionGate()
+    val located by com.planlock.app.api.SystemLocationProvider.get(context).state.collectAsState()
+    LaunchedEffect(domain, weatherLocation) {
+        if (domain == SettingsDomain.WEATHER && weatherLocation == null) runCatching { com.planlock.app.api.SystemLocationProvider.get(context).resolve() }
+    }
     var hasPassword by remember { mutableStateOf<Boolean?>(null) }
     // 设备只在「已登录且未退出」时可管理；退出后不展示上一个账号残留的设备快照（v4.1）。
     val canManageDevices = settingsDevicesManageable(authState)
@@ -163,6 +172,19 @@ fun SettingsDetailScreen(
         } catch (_: IOException) {
             preferencesReadError = "基础工具设置读取失败，请重新打开设置页"
         }
+    }
+
+    val guestOffer by sync.guestMergeOffer.collectAsState()
+    guestOffer?.let { offer ->
+        AlertDialog(onDismissRequest = { scope.launch { sync.chooseGuestMerge(false) } },
+            title = { Text("未登录时的内容") },
+            text = { Text("把未登录时的 ${offer.count} 条内容合并到此账号？") },
+            confirmButton = { TextButton(onClick = { scope.launch {
+                try { sync.chooseGuestMerge(true); sync.localChangesCommitted() }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { feedback("合并未完成，游客内容已保留") }
+            } }) { Text("合并到此账号") } },
+            dismissButton = { TextButton(onClick = { scope.launch { sync.chooseGuestMerge(false) } }) { Text("保留在未登录") } })
     }
 
     dialog?.let { active ->
@@ -201,15 +223,9 @@ fun SettingsDetailScreen(
                             val auth = result?.data
                             if (result?.code == 0 && auth?.token != null) {
                                 try {
-                                    val merged = sync.withSessionChange {
-                                        if (!loginAttempts.isCurrent(attempt)) throw CancellationException("登录操作已取消")
-                                        TokenStore.save(context.planLockPreferences,
-                                            AuthSession(auth.token, auth.userId, auth.deviceId, auth.guestUserId, true), loginConnection)
-                                        try { auth.guestUserId?.takeIf { TokenStore.canSync }?.let { api.merge(MergeRequest(it)).data?.get("mergedPlans") } }
-                                        catch (cancelled: CancellationException) { throw cancelled }
-                                        catch (_: Exception) { null }
-                                    }
-                                    feedback(if (merged != null) "登录成功，已合并 $merged 个本机计划" else "登录成功")
+                                    if (!loginAttempts.isCurrent(attempt)) throw CancellationException("登录操作已取消")
+                                    val merged = sync.commitLogin(auth, loginConnection)
+                                    feedback(if (merged != null) "登录成功，已合并 $merged 条本机内容" else "登录成功")
                                 } catch (e: CancellationException) { throw e }
                                 catch (_: Exception) {
                                     dialogError = "登录身份保存失败，请重试"
@@ -252,23 +268,16 @@ fun SettingsDetailScreen(
                     }
                 }
             )
-            Dialog.WEATHER_CITY -> WeatherCityDialog(
-                current = weatherLocation,
+            Dialog.WEATHER_CITY -> WeatherCitySearchPage(
                 search = weatherClient::searchCities,
                 onDismiss = { dialog = null },
                 onSelect = { location ->
                     scope.launch {
                         weatherStore.saveLocation(location)
+                        sync.weatherLocationChanged()
                         weatherLocation = location
-                        feedback("天气城市已设为 ${location.displayName}")
-                        dialog = null
-                    }
-                },
-                onClear = {
-                    scope.launch {
-                        weatherStore.clearLocation()
-                        weatherLocation = null
-                        feedback("天气城市已清除")
+                        ParkedCity.clear(context); parkedCity = null
+                        feedback("天气城市已设为 ${location.displayName.substringBefore(" · ")}")
                         dialog = null
                     }
                 },
@@ -305,8 +314,10 @@ fun SettingsDetailScreen(
                     SettingsDomain.BASIC_TOOLS -> SettingsHero(mark.glyph, mark.hue, domain.title,
                         if (basicToolsEnabled) "已开启" else "已关闭", basicToolsEnabled, "常用工具不计入分心")
                     SettingsDomain.WEATHER -> SettingsHero(mark.glyph, mark.hue, domain.title,
-                        if (weatherLocation == null) "未设置" else "已设置", weatherLocation != null,
-                        weatherLocation?.displayName ?: "未设置时今日页不显示天气")
+                        when { weatherLocation != null -> "手动"; located.location != null -> "当前位置"; else -> "未设置" },
+                        weatherLocation != null || located.location != null,
+                        // v4.4：地点已在下方卡片里写全，头部不再重复（且等宽字体显示地名很乱）
+                        if (weatherLocation != null || located.location != null) null else "未设置时今日页不显示天气")
                     SettingsDomain.ACCOUNT -> SettingsHero(mark.glyph, mark.hue, domain.title, accountUi.title,
                         authState.session.signedIn && !authState.signedOut && !authState.expired && !authState.ownershipMismatch,
                         accountUi.description)
@@ -372,13 +383,49 @@ fun SettingsDetailScreen(
                     }
                 }
                 SettingsDomain.WEATHER -> item {
-                    SettingsGroup {
-                        SettingsItem(
-                            title = if (weatherLocation == null) "设置城市" else "更改城市",
-                            detail = weatherLocation?.let { "当前：${it.displayName}" } ?: "搜索城市名称，今日页显示当地天气",
-                            onClick = { dialog = Dialog.WEATHER_CITY },
-                        )
-                    }
+                    // v4.3：天气应用式的城市列表（WeatherSettings.kt）
+                    WeatherLocationsSection(
+                        manual = weatherLocation,
+                        parked = parkedCity,
+                        located = located,
+                        onUseMyLocation = {
+                            // 先申请定位；授权后改用定位，手动城市停放在列表里（v4.4：不再删除）
+                            locationGate.request(com.planlock.app.security.Capability.LOCATION) { granted ->
+                                if (granted) scope.launch {
+                                    weatherLocation?.let { ParkedCity.put(context, it); parkedCity = it }
+                                    if (weatherLocation != null) {
+                                        weatherStore.clearLocation()
+                                        sync.weatherLocationChanged()
+                                        weatherLocation = null
+                                    }
+                                    val place = com.planlock.app.api.SystemLocationProvider.get(context).resolve(force = true)
+                                    feedback(if (place != null) "天气将跟随当前位置：${place.displayName.substringBefore(" · ")}" else "暂未获取当前位置，可稍后再试或添加城市")
+                                }
+                            }
+                        },
+                        onAddCity = { dialog = Dialog.WEATHER_CITY },
+                        onActivateCity = { city ->
+                            scope.launch {
+                                weatherStore.saveLocation(city)
+                                sync.weatherLocationChanged()
+                                weatherLocation = city
+                                ParkedCity.clear(context); parkedCity = null
+                                feedback("今日页改为显示 ${city.displayName.substringBefore(" · ")} 的天气")
+                            }
+                        },
+                        onRemoveCity = {
+                            scope.launch {
+                                val wasActive = weatherLocation != null
+                                if (wasActive) {
+                                    weatherStore.clearLocation()
+                                    sync.weatherLocationChanged()
+                                    weatherLocation = null
+                                }
+                                ParkedCity.clear(context); parkedCity = null
+                                feedback(if (wasActive) "已移除手动城市，改为跟随当前位置" else "已移除手动城市")
+                            }
+                        },
+                    )
                 }
                 SettingsDomain.ACCOUNT -> item {
                     if (accountUi.loginLabel.isNotEmpty() || accountUi.showSignOut) SettingsGroup {
@@ -470,7 +517,7 @@ private fun GroupHeader(title: String, status: String? = null) {
 @Composable
 private fun CompactInfoRow(title: String, description: String) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -489,7 +536,7 @@ internal fun PermissionSettingRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text(status, style = MaterialTheme.typography.labelLarge, color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
@@ -574,65 +621,6 @@ private fun LoginDialog(
             Text(it, color = if (it.contains("失败")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
         }
     }
-}
-
-@Composable
-private fun WeatherCityDialog(
-    current: WeatherLocation?,
-    search: suspend (String) -> List<WeatherLocation>,
-    onDismiss: () -> Unit,
-    onSelect: (WeatherLocation) -> Unit,
-    onClear: () -> Unit,
-) {
-    val scope = rememberCoroutineScope()
-    var query by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<WeatherLocation>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    var searched by remember { mutableStateOf(false) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("设置天气城市") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                current?.let { Text("当前：${it.displayName}", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                OutlinedTextField(query, { query = it }, label = { Text("输入城市名称") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                Button(
-                    onClick = {
-                        scope.launch {
-                            loading = true
-                            searched = true
-                            results = try {
-                                search(query)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (_: Exception) {
-                                emptyList()
-                            }
-                            loading = false
-                        }
-                    },
-                    enabled = query.isNotBlank() && !loading,
-                ) { Text(if (loading) "搜索中…" else "搜索") }
-                if (searched && !loading && results.isEmpty()) {
-                    Text("没有找到匹配城市", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                results.forEach { location ->
-                    Surface(
-                        modifier = Modifier.fillMaxWidth().clickable { onSelect(location) },
-                        shape = MaterialTheme.shapes.medium,
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                    ) {
-                        Text(location.displayName, Modifier.padding(12.dp), style = MaterialTheme.typography.titleMedium)
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            if (current != null) TextButton(onClick = onClear, modifier = Modifier.heightIn(min = 48.dp), colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("清除城市") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("关闭") } },
-    )
 }
 
 @Composable

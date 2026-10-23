@@ -1,6 +1,8 @@
 package com.planlock.app.record
 
 import android.content.Context
+import com.planlock.app.api.planLockPreferences
+import kotlinx.coroutines.flow.first
 import androidx.room.Database
 import androidx.room.AutoMigration
 import androidx.room.Room
@@ -33,9 +35,14 @@ import com.planlock.app.record.entity.ScheduleSnapshotEntity
         PendingRecordEntity::class,
         ScheduleSnapshotEntity::class,
         BehaviorAggregateEntity::class,
+        com.planlock.app.record.entity.ExecutionHistoryEntity::class,
+        com.planlock.app.record.entity.RecordHistoryCursor::class,
+        com.planlock.app.record.entity.ScopeMigrationIssue::class,
+        com.planlock.app.record.entity.PlanTypeSnapshotEntity::class,
+        com.planlock.app.record.entity.BehaviorHistoryEntity::class,
     ],
-    version = 6,
-    autoMigrations = [AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4), AutoMigration(from = 4, to = 5), AutoMigration(from = 5, to = 6)],
+    version = 11,
+    autoMigrations = [AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4), AutoMigration(from = 4, to = 5), AutoMigration(from = 5, to = 6), AutoMigration(from = 6, to = 7)],
     exportSchema = true
 )
 abstract class PlanLockDatabase : RoomDatabase() {
@@ -45,6 +52,7 @@ abstract class PlanLockDatabase : RoomDatabase() {
         val revision = MutableStateFlow(0L)
         invalidationTracker.addObserver(object : InvalidationTracker.Observer(
             "plan_snapshot", "strategy_snapshot", "schedule_snapshot", "pending_record", "behavior_aggregate",
+            "execution_history", "record_history_cursor", "plan_type_snapshot", "behavior_history",
         ) {
             override fun onInvalidated(tables: Set<String>) {
                 revision.update { it + 1 }
@@ -58,6 +66,9 @@ abstract class PlanLockDatabase : RoomDatabase() {
     abstract fun pendingRecordDao(): PendingRecordDao
     abstract fun scheduleSnapshotDao(): ScheduleSnapshotDao
     abstract fun behaviorAggregateDao(): BehaviorAggregateDao
+    abstract fun executionHistoryDao(): com.planlock.app.record.dao.ExecutionHistoryDao
+    abstract fun planTypeSnapshotDao(): com.planlock.app.record.dao.PlanTypeSnapshotDao
+    abstract fun behaviorHistoryDao(): com.planlock.app.record.dao.BehaviorHistoryDao
 
     companion object {
         // 保留既有计划、策略和待上传记录，仅追加可空的本地列。
@@ -76,7 +87,13 @@ abstract class PlanLockDatabase : RoomDatabase() {
                     context.applicationContext,
                     PlanLockDatabase::class.java,
                     "planlock.db"
-                ).addMigrations(MIGRATION_1_2).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration, AccountScopeMigration(legacyInstance = {
+                    val preferences = kotlinx.coroutines.runBlocking { context.planLockPreferences.data.first() }
+                    preferences[com.planlock.app.api.TokenStore.legacyOwnerInstanceKey]
+                        ?: preferences[androidx.datastore.preferences.core.stringPreferencesKey("auth_data_owner_instance")]
+                        ?: com.planlock.app.api.TokenStore.state.value.dataOwnerInstance
+                        ?: com.planlock.app.api.ConnectionConfig.legacyInstanceId
+                }, cancelLegacyReminder = { ScheduleReminderScheduler(context).cancelLegacy(it) })).build().also { INSTANCE = it }
             }
     }
 }

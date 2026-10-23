@@ -89,12 +89,18 @@ import com.planlock.app.record.OccurrenceDate
 @Composable
 fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit = {}) {
     val context = LocalContext.current
+    val reminderAccess = com.planlock.design.rememberCapabilityPermissionGate()
+    val reminderCapabilities by reminderAccess.access.state.collectAsState()
     val api = remember { ApiClient.create() }
     val store = remember { RecordStore(context) }
+    val clock = rememberPlanClock()
+    val authState by com.planlock.app.api.TokenStore.state.collectAsState()
+    val localRevision by store.localRevision.collectAsState()
     val actionGate = remember { PlanActionGate(store, api, BackupPasswordStore(context.planLockPreferences), context.planLockPreferences, sync = com.planlock.app.sync.AppSync.get(context)) }
     val scope = rememberCoroutineScope()
     var plan by remember { mutableStateOf<PlanSnapshotEntity?>(null) }
     var strategy by remember { mutableStateOf<StrategySnapshotEntity?>(null) }
+    var executionHistory by remember { mutableStateOf<List<com.planlock.app.record.entity.ExecutionHistoryEntity>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var showDelete by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<PendingPlanAction?>(null) }
@@ -115,8 +121,14 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
     PlanActionDialogHost(actionGate, pendingAction, onDismiss = { pendingAction = null })
 
     suspend fun refresh() {
-        plan = store.plan(planId)
-        strategy = store.strategy(planId)
+        val owned = store.forScope(authState.dataScope)
+        val (fromDate, throughDate) = executionHistoryDates(clock)
+        val loadedPlan = owned.plan(planId)
+        val loadedStrategy = owned.strategy(planId)
+        val loadedHistory = owned.executionHistoryForDates(fromDate, throughDate)
+        plan = loadedPlan
+        strategy = loadedStrategy
+        executionHistory = loadedHistory
         loading = false
     }
 
@@ -171,7 +183,12 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
         }
     }
 
-    LaunchedEffect(planId) { refresh() }
+    LaunchedEffect(planId, authState.dataScope, localRevision, executionHistoryDates(clock)) {
+        if (plan?.id != planId || plan?.scope != authState.dataScope) {
+            plan = null; strategy = null; executionHistory = emptyList(); loading = true
+        }
+        refresh()
+    }
 
     if (showDelete) {
         AlertDialog(
@@ -207,9 +224,10 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
             plan == null -> UIStatePanel(UiState.ERROR, "计划不存在或已删除", onBack, Modifier.padding(padding))
             else -> {
                 val value = plan!!
-                val clock = Calendar.getInstance()
                 val now = clock.get(Calendar.HOUR_OF_DAY) * 60 + clock.get(Calendar.MINUTE)
-                val active = PlanTime.isActive(value, now, OccurrenceDate.from(clock))
+                // A record can arrive between minute ticks; compare its timestamp to actual now.
+                val currentState = value.visualState(Calendar.getInstance(), executionHistory)
+                val active = currentState == PlanVisualState.EXECUTING
                 LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     item {
                         if (active) {
@@ -224,10 +242,25 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
                                 sharedKey = "plan-${value.id}"
                             )
                         } else {
-                            PlanCard(value.toCardData(if (value.status == 1) PlanVisualState.UPCOMING else PlanVisualState.PAUSED), onClick = onEdit, sharedKey = "plan-${value.id}")
+                            Column {
+                            PlanCard(value.toCardData(currentState), onClick = onEdit, sharedKey = "plan-${value.id}")
+                            // §7.9（v4.6）：今天这一次已完成 / 已结束时，卡片下补一行下一次时间；没有下一次则不显示
+                            if (currentState == PlanVisualState.TODAY_DONE || currentState == PlanVisualState.TODAY_ENDED) {
+                                nextOccurrenceLabel(nextRepeatOccurrence(value, clock), clock)?.let { next ->
+                                    Text(next, Modifier.padding(start = 4.dp, top = 6.dp),
+                                        style = com.planlock.design.InkText.caption, color = com.planlock.design.InkTone.soft)
+                                }
+                            }
+                            }
                         }
                     }
-                    item { DetailSection("基本信息", latin = "PROFILE", rows =  listOf("类型" to value.type, "重复" to repeatLabel(value.repeatRule), "提醒" to (value.remindAdvanceMin?.let { "提前 $it 分钟" } ?: "未设置"), "跨天" to if ((PlanTime.minutesOfDay(value.endTime) ?: 0) <= (PlanTime.minutesOfDay(value.startTime) ?: 0)) "是" else "否")) }
+                    item { DetailSection("基本信息", latin = "PROFILE", rows =  listOf("类型" to value.type, "重复" to repeatLabel(value.repeatRule), "提醒" to (value.remindAdvanceMin?.let {
+                        "提前 $it 分钟" + when {
+                            reminderCapabilities[com.planlock.app.security.Capability.NOTIFICATIONS] != true -> " · 通知未授权"
+                            reminderCapabilities[com.planlock.app.security.Capability.EXACT_ALARM] != true -> " · 提醒可能延迟"
+                            else -> ""
+                        }
+                    } ?: "未设置"), "跨天" to if ((PlanTime.minutesOfDay(value.endTime) ?: 0) <= (PlanTime.minutesOfDay(value.startTime) ?: 0)) "是" else "否")) }
                     item { StrategySection(strategy) }
                     if (contributions.isNotEmpty()) item {
                         PluginContributionContent(contributions, granted,
@@ -245,7 +278,16 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
                     }
                     item {
                         Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            androidx.compose.material3.Button(onClick = { requestAction(value, ProtectedPlanAction.PAUSE) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (value.status == 1) "提前结束" else "恢复") }
+                            if (PlanOccurrence.canToggleExecution(value, now, OccurrenceDate.from(clock))) {
+                                androidx.compose.material3.Button(onClick = { requestAction(value, ProtectedPlanAction.PAUSE) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                                    // BUG-121（v4.6，codex 10-20 同意只改呈现）：进行中 = 提前结束本次；启用但不在执行时段 = 暂停整个计划；停用 = 恢复
+                                    Text(when {
+                                        value.status != 1 -> "恢复"
+                                        value.visualState(clock) == PlanVisualState.EXECUTING -> "提前结束"
+                                        else -> "暂停计划"
+                                    })
+                                }
+                            }
                             androidx.compose.material3.OutlinedButton(onClick = { showDelete = true }, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                                 border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = .5f))) {
                                 Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error); Text(" 删除", color = MaterialTheme.colorScheme.error)
@@ -260,15 +302,22 @@ fun PlanDetailScreen(planId: Long, onEdit: () -> Unit = {}, onBack: () -> Unit =
 
 @Composable
 private fun StrategySection(strategy: StrategySnapshotEntity?) {
+    val capabilityGate = com.planlock.design.rememberCapabilityPermissionGate()
+    val capabilities by capabilityGate.access.state.collectAsState()
     val whitelist = parseAppReferences(strategy?.whitelistApps)
     InkLedger(
         title = "执行范围",
         latin = "SCOPE",
         rows = listOf(
-            "免打扰" to strategyStateText(strategy?.autoDnd),
-            "通知静默" to strategyStateText(strategy?.notifySilence),
-            "不计入分心" to if (whitelist.isEmpty()) "全部应用计入" else whitelist.joinToString("、") { it.name },
+            "免打扰" to com.planlock.app.security.capabilityEffectText(strategy?.autoDnd, capabilities[com.planlock.app.security.Capability.DND] == true),
+            "通知静默" to com.planlock.app.security.capabilityEffectText(strategy?.notifySilence, capabilities[com.planlock.app.security.Capability.NOTIFICATION_SILENCE] == true),
+            "不计入分心" to if (whitelist.isEmpty()) "未选择" else whitelist.joinToString("、") { it.name },
         ),
+        footer = {
+            Text("知序本身不计入分心", Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                style = com.planlock.design.InkText.caption, color = com.planlock.design.InkTone.soft,
+                textAlign = androidx.compose.ui.text.style.TextAlign.End)
+        },
     )
 }
 

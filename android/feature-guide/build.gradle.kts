@@ -38,6 +38,7 @@ dependencies {
     implementation(project(":core-sync"))
     implementation(project(":core-design"))
     implementation(project(":core-engine"))
+    implementation(project(":core-security"))
     implementation(libs.androidx.core.ktx)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)

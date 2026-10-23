@@ -178,7 +178,7 @@ fun AssistantScreen(onOpenPage: (AssistantDestination) -> Unit = {}, onBack: () 
         AlertDialog(
             onDismissRequest = { if (!busy) confirming = null },
             title = { Text("确认${if (action.enabled) "开始" else "结束"}计划") },
-            text = { Text("${action.label}？${if (action.enabled) "将恢复当前时段的执行。" else "将暂停该计划；保护开启时还需验证备用密码。"}") },
+            text = { Text("${action.label}？${if (action.enabled) "将恢复当前时段的执行。" else "接下来选择只结束今天，或结束整个计划。"}") },
             dismissButton = { TextButton(modifier = Modifier.heightIn(min = 48.dp), enabled = !busy, onClick = { confirming = null }) { Text("取消") } },
             confirmButton = {
                 Button(modifier = Modifier.heightIn(min = 48.dp), enabled = !busy, onClick = {
@@ -189,7 +189,8 @@ fun AssistantScreen(onOpenPage: (AssistantDestination) -> Unit = {}, onBack: () 
                             val target = store.plan(action.planId)
                             val now = Calendar.getInstance()
                             val minutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
-                            if (target == null || !PlanOccurrence.isWithinOccurrence(target, minutes, OccurrenceDate.from(now))) {
+                            if (target == null || !PlanOccurrence.isWithinOccurrence(target, minutes, OccurrenceDate.from(now)) ||
+                                !PlanOccurrence.canToggleExecution(target, minutes, OccurrenceDate.from(now))) {
                                 post(AssistantReply("计划已不在当前执行时段，请重新选择。"))
                             } else if ((target.status == 1) == action.enabled) {
                                 post(AssistantReply("计划已处于目标状态，无需重复操作。"))
@@ -197,15 +198,8 @@ fun AssistantScreen(onOpenPage: (AssistantDestination) -> Unit = {}, onBack: () 
                                 val completed: (String?) -> Unit = { warning ->
                                     post(AssistantReply("已${if (action.enabled) "开始" else "结束"} ${target.name}。${warning.orEmpty()}"))
                                 }
-                                val requirement = gate.requirement(target, ProtectedPlanAction.PAUSE)
-                                if (requirement == PlanActionRequirement.FREE) {
-                                    when (val result = gate.perform(target, ProtectedPlanAction.PAUSE, null)) {
-                                        is PlanActionResult.Completed -> completed(result.warning)
-                                        is PlanActionResult.Failed -> post(AssistantReply(result.message))
-                                        else -> post(AssistantReply("计划保护状态已变化，请重新确认。"))
-                                    }
-                                } else pendingAction = PendingPlanAction(target, ProtectedPlanAction.PAUSE,
-                                    requirement == PlanActionRequirement.SETUP, onCompleted = completed)
+                                requestOrRunPlanAction(gate, target, ProtectedPlanAction.PAUSE,
+                                    onPrompt = { pendingAction = it }, onCompleted = completed)
                             }
                             confirming = null
                         } catch (cancelled: CancellationException) { throw cancelled }
@@ -305,7 +299,7 @@ private fun AssistantMasthead(mode: AssistantMode, aiReady: Boolean, showBack: B
                 Text(AssistantIdentity.NAME, style = InkText.masthead.copy(fontSize = 26.sp, lineHeight = 32.sp), color = InkTone.text)
                 // 全屏输入态（返回箭头出现）收起理念句，窄屏下不再被挤断
                 AnimatedVisibility(visible = !showBack) {
-                    com.planlock.design.FitText(AssistantIdentity.TAGLINE, InkText.meta.copy(fontSize = 11.sp), InkTone.faint)
+                    com.planlock.design.FitText(AssistantIdentity.TAGLINE, InkText.caption, InkTone.soft)
                 }
             }
             ModeSwitch(mode, onModeChange)
@@ -316,8 +310,8 @@ private fun AssistantMasthead(mode: AssistantMode, aiReady: Boolean, showBack: B
                 aiReady -> mode.note
                 else -> "AI 未就绪 · 暂由本地规则回答"
             },
-            style = InkText.meta.copy(fontSize = 11.sp),
-            color = if (mode == AssistantMode.AI && !aiReady) InkHue.amber.color() else InkTone.faint,
+            style = InkText.caption,
+            color = if (mode == AssistantMode.AI && !aiReady) InkHue.amber.color() else InkTone.soft,
             modifier = Modifier.padding(top = 8.dp),
         )
     }
@@ -389,7 +383,7 @@ private fun ThinkingRow() {
         AssistantMark(markSize = 26.dp, active = true)
         Spacer(Modifier.width(10.dp))
         InkPulseDot(InkTone.vermilion, dotSize = 6.dp)
-        Text(" 正在查阅本机记录…", style = InkText.meta, color = InkTone.soft)
+        Text(" 正在查阅本机记录…", style = InkText.caption, color = InkTone.soft)
     }
 }
 
@@ -428,7 +422,7 @@ private fun AssistantComposer(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AttachButton(enabled = !busy && attachments.size < AssistantAttachmentRules.MAX_COUNT, onPickImages = onPickImages, onPickFiles = onPickFiles)
             OutlinedTextField(
-                value, onValueChange, placeholder = { Text("对${AssistantIdentity.NAME}说…", color = InkTone.faint) }, modifier = Modifier.weight(1f), singleLine = true,
+                value, onValueChange, placeholder = { Text("对${AssistantIdentity.NAME}说…", color = InkTone.soft) }, modifier = Modifier.weight(1f), singleLine = true,
                 shape = RoundedCornerShape(28.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     unfocusedBorderColor = InkTone.hairline, focusedBorderColor = InkTone.vermilion,
@@ -444,7 +438,7 @@ private fun AssistantComposer(
                 modifier = Modifier.size(52.dp).semantics { contentDescription = if (busy) "处理中" else "发送" },
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Text(if (busy) "…" else "发", fontFamily = InkTone.display, fontWeight = FontWeight.Black, fontSize = 22.sp,
+                    Text(if (busy) "…" else "发", fontFamily = InkTone.display, fontWeight = FontWeight.Bold, fontSize = 22.sp,
                         color = if (canSend) InkTone.onAccent else InkTone.faint)
                 }
             }

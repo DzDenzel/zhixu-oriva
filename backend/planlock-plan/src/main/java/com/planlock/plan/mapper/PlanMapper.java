@@ -17,6 +17,9 @@ import java.util.List;
 @Mapper
 public interface PlanMapper {
 
+    @Select("SELECT deleted FROM plan_types WHERE user_id=#{userId} AND type_key=#{key} FOR SHARE")
+    Integer isDeletedPlanType(@Param("userId") Long userId, @Param("key") String key);
+
     @Select("SELECT * FROM plans WHERE id = #{id}")
     Plan findById(@Param("id") Long id);
 
@@ -27,9 +30,9 @@ public interface PlanMapper {
     List<Plan> findByUserId(@Param("userId") Long userId);
 
     @Insert("INSERT INTO plans(user_id, client_id, name, type, start_time, end_time, repeat_rule, color, icon, "
-            + "remind_advance_min, remind_methods, status, version) "
+            + "remind_advance_min, remind_methods, status, version, ended_occurrence_date, status_log) "
             + "VALUES(#{userId}, #{clientId}, #{name}, #{type}, #{startTime}, #{endTime}, #{repeatRule}, #{color}, #{icon}, "
-            + "#{remindAdvanceMin}, #{remindMethods}, #{status}, #{version}) "
+            + "#{remindAdvanceMin}, #{remindMethods}, #{status}, #{version}, #{endedOccurrenceDate}, #{statusLog}) "
             + "ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Plan plan);
@@ -39,13 +42,13 @@ public interface PlanMapper {
      */
     @Update("UPDATE plans SET name = #{name}, type = #{type}, start_time = #{startTime}, end_time = #{endTime}, "
             + "repeat_rule = #{repeatRule}, color = #{color}, icon = #{icon}, "
-            + "remind_advance_min = #{remindAdvanceMin}, remind_methods = #{remindMethods}, version = version + 1 "
+            + "remind_advance_min = #{remindAdvanceMin}, remind_methods = #{remindMethods}, ended_occurrence_date = COALESCE(#{endedOccurrenceDate}, ended_occurrence_date), status_log = COALESCE(#{statusLog}, status_log), version = version + 1 "
             + "WHERE id = #{id} AND user_id = #{userId} AND version = #{version}")
     int updateWithVersion(Plan plan);
 
-    @Update("UPDATE plans SET status = CASE WHEN status = 1 THEN 0 ELSE 1 END, version = version + 1 "
+    @Update("UPDATE plans SET status = #{status}, status_log = #{statusLog}, version = version + 1 "
             + "WHERE id = #{id} AND user_id = #{userId}")
-    int togglePause(@Param("id") Long id, @Param("userId") Long userId);
+    int updatePause(Plan plan);
 
     @Delete("DELETE p, s FROM plans p LEFT JOIN plan_strategies s ON s.plan_id = p.id "
             + "WHERE p.id = #{id} AND p.user_id = #{userId}")

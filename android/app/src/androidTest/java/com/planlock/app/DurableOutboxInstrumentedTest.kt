@@ -30,7 +30,7 @@ class DurableOutboxInstrumentedTest {
     private suspend fun withStore(block: suspend (RecordStore, PlanLockDatabase) -> Unit) {
         val name = "outbox-${UUID.randomUUID()}.db"
         val db = database(name)
-        try { block(RecordStore(db),db) } finally { db.close(); context.deleteDatabase(name) }
+        try { block(RecordStore(db, { "local\nlocal" }),db) } finally { db.close(); context.deleteDatabase(name) }
     }
 
     @Test fun persistentCreateSurvivesDatabaseCloseAndResponseLoss() = runBlocking {
@@ -38,19 +38,19 @@ class DurableOutboxInstrumentedTest {
         var db=database(name)
         val remote=Remote()
         try {
-            var store=RecordStore(db)
+            var store=RecordStore(db, { "local\nlocal" })
             store.updateLocalPlan(plan(),strategy=strategy())
             val originalIdentity=Json.decodeFromString<SyncPlanItem>(store.pending().first().payload!!).clientId
             remote.dropNext=true
             assertTrue(runCatching { SyncClient(remote,store).pushPendingRecords() }.isFailure)
-            db.close(); db=database(name); store=RecordStore(db)
+            db.close(); db=database(name); store=RecordStore(db, { "local\nlocal" })
             assertEquals(originalIdentity,Json.decodeFromString<SyncPlanItem>(store.pending().first().payload!!).clientId)
             SyncClient(remote,store).pushPendingRecords()
             assertEquals(1,remote.plans.size)
             assertEquals(listOf(41L),store.plans().map { it.id })
             assertEquals(41L,store.strategy(41)!!.planId)
             assertTrue(store.pending().isEmpty())
-            db.close(); db=database(name); store=RecordStore(db)
+            db.close(); db=database(name); store=RecordStore(db, { "local\nlocal" })
             store.updateLocalPlan(plan().copy(name="stale-editor"))
             assertEquals(listOf(41L),store.plans().map { it.id })
             assertEquals(41L,store.pending().single().planId)
@@ -71,7 +71,7 @@ class DurableOutboxInstrumentedTest {
         assertEquals(41L,store.strategy(41)!!.planId)
         assertEquals(41L,store.schedule(-201)!!.linkedPlanId)
         assertTrue(store.pending().filter { it.type in setOf("execution","violation","unlock","strategy_upsert") }.all { it.planId==41L })
-        assertEquals(41L,db.behaviorAggregateDao().all().single().planId)
+        assertEquals(41L,db.behaviorAggregateDao().all("local\nlocal").single().planId)
         val queued=Json.decodeFromString<SchedulePendingUpsert>(store.pending().first { it.type=="schedule_upsert" }.payload!!)
         assertEquals(41L,queued.request.linkedPlanId)
     } }
@@ -261,7 +261,7 @@ class DurableOutboxInstrumentedTest {
             while(!producer.isCompleted) checkNotNull(continuations.poll(10,java.util.concurrent.TimeUnit.SECONDS)).run()
             producer.join()
             assertEquals(41L,store.pending().single().planId)
-            assertEquals(41L,db.behaviorAggregateDao().all().single().planId)
+            assertEquals(41L,db.behaviorAggregateDao().all("local\nlocal").single().planId)
             SyncClient(Remote(),store).pushPendingRecords()
             assertTrue(store.pending().isEmpty())
         } finally { scope.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
@@ -274,7 +274,7 @@ class DurableOutboxInstrumentedTest {
             if(sql.startsWith("SELECT * FROM pending_record ORDER BY id ASC")) selectAll.incrementAndGet()
         },java.util.concurrent.Executor { it.run() }).build()
         try {
-            val store=RecordStore(db)
+            val store=RecordStore(db, { "local\nlocal" })
             repeat(40) { store.enqueueExecution(ExecutionRecordRequest(41,"2026-10-09",1,clientId="query-$it")) }
             selectAll.set(0)
             SyncClient(Remote(),store).pushPendingRecords()
@@ -302,14 +302,14 @@ class DurableOutboxInstrumentedTest {
         remote.plans[41]=SyncPlanView(id=41,userId=1,name="original",type="study",startTime="10:00:00",endTime="11:00:00",remindAdvanceMin=15,status=1,version=0)
         remote.strategies[41]=SyncStrategyView(61,41,null,"[]",true,false,0)
         try {
-            var store=RecordStore(db); store.saveLocalPlan(plan(41)); store.saveLocalStrategy(strategy(41))
+            var store=RecordStore(db, { "local\nlocal" }); store.saveLocalPlan(plan(41)); store.saveLocalStrategy(strategy(41))
             val captured=store.plan(41)!!; val capturedStrategy=store.strategy(41)!!
             store.updateLocalPlan(captured.copy(name="A"),strategy=capturedStrategy.copy(autoDnd=false))
             SyncClient(remote,store).pushPendingRecords()
             assertEquals(1L,store.plan(41)!!.version); assertEquals(1L,store.strategy(41)!!.version)
             store.updateLocalPlan(store.plan(41)!!.copy(name="A2"),strategy=store.strategy(41)!!.copy(notifySilence=true))
             SyncClient(remote,store).pushPendingRecords(); assertTrue(store.pending().isEmpty())
-            db.close(); db=database(name); store=RecordStore(db)
+            db.close(); db=database(name); store=RecordStore(db, { "local\nlocal" })
             store.updateLocalPlan(captured.copy(name="B"),strategy=capturedStrategy.copy(notifySilence=true))
             assertEquals(2L,Json.decodeFromString<SyncPlanItem>(store.pending().first { it.type=="plan_upsert" }.payload!!).baseVersion)
             assertEquals(2L,Json.decodeFromString<SyncStrategyItem>(store.pending().first { it.type=="strategy_upsert" }.payload!!).baseVersion)
@@ -322,10 +322,10 @@ class DurableOutboxInstrumentedTest {
         val name="late-schedule-${UUID.randomUUID()}.db"; var db=database(name); val remote=Remote()
         remote.createSchedule(request().copy(clientId="seed"))
         try {
-            var store=RecordStore(db); store.saveLocalSchedule(schedule(51)); val captured=store.schedule(51)!!
+            var store=RecordStore(db, { "local\nlocal" }); store.saveLocalSchedule(schedule(51)); val captured=store.schedule(51)!!
             store.saveScheduleChange(captured.copy(title="A"),request("A")); SyncClient(remote,store).pushPendingRecords()
             assertEquals(1L,store.schedule(51)!!.version); assertTrue(store.pending().isEmpty())
-            db.close(); db=database(name); store=RecordStore(db)
+            db.close(); db=database(name); store=RecordStore(db, { "local\nlocal" })
             store.saveScheduleChange(captured.copy(title="B"),request("B"))
             assertEquals(1L,Json.decodeFromString<SchedulePendingUpsert>(store.pending().single().payload!!).baseVersion)
             SyncClient(remote,store).pushPendingRecords(); assertEquals("B",remote.schedules[51]!!.title); assertTrue(store.pending().isEmpty())
@@ -387,8 +387,8 @@ class DurableOutboxInstrumentedTest {
     @Test fun staleLinkedScheduleEditorCannotReattachAcknowledgedDeletedParent() = runBlocking {
         val name="deleted-link-${UUID.randomUUID()}.db"; var db=database(name); val remote=Remote()
         try {
-            var store=RecordStore(db); store.saveLocalPlan(plan(41)); remote.plans[41]=SyncPlanView(id=41,name="original",version=0)
-            store.deletePlan(41); SyncClient(remote,store).pushPendingRecords(); db.close(); db=database(name); store=RecordStore(db)
+            var store=RecordStore(db, { "local\nlocal" }); store.saveLocalPlan(plan(41)); remote.plans[41]=SyncPlanView(id=41,name="original",version=0)
+            store.deletePlan(41); SyncClient(remote,store).pushPendingRecords(); db.close(); db=database(name); store=RecordStore(db, { "local\nlocal" })
             store.saveScheduleChange(schedule(linked=41),request(linked=41))
             assertNull(store.schedule(-201)!!.linkedPlanId)
             assertNull(Json.decodeFromString<SchedulePendingUpsert>(store.pending().single().payload!!).request.linkedPlanId)

@@ -52,7 +52,7 @@ class DndController(private val context: Context) {
             DndAction.Enable -> if (record != null) reapply() else enableNew(checkNotNull(neededPlanId))
             is DndAction.Restore -> {
                 if (!hasPolicyAccess()) return DndResult.PermissionMissing
-                runCatching { setFilter(decision.filter) }
+                setFilter(decision.filter)
                 clearRecord()
                 DndResult.Restored
             }
@@ -98,8 +98,11 @@ class DndController(private val context: Context) {
     }
 
     private suspend fun restoreRecord(record: DndRecord) {
-        if (hasPolicyAccess() && notificationManager.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALARMS) {
-            runCatching { setFilter(record.previousFilter) }
+        if (!hasPolicyAccess()) throw SecurityException("Notification policy access missing")
+        if (Build.VERSION.SDK_INT >= 35) {
+            setFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
+        } else if (notificationManager.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALARMS) {
+            setFilter(record.previousFilter)
         }
     }
 

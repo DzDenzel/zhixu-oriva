@@ -46,7 +46,14 @@ class SyncOverviewCache(private val preferences: DataStore<Preferences>) {
     suspend fun read(userId: Long?): SyncOverview {
         val state = TokenStore.state.value
         val owner = localOverviewOwner(userId, state)
-        val instance = state.dataOwnerInstance ?: ConnectionStore.state.value.instanceId
+        val instance = ConnectionStore.state.value.instanceId
+        val p = preferences.data.first()
+        val raw = p[key(instance, owner)] ?: if (instance == ConnectionConfig.default.instanceId) p[stringPreferencesKey("sync_overview_${owner ?: "local"}")] else null
+        return raw?.let { json.decodeFromString<SyncOverview>(it) } ?: SyncOverview()
+    }
+    suspend fun readScope(scope: String): SyncOverview {
+        val instance = scope.substringBeforeLast('\n').takeUnless { scope == "local\nlocal" }
+        val owner = scope.substringAfterLast('\n').toLongOrNull()
         val p = preferences.data.first()
         val raw = p[key(instance, owner)] ?: if (instance == ConnectionConfig.default.instanceId) p[stringPreferencesKey("sync_overview_${owner ?: "local"}")] else null
         return raw?.let { json.decodeFromString<SyncOverview>(it) } ?: SyncOverview()
@@ -58,4 +65,4 @@ class SyncOverviewCache(private val preferences: DataStore<Preferences>) {
 }
 
 internal fun localOverviewOwner(requestedUserId: Long?, state: AuthState): Long? =
-    if (state.signedOut || state.ownershipMismatch) state.localDataUserId else requestedUserId
+    if (state.signedOut) null else state.session.userId ?: requestedUserId

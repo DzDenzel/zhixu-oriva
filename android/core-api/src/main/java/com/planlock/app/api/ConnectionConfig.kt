@@ -28,10 +28,16 @@ data class ConnectionConfig(
         private val codec = Json { encodeDefaults = true }
         val default: ConnectionConfig get() = ConnectionConfig(
             instanceLabel = "本机开发后端",
-            apiBaseUrl = BuildConfig.API_BASE_URL,
-            pluginsCatalogUrl = BuildConfig.API_BASE_URL + "plugins/catalog/",
+            apiBaseUrl = BuildConfig.API_BASE_URL.ifBlank { "https://unconnected.invalid/api/v1/" },
+            pluginsCatalogUrl = BuildConfig.API_BASE_URL.ifBlank { "https://unconnected.invalid/api/v1/" } + "plugins/catalog/",
             lanAllowed = true,
         ).validated()
+        val initial: ConnectionConfig? get() = default.takeIf { BuildConfig.API_BASE_URL.isNotBlank() }
+
+        // Used only to preserve provenance of pre-connection-settings installations.
+        val legacyInstanceId: String get() = "http://" + listOf(10, 0, 2, 2).joinToString(".") + ":8080/api/v1/"
+        fun legacyDefault(): ConnectionConfig = ConnectionConfig(instanceLabel = "原本机开发后端",
+            apiBaseUrl = legacyInstanceId, pluginsCatalogUrl = legacyInstanceId + "plugins/catalog/", lanAllowed = true)
         private val fields = setOf("version", "instanceLabel", "apiBaseUrl", "pluginsCatalogUrl", "lanAllowed")
 
         fun decode(raw: String): ConnectionConfig {

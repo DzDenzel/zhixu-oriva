@@ -27,7 +27,7 @@ class SplashPlaybackTest {
             withContext(clock) { playSplash { elapsed = it }; finished++ }
         }
         assertEquals(1, finished)
-        assertEquals(1200L, elapsed)
+        assertEquals(1600L, elapsed)
         assertTrue(clock.cancelled)
     }
 
@@ -50,9 +50,9 @@ class SplashPlaybackTest {
         val observed = mutableListOf<Long>()
         val started = System.nanoTime()
         withTimeout(3000) { withContext(clock) { playSplash { observed += it } } }
-        assertTrue("must not shorten the 1200ms presentation", (System.nanoTime() - started) / 1_000_000 >= 1200L)
+        assertTrue("must not shorten the 1600ms presentation", (System.nanoTime() - started) / 1_000_000 >= 1600L)
         assertTrue(observed.any { it in 180L..979L })
-        assertEquals(1200L, observed.last())
+        assertEquals(1600L, observed.last())
         assertTrue(splashFrame(observed.last(), false).finished)
     }
 
@@ -76,8 +76,8 @@ class SplashPlaybackTest {
             }
         }
         assertTrue("frames must stop within the wordmark phase", observed.dropLast(1).last() in 180L..579L)
-        assertEquals(1200L, observed.last())
-        assertTrue((System.nanoTime() - started) / 1_000_000L >= 1200L)
+        assertEquals(1600L, observed.last())
+        assertTrue((System.nanoTime() - started) / 1_000_000L >= 1600L)
         assertTrue("deadline cancels the stalled frame request", cancelled)
     }
 

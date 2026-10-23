@@ -5,7 +5,7 @@ import androidx.room.Entity
 /** 永久保留的行为时长聚合；明细清理不影响此表。 */
 @Entity(
     tableName = "behavior_aggregate",
-    primaryKeys = ["planId", "packageName", "sourceLevel"],
+    primaryKeys = ["scope", "planId", "packageName", "sourceLevel"],
 )
 data class BehaviorAggregateEntity(
     val planId: Long,
@@ -14,4 +14,5 @@ data class BehaviorAggregateEntity(
     val totalDurationMs: Long,
     val occurrenceCount: Long,
     val lastEndedAt: String?,
+    @androidx.room.ColumnInfo(defaultValue = "''") val scope: String = "local\nlocal",
 )

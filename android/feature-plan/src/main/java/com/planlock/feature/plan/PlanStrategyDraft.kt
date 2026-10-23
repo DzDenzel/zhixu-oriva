@@ -18,8 +18,8 @@ internal data class PlanStrategyDraft(
 
     companion object {
         fun fromSnapshot(snapshot: StrategySnapshotEntity?, isNewPlan: Boolean): PlanStrategyDraft {
-            val autoDnd = if (isNewPlan) true else snapshot?.autoDnd
-            val notifySilence = if (isNewPlan) true else snapshot?.notifySilence
+            val autoDnd = if (isNewPlan) false else snapshot?.autoDnd
+            val notifySilence = if (isNewPlan) false else snapshot?.notifySilence
             return PlanStrategyDraft(autoDnd, notifySilence, autoDnd, notifySilence, isNewPlan)
         }
     }

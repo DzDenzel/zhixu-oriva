@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-data class TodayLocalKey(val userId: Long?, val dateKey: String)
+data class TodayLocalKey(val userId: Long?, val dateKey: String, val scope: String = "")
 
 enum class TodayLocalPhase { IDLE, READING, READY, TIMED_OUT }
 
@@ -84,9 +84,9 @@ class TodayLocalStateHolder internal constructor(
         mutableState.value = TodayLocalState(key = key, read = previousRead, phase = TodayLocalPhase.READING)
         val job = scope.launch(start = CoroutineStart.LAZY) {
             val result = if (deadlineMillis == null) {
-                reader.read(key.userId, key.dateKey)
+                reader.read(key.userId, key.dateKey, key.scope)
             } else {
-                withTimeoutOrNull(deadlineMillis) { reader.read(key.userId, key.dateKey) }
+                withTimeoutOrNull(deadlineMillis) { reader.read(key.userId, key.dateKey, key.scope) }
             }
             complete(runGeneration, key, previousRead, result)
         }

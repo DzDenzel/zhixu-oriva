@@ -9,6 +9,13 @@ import java.time.LocalTime;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ScheduleRulesTest {
+    @Test void coordinatesMustBeAPairedFiniteWgs84Location() {
+        var r=timed();r.setLocationLat(31.23);
+        assertThrows(BusinessException.class,()->ScheduleRules.validate(r,mapper));
+        r.setLocationLon(181.0);assertThrows(BusinessException.class,()->ScheduleRules.validate(r,mapper));
+        r.setLocationLon(121.47);r.setLocationLat(Double.NaN);assertThrows(BusinessException.class,()->ScheduleRules.validate(r,mapper));
+        r.setLocationLat(31.23);assertDoesNotThrow(()->ScheduleRules.validate(r,mapper));
+    }
     private final ObjectMapper mapper=new ObjectMapper();
     private ScheduleUpsertRequest timed(){var r=new ScheduleUpsertRequest();r.setTitle("复盘");r.setStartDate(LocalDate.of(2026,9,23));r.setEndDate(LocalDate.of(2026,9,23));r.setStartTime(LocalTime.of(20,0));r.setEndTime(LocalTime.of(21,0));r.setAllDay(false);return r;}
     @Test void acceptsCrossMidnightUsingDates(){var r=timed();r.setEndDate(r.getStartDate().plusDays(1));r.setEndTime(LocalTime.of(1,0));assertDoesNotThrow(()->ScheduleRules.validate(r,mapper));}

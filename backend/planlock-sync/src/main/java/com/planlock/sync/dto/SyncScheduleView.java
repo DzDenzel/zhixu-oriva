@@ -11,7 +11,7 @@ public class SyncScheduleView {
     private String clientId; private Long userId; private String title;
     private LocalDate startDate; private LocalTime startTime;
     private LocalDate endDate; private LocalTime endTime;
-    private Boolean allDay; private String location; private String note;
+    private Boolean allDay; private String location; private Double locationLat; private Double locationLon; private String note;
     private Integer remindAdvanceMin; private String repeatRule;
     private Long linkedPlanId; private String tzId; private Integer status;
     private Long version; private LocalDateTime createdAt; private LocalDateTime updatedAt;

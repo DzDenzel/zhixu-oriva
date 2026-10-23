@@ -15,11 +15,13 @@ data class AuthState(
     val dataOwner: Long? = null,
     val instanceId: String? = null,
     val dataOwnerInstance: String? = null,
+    val hasSignedInBefore: Boolean = false,
 ) {
     val expired get() = validity == AuthValidity.EXPIRED_LOCAL || validity == AuthValidity.REJECTED
-    val ownershipMismatch get() = (dataOwner != null && session.userId != null && dataOwner != session.userId) ||
-        (dataOwnerInstance != null && dataOwnerInstance != instanceId)
-    val localDataUserId get() = dataOwner ?: session.userId
+    // Retained owner fields only support legacy migration; active data follows this session.
+    val ownershipMismatch get() = false
+    val localDataUserId get() = session.userId.takeUnless { signedOut }
+    val dataScope get() = if (localDataUserId == null) "local\nlocal" else "${instanceId ?: "local"}\n$localDataUserId"
 }
 
 /** A UI hint only. The backend remains the authority for signature and account validation. */

@@ -47,7 +47,8 @@ data class InkPalette(
     val cats: CategoryColors? = null,
 )
 
-data class CategoryColors(val study: Color, val work: Color, val sport: Color, val sleep: Color, val rose: Color, val amber: Color)
+data class CategoryColors(val study: Color, val work: Color, val sport: Color, val sleep: Color, val rose: Color, val amber: Color,
+    val hobby: Color, val other: Color)
 
 enum class ThemeStyle(val key: String, val label: String, val motto: String) {
     INK("ink", "墨序", "宣纸朱印 · 随系统明暗"),
@@ -103,8 +104,9 @@ object InkPalettes {
         slab = Color(0xFF121212), onSlab = Color(0xFFFBF8F0), inverse = Color(0xFF121212), onInverse = Color(0xFFFBF8F0), isDark = false,
         display = FontFamily.SansSerif, meta = FontFamily.Monospace, body = FontFamily.SansSerif,
         cats = CategoryColors(
-            study = Color(0xFF1E4E9E), work = Color(0xFF2B2B2B), sport = Color(0xFF8F6400),
+            study = Color(0xFF1E4E9E), work = Color(0xFF2B2B2B), sport = Color(0xFF306534),
             sleep = Color(0xFF5B4BA0), rose = Color(0xFFC2324A), amber = Color(0xFF9A6C00),
+            hobby = Color(0xFFAF4C20), other = Color(0xFF59606B),
         ),
     )
 
@@ -126,6 +128,7 @@ object InkPalettes {
         cats = CategoryColors(
             study = Color(0xFF7FD4FF), work = Color(0xFF7CFFB0), sport = Color(0xFFD7FF6B),
             sleep = Color(0xFFC6A2FF), rose = Color(0xFFFF8FB1), amber = Color(0xFFFFB347),
+            hobby = Color(0xFFFF936B), other = Color(0xFFB2BDCA),
         ),
     )
 

@@ -56,8 +56,9 @@ public class PlanController {
     }
 
     @PostMapping("/{id}/pause")
-    public ApiResponse<PlanResponse> pause(@PathVariable Long id) {
-        return ApiResponse.ok(planService.pause(UserContext.userId(), id));
+    public ApiResponse<PlanResponse> pause(@PathVariable Long id,
+            @RequestParam(required = false) @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate date) {
+        return ApiResponse.ok(planService.pause(UserContext.userId(), id, date));
     }
 
     @GetMapping("/export")

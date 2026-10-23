@@ -7,7 +7,7 @@ import java.time.LocalDate;
 import java.util.List;
 
 /**
- * 批量推送请求：计划 + 策略（记录走 /records/* 幂等补传）。
+ * 批量推送请求：计划、日程、策略、账号类型（记录走 /records/* 幂等补传）。
  */
 @Data
 public class SyncPushRequest {
@@ -15,6 +15,16 @@ public class SyncPushRequest {
     private List<PlanItem> plans;
     private List<StrategyItem> strategies;
     private List<ScheduleItem> schedules;
+    private List<PlanTypeItem> planTypes;
+
+    @Data
+    public static class PlanTypeItem {
+        private String typeKey;
+        private String name;
+        private String color;
+        private Boolean deleted = false;
+        private String mutationId;
+    }
 
     @Data
     public static class ScheduleItem {
@@ -22,7 +32,7 @@ public class SyncPushRequest {
         private Long id; private Long baseVersion; private String title;
         private LocalDate startDate; private LocalTime startTime;
         private LocalDate endDate; private LocalTime endTime;
-        private Boolean allDay; private String location; private String note;
+        private Boolean allDay; private String location; private Double locationLat; private Double locationLon; private String note;
         private Integer remindAdvanceMin; private String repeatRule;
         private Long linkedPlanId; private String tzId; private Integer status;
     }
@@ -32,6 +42,8 @@ public class SyncPushRequest {
         private String clientId;
         private Long id;
         private Long baseVersion;
+        private LocalDate endedOccurrenceDate;
+        private String statusLog;
         private String name;
         private String type;
         private LocalTime startTime;

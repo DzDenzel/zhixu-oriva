@@ -47,7 +47,7 @@ internal fun SyncConfirmationStatus(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (confirmations.isNotEmpty()) {
                 Text("${confirmations.size} 条修改需要你确认", style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = (LocalConfiguration.current.screenHeightDp * .22f).dp)) {
                     items(confirmations, key = { it.key }) { confirmation ->
                         TextButton(onClick = { onSelect(confirmation) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
@@ -83,11 +83,11 @@ internal fun SyncConfirmationDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(presentation.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(presentation.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(presentation.explanation, style = MaterialTheme.typography.bodyMedium)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("我的版本", Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                    Text("对方版本", Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                    Text("我的版本", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                    Text("对方版本", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                 }
                 presentation.fields.forEach { field ->
                     HorizontalDivider()

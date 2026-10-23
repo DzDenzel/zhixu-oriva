@@ -6,10 +6,10 @@ import androidx.room.PrimaryKey
 /**
  * 执行策略快照缓存。
  */
-@Entity(tableName = "strategy_snapshot")
+@Entity(tableName = "strategy_snapshot", primaryKeys = ["scope", "id"])
 @kotlinx.serialization.Serializable
 data class StrategySnapshotEntity(
-    @PrimaryKey val id: Long,
+    val id: Long,
     val planId: Long,
     val blacklistApps: String?,
     val whitelistApps: String?,
@@ -17,5 +17,6 @@ data class StrategySnapshotEntity(
     val notifySilence: Boolean?,
     val version: Long?,
     // ADR-006：仅本地保存；历史快照 null 按非严格模式执行。
-    val strictMode: Boolean? = null
+    val strictMode: Boolean? = null,
+    @androidx.room.ColumnInfo(defaultValue = "''") val scope: String = "local\nlocal",
 )

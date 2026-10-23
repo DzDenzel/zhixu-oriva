@@ -25,8 +25,8 @@ class LocalRevisionInstrumentedTest {
         val name = "local-revision-${UUID.randomUUID()}.db"
         val db = Room.databaseBuilder(context, PlanLockDatabase::class.java, name).build()
         try {
-            val writer = RecordStore(db)
-            val reader = RecordStore(db)
+            val writer = RecordStore(db, { "local\nlocal" })
+            val reader = RecordStore(db, { "local\nlocal" })
             assertSame(writer.localRevision, reader.localRevision)
             val before = reader.localRevision.value
             val written = CompletableDeferred<Unit>()
@@ -56,7 +56,7 @@ class LocalRevisionInstrumentedTest {
             assertEquals(2, reader.plans().size)
             assertNull(withTimeoutOrNull(250) { reader.localRevision.first { it > changed } })
             // Direct DAO writes are covered as well as RecordStore and reconciliation writes.
-            db.planSnapshotDao().delete(-1)
+            db.planSnapshotDao().delete("local\nlocal", -1)
             withTimeout(5_000) { reader.localRevision.first { it > changed } }
             assertEquals(listOf(-2L), reader.plans().map { it.id })
         } finally {

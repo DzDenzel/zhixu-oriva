@@ -9,8 +9,8 @@ import com.planlock.app.record.entity.PendingRecordEntity
 @Dao
 interface PendingRecordDao {
 
-    @Query("SELECT * FROM pending_record WHERE type IN ('sync_conflict', 'bulk_delete') ORDER BY id")
-    fun observeConfirmations(): kotlinx.coroutines.flow.Flow<List<PendingRecordEntity>>
+    @Query("SELECT * FROM pending_record WHERE scope = :scope AND type IN ('sync_conflict', 'bulk_delete') ORDER BY id")
+    fun observeConfirmations(scope: String): kotlinx.coroutines.flow.Flow<List<PendingRecordEntity>>
 
     @Update
     suspend fun update(record: PendingRecordEntity)
@@ -18,27 +18,27 @@ interface PendingRecordDao {
     @Insert
     suspend fun insert(record: PendingRecordEntity)
 
-    @Query("SELECT COUNT(*) FROM pending_record WHERE clientId = :clientId")
-    suspend fun countByClientId(clientId: String): Int
+    @Query("SELECT COUNT(*) FROM pending_record WHERE scope = :scope AND clientId = :clientId")
+    suspend fun countByClientId(scope: String, clientId: String): Int
 
-    @Query("SELECT * FROM pending_record ORDER BY id ASC")
-    suspend fun all(): List<PendingRecordEntity>
+    @Query("SELECT * FROM pending_record WHERE scope = :scope ORDER BY id ASC")
+    suspend fun all(scope: String): List<PendingRecordEntity>
 
-    @Query("SELECT * FROM pending_record WHERE clientId = :clientId LIMIT 1")
-    suspend fun byClientId(clientId: String): PendingRecordEntity?
+    @Query("SELECT * FROM pending_record WHERE scope = :scope AND clientId = :clientId LIMIT 1")
+    suspend fun byClientId(scope: String, clientId: String): PendingRecordEntity?
 
-    @Query("SELECT * FROM pending_record WHERE id = :id")
-    suspend fun byId(id: Long): PendingRecordEntity?
+    @Query("SELECT * FROM pending_record WHERE scope = :scope AND id = :id")
+    suspend fun byId(scope: String, id: Long): PendingRecordEntity?
 
-    @Query("DELETE FROM pending_record WHERE id IN (:ids)")
-    suspend fun delete(ids: List<Long>)
+    @Query("DELETE FROM pending_record WHERE scope = :scope AND id IN (:ids)")
+    suspend fun delete(scope: String, ids: List<Long>)
 
-    @Query("DELETE FROM pending_record WHERE clientId = :clientId")
-    suspend fun deleteByClientId(clientId: String)
+    @Query("DELETE FROM pending_record WHERE scope = :scope AND clientId = :clientId")
+    suspend fun deleteByClientId(scope: String, clientId: String)
 
-    @Query("UPDATE pending_record SET planId = :newId WHERE planId = :oldId")
-    suspend fun replaceProtectedPlanId(oldId: Long, newId: Long)
+    @Query("UPDATE pending_record SET planId = :newId WHERE scope = :scope AND planId = :oldId")
+    suspend fun replaceProtectedPlanId(scope: String, oldId: Long, newId: Long)
 
-    @Query("SELECT * FROM pending_record WHERE type = 'violation' AND startedAt IS NOT NULL AND endedAt IS NOT NULL AND durationMs IS NOT NULL ORDER BY createdAt ASC, id ASC")
-    suspend fun behaviorDetails(): List<PendingRecordEntity>
+    @Query("SELECT * FROM pending_record WHERE scope = :scope AND type = 'violation' AND startedAt IS NOT NULL AND endedAt IS NOT NULL AND durationMs IS NOT NULL ORDER BY createdAt ASC, id ASC")
+    suspend fun behaviorDetails(scope: String): List<PendingRecordEntity>
 }

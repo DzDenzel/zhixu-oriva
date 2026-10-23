@@ -54,7 +54,7 @@ data class WeatherSnapshot(
 }
 
 object WeatherLocationChoice {
-    fun select(located: WeatherLocation?, manual: WeatherLocation?): WeatherLocation? = located ?: manual
+    fun select(located: WeatherLocation?, manual: WeatherLocation?): WeatherLocation? = manual ?: located
 }
 
 object WeatherLocationNaming {
@@ -189,7 +189,7 @@ object WeatherParser {
 }
 
 class WeatherClient {
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder().callTimeout(8, java.util.concurrent.TimeUnit.SECONDS).build()
     suspend fun searchCities(query: String): List<WeatherLocation> {
         if (query.isBlank()) return emptyList()
         val url = "https://geocoding-api.open-meteo.com/v1/search".toHttpUrl().newBuilder()
@@ -212,13 +212,16 @@ class WeatherClient {
         return get(url.toString())?.let { WeatherParser.parseCurrent(it, location, nowMillis) }
     }
 
-    private suspend fun get(url: String): String? = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(url).get().build()
-        runCatching {
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) response.body?.string() else null
+    private suspend fun get(url: String): String? = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(Request.Builder().url(url).get().build())
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, error: java.io.IOException) { if (continuation.isActive) continuation.resume(null) }
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val body = response.use { runCatching { if (it.isSuccessful) it.body?.string() else null }.getOrNull() }
+                if (continuation.isActive) continuation.resume(body)
             }
-        }.getOrNull()
+        })
     }
 }
 
@@ -257,7 +260,9 @@ class WeatherStore(private val preferences: DataStore<Preferences>) {
 
     /** Disk only: entering a page must not resolve GPS or fetch the weather. */
     suspend fun cachedSnapshot(): WeatherSnapshot? {
-        return preferences.data.first().toSnapshot()
+        val values = preferences.data.first()
+        val manual = values.toLocation()
+        return values.toSnapshot()?.takeIf { manual == null || it.matches(manual) }
     }
 
     private fun Preferences.toSnapshot(): WeatherSnapshot? {

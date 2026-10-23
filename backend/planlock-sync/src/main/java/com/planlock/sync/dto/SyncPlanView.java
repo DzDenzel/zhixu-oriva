@@ -4,6 +4,7 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.LocalDate;
 
 /**
  * 同步快照中的计划视图（JSON 字段以原始字符串透传）。
@@ -14,6 +15,8 @@ public class SyncPlanView {
     private Long id;
     private String clientId;
     private Long userId;
+    private LocalDate endedOccurrenceDate;
+    private String statusLog;
     private String name;
     private String type;
     private LocalTime startTime;

@@ -12,6 +12,8 @@ public final class ScheduleRules {
     private ScheduleRules() {}
 
     public static void validate(ScheduleUpsertRequest req, ObjectMapper mapper) {
+        Double lat=req.getLocationLat(), lon=req.getLocationLon();
+        if ((lat==null)!=(lon==null) || lat!=null && (!Double.isFinite(lat) || !Double.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)) invalid("地点坐标无效");
         if (req.getStartDate() == null || req.getEndDate() == null) invalid("开始和结束日期不能为空");
         if (req.getEndDate().isBefore(req.getStartDate())) invalid("结束日期不能早于开始日期");
         if (Boolean.TRUE.equals(req.getAllDay())) {

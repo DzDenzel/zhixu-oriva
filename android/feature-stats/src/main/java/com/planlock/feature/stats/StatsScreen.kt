@@ -106,6 +106,7 @@ import com.planlock.app.api.dto.ExecutionRecordDto
 import com.planlock.app.api.dto.ViolationAppStat
 import com.planlock.app.api.dto.TodaySummary
 import com.planlock.app.record.RecordStore
+import com.planlock.app.record.LocalExecutionStats
 import com.planlock.app.record.OccurrenceDate
 import com.planlock.app.record.entity.BehaviorAggregateEntity
 import com.planlock.app.record.entity.PlanSnapshotEntity
@@ -124,53 +125,53 @@ import java.util.Date
 import java.util.Locale
 
 private enum class ExportState { IDLE, EXPORTING }
+private data class LocalReportRead(
+    val plans: List<PlanSnapshotEntity>, val behavior: List<BehaviorAggregateEntity>,
+    val cached: Map<String, StatsResponse>, val reports: Map<String, StatsResponse>,
+    val today: List<ExecutionRecordDto>, val updatedAt: Long?,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
+/**
+ * 统计页（v4.3，REQ-042 1.2 第一块「我的节奏」；U3 方向 C 精简版，负责人 2026-10-19 定稿）。
+ * 数据只读 RhythmViewModel（本机计算、首屏不等网络，codex 交接 §1）；同步与导出沿用原有入口。
+ * [onOpenPlan]：各计划行点进计划详情（App 导航接入前为空操作）。
+ */
 @Composable
-fun StatsScreen() {
+fun StatsScreen(onOpenPlan: (Long) -> Unit = {}) {
     val context = LocalContext.current
+    val statsView = androidx.compose.ui.platform.LocalView.current
+    val enteredAt = remember { android.os.SystemClock.elapsedRealtimeNanos() }
+    val frameReported = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     val sync = remember { AppSync.get(context) }
     val syncState by sync.coordinator.state.collectAsState()
+    val authState by com.planlock.app.api.TokenStore.state.collectAsState()
     val api = remember { ApiClient.create() }
     val store = remember { RecordStore(context) }
     val scope = rememberCoroutineScope()
-    var reports by remember { mutableStateOf<Map<String, StatsResponse>>(emptyMap()) }
-    var selectedPeriod by remember { mutableStateOf("week") }
-    var today by remember { mutableStateOf<List<ExecutionRecordDto>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var offline by remember { mutableStateOf(false) }
-    var readError by remember { mutableStateOf<String?>(null) }
-    var planNames by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
-    var plans by remember { mutableStateOf<List<PlanSnapshotEntity>>(emptyList()) }
+    val rhythmModel = remember(store, scope) { com.planlock.app.record.RhythmViewModel(store, scope) }
+    val rhythmState by rhythmModel.state.collectAsState()
+    val frameReady = rhythmState.summary != null && rhythmState.dataScope == authState.dataScope
+    DisposableEffect(frameReady, statsView) {
+        val observer = statsView.viewTreeObserver
+        val committed = Runnable {
+            if (frameReported.compareAndSet(false, true)) {
+                (context as? android.app.Activity)?.reportFullyDrawn()
+                val elapsed = (android.os.SystemClock.elapsedRealtimeNanos() - enteredAt) / 1_000_000.0
+                android.util.Log.i("OrivaStatsFrame", "frame-committed elapsedMs=$elapsed ready=$frameReady")
+            }
+        }
+        if (frameReady && android.os.Build.VERSION.SDK_INT >= 29) {
+            observer.registerFrameCommitCallback(committed)
+            statsView.invalidate()
+        }
+        onDispose {
+            if (android.os.Build.VERSION.SDK_INT >= 29 && observer.isAlive) observer.unregisterFrameCommitCallback(committed)
+        }
+    }
     var exportState by remember { mutableStateOf(ExportState.IDLE) }
     val snackbar = remember { SnackbarHostState() }
-    var behavior by remember { mutableStateOf<List<BehaviorAggregateEntity>>(emptyList()) }
-    var cachedAt by remember { mutableStateOf<Long?>(null) }
-    var legacyExpanded by remember { mutableStateOf(false) }
     val observation = rememberPermissionPresentation().observation
-
-    suspend fun load() {
-        try {
-            val localPlans = store.plans()
-            plans = localPlans
-            behavior = store.behaviorAggregates()
-            planNames = localPlans.associate { it.id to it.name }
-            val snapshot = sync.cache.read(com.planlock.app.api.TokenStore.userId)
-            reports = listOf("day", "week", "month").mapNotNull { period ->
-                snapshot.stats(period)?.let { period to it }
-            }.toMap()
-            cachedAt = snapshot.updatedAtEpochMs
-            val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date())
-            today = snapshot.today?.takeIf { it.date == date }?.executions.orEmpty()
-            offline = syncState.error != null
-            readError = null
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            readError = "本机统计读取失败，请重试"
-        }
-        loading = false
-    }
 
     suspend fun export(uri: Uri, format: String) {
         exportState = ExportState.EXPORTING
@@ -200,9 +201,6 @@ fun StatsScreen() {
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri -> uri?.let { scope.launch { export(it, "csv") } } }
     val jsonLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> uri?.let { scope.launch { export(it, "json") } } }
 
-    val localRevision by store.localRevision.collectAsState()
-    LaunchedEffect(syncState.revision, localRevision) { load() }
-
     Scaffold(
         modifier = Modifier.planLockAtmosphere(PageAtmosphere.STATS),
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
@@ -212,113 +210,41 @@ fun StatsScreen() {
         SyncRefreshHost(syncState.running, syncState.error, { sync.coordinator.refresh() },
             loginRequired = syncState.loginRequired,
             errorEventKey = "${com.planlock.app.api.TokenStore.userId}:${syncState.attempts}") { syncStatus ->
-        when {
-            loading -> {
-                UIStatePanel(UiState.LOADING, "正在汇总本周数据", modifier = Modifier.padding(padding))
-                androidx.compose.foundation.layout.Box(Modifier.align(Alignment.TopEnd).padding(end = 22.dp, top = 26.dp)) { syncStatus() }
-            }
-            // 没有任何数据：只留页头。读取失败时才说明。
-            reports.isEmpty() && behavior.isEmpty() -> LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 22.dp)) {
-                item { StatsStatusHeader(syncStatus) }
-                if (readError != null) item { UIStatePanel(UiState.ERROR, readError, onAction = { scope.launch { load() }; sync.coordinator.refresh() }) }
-            }
-            else -> {
-                val value = reports[selectedPeriod]
-                val presentation = reportPresentation(value, behavior, plans.mapTo(mutableSetOf()) { it.id })
-                val ranking = presentation.ranking
-                val violationDuration = presentation.durationMs
-                val reportRows = value?.let {
-                    planReportRows(plans, it.planExecution, scopeDates(selectedPeriod, OccurrenceDate.from(Calendar.getInstance())))
-                }.orEmpty()
-                LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    item {
-                        StatsStatusHeader(syncStatus)
-                        Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            InkSegmented(listOf("day" to "今日", "week" to "本周", "month" to "本月"),
-                                selectedPeriod, { selectedPeriod = it }, Modifier.weight(1f).inkReveal(1))
-                        }
-                        Text(
-                            when {
-                                offline || presentation.local -> localDataLabel(cachedAt)
-                                cachedAt != null -> "更新于 ${formatClock(cachedAt!!)}"
-                                else -> "尚未同步"
-                            },
-                            color = if (offline || presentation.local) InkTone.brass else InkTone.faint,
-                            style = InkText.meta.copy(fontSize = 11.sp), modifier = Modifier.padding(top = 6.dp),
-                        )
+            // 身份切换时不显示上一个身份的帧（codex 交接：按完整 scope 屏蔽旧帧）
+            val current = rhythmState.dataScope == authState.dataScope
+            val summary = rhythmState.summary.takeIf { current }
+            val today = summary?.days?.firstOrNull { it.isToday }?.let { OccurrenceDate.parseIso(it.date) } ?: OccurrenceDate.from(Calendar.getInstance())
+            LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                item {
+                    StatsStatusHeader(syncStatus)
+                    summary?.let {
+                        Text(if (it.source == com.planlock.app.api.dto.RhythmSource.SYNCED) "已与云端同步" else "本地数据",
+                            style = InkText.caption, color = InkTone.soft, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
                     }
-                    if (observation != ObservationAvailability.PRECISE) item { ObservationNotice(observation) }
-                    readError?.let { error -> item { PersistentStatus("统计读取异常 · 详情", error) } }
-                    // 每个时间尺度一张自己的图：今日 = 日晷，本周 = 七日柱，本月 = 月历
-                    item {
-                        androidx.compose.animation.AnimatedContent(
-                            targetState = selectedPeriod,
-                            transitionSpec = {
-                                val order = listOf("day", "week", "month")
-                                val forward = order.indexOf(targetState) > order.indexOf(initialState)
-                                (androidx.compose.animation.fadeIn(tween(280)) + androidx.compose.animation.slideInHorizontally(tween(320, easing = Ink.Easing)) { if (forward) it / 4 else -it / 4 })
-                                    .togetherWith(androidx.compose.animation.fadeOut(tween(160)))
-                            },
-                            label = "period-chart",
-                        ) { period -> PeriodChart(period, reports[period], plans) }
+                }
+                if (observation != ObservationAvailability.PRECISE) item { ObservationNotice(observation) }
+                when {
+                    current && rhythmState.error != null -> item {
+                        UIStatePanel(UiState.ERROR, rhythmState.error, onAction = { sync.coordinator.refresh() })
                     }
-                    // 全站唯一的一块墨：这段时间被打断了多久
-                    item { DurationHero(violationDuration, ranking.sumOf { it.count }, ranking.size, periodLabel(selectedPeriod), presentation.local, periodHue(selectedPeriod)) }
-                    item {
-                        val earlyCount = value?.planExecution?.sumOf { it.earlyEndedCount } ?: 0
-                        ReportTiles(value?.continuousDays ?: 0, value?.completedCount ?: 0,
-                            earlyCount, periodLabel(selectedPeriod))
-                    }
-                    if (ranking.isNotEmpty()) {
-                        item { SectionTitle("分心来源", if (value == null) "本地累计" else scopeDateRangeLabel(selectedPeriod, OccurrenceDate.from(Calendar.getInstance()))) }
-                        val maxDuration = ranking.maxOf { it.totalDurationMs }.coerceAtLeast(1L)
-                        itemsIndexed(ranking, key = { _, stat -> stat.packageName }) { index, item -> ViolationRankRow(index + 1, item, maxDuration) }
-                    }
-                    if (reportRows.isNotEmpty()) {
-                        item { SectionTitle("完成情况", "计划 vs 实际") }
-                        items(reportRows, key = { it.planId }) { PlanReportRowView(it) }
-                    }
-                    if (!value?.earlyEndings.isNullOrEmpty()) {
-                        item { SectionTitle("提前结束", "最近 ${value!!.earlyEndings.size} 条") }
-                        items(value!!.earlyEndings, key = { "${it.planId}-${it.at}-${it.method}" }) { ending ->
-                            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                                Text(planNames[ending.planId] ?: "计划 #${ending.planId}", style = MaterialTheme.typography.titleMedium, color = InkTone.text)
-                                Text("${ending.at ?: "时间未知"} · ${ending.method ?: "主动结束（未要求密码确认）"}", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
-                            }
-                        }
-                    }
-                    if (today.isNotEmpty()) {
-                        item { SectionTitle("今日明细", "${today.size} 条") }
-                        items(today, key = { "${it.planId}-${it.startedAt}-${it.status}" }) { record ->
-                            ExecutionRow(record, planNames[record.planId])
-                        }
-                    }
-                    if ((value?.legacyViolationCount ?: 0) > 0) item {
-                        Column(Modifier.fillMaxWidth()) {
-                            TextButton(onClick = { legacyExpanded = !legacyExpanded }, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
-                                Text("旧版违规记录 ${if (legacyExpanded) "↑" else "↓"}", color = InkTone.soft)
-                            }
-                            if (legacyExpanded) Text("${value!!.legacyViolationCount} 次 · v1.0 为被拦下的未遂尝试，只读展示，不计入上方时长与排行。", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
-                        }
-                    }
-                    item {
-                        // 数据归你：三种格式一行排开
-                        val busy = exportState == ExportState.EXPORTING
-                        Column(Modifier.padding(top = 18.dp, bottom = 24.dp)) {
-                            Text(if (busy) "导出中…" else "导出", style = MaterialTheme.typography.titleMedium, color = InkTone.text)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-                                ExportChip("ICS", "日历", busy) { icsLauncher.launch("planlock-plans.ics") }
-                                ExportChip("CSV", "表格", busy) { csvLauncher.launch("planlock-records.csv") }
-                                ExportChip("JSON", "完整", busy) { jsonLauncher.launch("planlock-records.json") }
-                            }
+                    summary == null -> item { UIStatePanel(UiState.LOADING, "正在读取本机记录") }
+                    else -> {
+                        item(key = "completion") { RhythmCompletionCard(summary) }
+                        item(key = "chart") { RhythmChartCard(summary, today) }
+                        if (summary.plans.isNotEmpty()) item(key = "plans") { RhythmPlansCard(summary.plans, rhythmState.customPlanTypes, onOpenPlan) }
+                        summary.distraction?.takeIf { it.topSources.isNotEmpty() || it.minutes7d > 0 }?.let { d -> item(key = "distraction") { RhythmDistractionCard(d) } }
+                        // v2.1.2：「知行对你的了解」放这里——紧凑提醒式小条（REQ-042 1.2 G1），本版不显示
+                        item(key = "export") {
+                            RhythmExportRow(exportState == ExportState.EXPORTING,
+                                onIcs = { icsLauncher.launch("planlock-plans.ics") },
+                                onCsv = { csvLauncher.launch("planlock-records.csv") },
+                                onJson = { jsonLauncher.launch("planlock-records.json") })
                         }
                     }
                 }
             }
         }
     }
-}
-
 }
 
 @Composable
@@ -347,10 +273,10 @@ private fun DurationHero(durationMs: Long, count: Int, appCount: Int, scopeLabel
         // 水印字只作底纹：放进 matchParentSize 的层里，不撑高墨块（否则底部留出一大块空白）
         Box(Modifier.matchParentSize()) {
             Text("衡", modifier = Modifier.align(Alignment.TopEnd).offset(x = 26.dp, y = (-50).dp).wrapContentSize(unbounded = true),
-                fontFamily = InkTone.display, fontWeight = FontWeight.Black, fontSize = 160.sp, color = on.copy(alpha = .05f))
+                fontFamily = InkTone.display, fontWeight = FontWeight.Bold, fontSize = 160.sp, color = on.copy(alpha = .05f))
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(if (local) "DISTRACTION · 本地累计（时:分:秒）" else "DISTRACTION · 分心时长（时:分:秒）", style = InkText.eyebrow, color = accent)
+            Text(if (local) "本地累计的分心时长（时:分:秒）" else "分心时长（时:分:秒）", style = MaterialTheme.typography.titleSmall, color = accent)
             AdaptiveDuration(reportDurationLabel(durationMs))
             Text(
                 if (count == 0) "这段时间没有分心记录" else "${if (local) "本地累计" else scopeLabel}分心 $count 次 · 来自 $appCount 个应用",
@@ -400,7 +326,7 @@ private fun ExportChip(tag: String, label: String, busy: Boolean, onClick: () ->
     val hue = when (tag) { "ICS" -> InkHue.study; "CSV" -> InkHue.work; else -> InkHue.sleep }.color()
     Surface(onClick = onClick, enabled = !busy, shape = RoundedCornerShape(14.dp), color = hue.inkTint()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-            Text(tag, style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = hue)
+            Text(tag, style = InkText.meta.copy(fontWeight = FontWeight.SemiBold), color = hue)
             Text(label, style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.faint)
         }
     }
@@ -467,7 +393,7 @@ private fun ViolationRankRow(rank: Int, item: ViolationAppStat, maxDuration: Lon
             Row(verticalAlignment = Alignment.Bottom) {
                 Text(item.appName?.takeIf { it.isNotBlank() } ?: item.packageName, style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f), maxLines = 1)
-                Text(reportDurationLabel(item.totalDurationMs), style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = accent)
+                Text(reportDurationLabel(item.totalDurationMs), style = InkText.meta.copy(fontWeight = FontWeight.SemiBold), color = accent)
             }
             Box(Modifier.fillMaxWidth().height(4.dp).background(accent.copy(alpha = .18f), RoundedCornerShape(2.dp))) {
                 Box(Modifier.fillMaxWidth(grow.value).height(4.dp).background(accent, RoundedCornerShape(2.dp)))
@@ -484,7 +410,7 @@ private fun PlanReportRowView(item: PlanReportRow) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(item.name, style = MaterialTheme.typography.titleMedium)
-                Text("计划 ${reportDurationLabel(item.plannedDurationMs)}  /  实际 ${reportDurationLabel(item.actualDurationMs)}", style = InkText.meta, color = InkTone.soft)
+                Text("计划 ${planDurationLabel(item.plannedDurationMs)}　实际 ${planDurationLabel(item.actualDurationMs)}", style = InkText.meta, color = InkTone.soft)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("完成 ${item.completedCount}", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.jade)
                     Text("提前结束 ${item.earlyEndedCount}", style = InkText.meta.copy(fontSize = 11.sp), color = if (item.earlyEndedCount > 0) InkTone.brass else InkTone.faint)
@@ -492,7 +418,7 @@ private fun PlanReportRowView(item: PlanReportRow) {
                 }
             }
             InkRing(ratio, Modifier.size(54.dp), color = InkHue.sport.color(), track = InkHue.sport.color().copy(alpha = .18f), stroke = 4.dp) {
-                Text("${(ratio * 100).toInt()}%", style = InkText.meta.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold), color = InkTone.text)
+                Text("${(ratio * 100).toInt()}%", style = InkText.meta.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold), color = InkTone.text)
             }
         }
     }
@@ -653,7 +579,7 @@ private fun PeriodChart(period: String, report: StatsResponse?, plans: List<Plan
             Text(when (period) { "day" -> "  今日的安排"; "month" -> "  本月的节奏"; else -> "  本周的完成" },
                 style = MaterialTheme.typography.titleMedium, color = InkTone.text)
             Spacer(Modifier.weight(1f))
-            Text("完成 ${report?.completedCount ?: 0}", style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = color)
+            Text("完成 ${report?.completedCount ?: 0}", style = InkText.meta.copy(fontWeight = FontWeight.SemiBold), color = color)
         }
         when (period) {
             "day" -> DayDial(plans, report)
@@ -704,7 +630,7 @@ private fun WeekBars(days: List<DailyStat>, color: androidx.compose.ui.graphics.
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isToday) color else color.copy(alpha = .45f))
                 )
-                Text(weekdayLabel(day.date), style = InkText.meta.copy(fontSize = 10.sp, fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal),
+                Text(weekdayLabel(day.date), style = InkText.meta.copy(fontSize = 10.sp, fontWeight = if (isToday) FontWeight.SemiBold else FontWeight.Normal),
                     color = if (isToday) color else InkTone.faint, modifier = Modifier.padding(top = 6.dp))
             }
         }

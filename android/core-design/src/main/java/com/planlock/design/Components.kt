@@ -133,7 +133,7 @@ private fun NavItem(destination: TopLevelDestination, selected: Boolean, modifie
             Icon(destination.icon, null, tint = fg, modifier = Modifier.size(20.dp))
         }
         Text(destination.label, color = fg, fontSize = 11.sp, lineHeight = 14.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, modifier = Modifier.padding(top = 2.dp))
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, modifier = Modifier.padding(top = 2.dp))
     }
 }
 
@@ -152,7 +152,11 @@ private fun AssistantButton(selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-enum class PlanVisualState(val label: String) { EXECUTING("进行中"), UPCOMING("未开始"), PAUSED("已暂停"), COMPLETED("已完成") }
+/**
+ * 计划卡状态。v4.6（§7.9 设计裁决）：重复计划当天这一次自然完成后为 [TODAY_DONE]「今天已完成」（草绿），
+ * 提前结束为 [TODAY_ENDED]「今天已结束」（淡墨）；判定由 codex 的 `visualState` 提供，不再一律回到「未开始」。
+ */
+enum class PlanVisualState(val label: String) { EXECUTING("进行中"), UPCOMING("未开始"), PAUSED("已暂停"), COMPLETED("已完成"), TODAY_ENDED("今天已结束"), TODAY_DONE("今天已完成") }
 
 data class PlanCardData(
     val id: Long,
@@ -170,11 +174,14 @@ internal fun stateColor(state: PlanVisualState): Color = when (state) {
     PlanVisualState.UPCOMING -> InkTone.indigo
     PlanVisualState.PAUSED -> Ink.stone
     PlanVisualState.COMPLETED -> InkTone.jade
+    PlanVisualState.TODAY_ENDED -> InkTone.faint
+    PlanVisualState.TODAY_DONE -> InkTone.jade
 }
 
 /**
- * 计划卡：类别色的淡底 + 左侧 4dp 色条。名称衬线，起止时刻等宽；进行中换成朱色底并带呼吸点。
- * 同类计划同色，一眼分得清「学习 / 工作 / 运动 / 睡眠」。
+ * 计划卡（v4.3，审查 U7a/b 方案 B）：类别只用「淡底 + 彩色时刻」编码，不再有左侧色条；
+ * 进行中 = 朱色淡底 + 时刻前一枚呼吸点；状态单独放在卡片最右（有「结束」等操作时让位给操作）；
+ * 元信息按字重 / 颜色分层（类型粗、类别色；重复规则常规、软墨），不用「·」串。
  */
 @Composable
 fun PlanCard(
@@ -189,50 +196,55 @@ fun PlanCard(
     val start = parts.getOrNull(0)?.trim().orEmpty()
     val end = parts.getOrNull(1)?.trim()
     val executing = data.state == PlanVisualState.EXECUTING
-    val paused = data.state == PlanVisualState.PAUSED
+    val dimmed = data.state == PlanVisualState.PAUSED || data.state == PlanVisualState.TODAY_ENDED
     val hue = if (executing) InkHue.seal else InkHue.forType(data.type)
     val color = hue.color()
     val shape = RoundedCornerShape(16.dp)
+    val press = rememberInkPress()
     Row(
-        modifier.fillMaxWidth().padding(vertical = 4.dp).clip(shape)
-            .background(if (paused) InkTone.sunk else hue.tint())
-            .clickable(onClick = onClick)
+        modifier.fillMaxWidth().padding(vertical = 4.dp).inkPressScale(press).clip(shape)
+            .background(if (dimmed) InkTone.sunk else hue.tint())
+            .inkPressClick(press, onClick = onClick)
             .height(IntrinsicSize.Min),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.width(4.dp).fillMaxHeight().background(if (paused) Ink.stone else color))
         // 时间列按内容宽度（下限 40dp）+ 右侧 10dp 间隔：大字体下不再贴住标题
-        Column(Modifier.padding(start = 12.dp, end = 10.dp, top = 14.dp, bottom = 14.dp).widthIn(min = 40.dp)) {
-            Text(start, style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = if (paused) InkTone.faint else color)
-            end?.let { Text(it, style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint) }
+        Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 14.dp, bottom = 14.dp).widthIn(min = 40.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (executing) { InkPulseDot(color, dotSize = 7.dp); Spacer(Modifier.width(6.dp)) }
+                Text(start, style = InkText.caption.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold), color = if (dimmed) InkTone.soft else color)
+            }
+            end?.let { Text(it, style = InkText.caption.copy(fontSize = 11.sp), color = InkTone.soft) }
         }
         Column(Modifier.weight(1f).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(data.name, modifier = Modifier.sharedPlanElement(sharedKey?.let { "$it-name" }),
-                style = MaterialTheme.typography.titleMedium, color = if (paused) InkTone.soft else InkTone.text,
+                style = MaterialTheme.typography.titleMedium, color = if (dimmed) InkTone.soft else InkTone.text,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(data.type, style = InkText.meta.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold), color = if (paused) InkTone.faint else color)
-                Text(" · ${data.repeatText}  ", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint, maxLines = 1)
-                StatusChip(data.state, Modifier.sharedPlanElement(sharedKey?.let { "$it-status" }, status = true))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(data.type, style = InkText.caption.copy(fontWeight = FontWeight.SemiBold), color = if (dimmed) InkTone.soft else color, maxLines = 1)
+                Text(data.repeatText, style = InkText.caption, color = InkTone.soft, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            data.supportingText?.let { Text(it, style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.vermilion) }
+            data.supportingText?.let { Text(it, style = InkText.caption, color = InkTone.vermilion) }
+        }
+        if (trailingAction == null) {
+            Text(data.state.label, modifier = Modifier.padding(start = 6.dp, end = if (onOverflow == null) 14.dp else 0.dp)
+                .sharedPlanElement(sharedKey?.let { "$it-status" }, status = true),
+                style = InkText.caption.copy(fontWeight = if (executing) FontWeight.SemiBold else FontWeight.Normal),
+                color = when {
+                    executing -> color
+                    // §7.9（v4.6）：今天已完成用草绿，与「未开始 / 今天已结束」的软墨区分
+                    data.state == PlanVisualState.TODAY_DONE -> InkTone.jade
+                    else -> InkTone.soft
+                }, maxLines = 1)
         }
         trailingAction?.invoke()
-        onOverflow?.let { action ->
-            IconButton(onClick = action, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "更多操作", tint = InkTone.faint, modifier = Modifier.size(18.dp))
+        if (onOverflow != null) {
+            IconButton(onClick = onOverflow, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "更多操作", tint = InkTone.soft, modifier = Modifier.size(18.dp))
             }
-        } ?: Spacer(Modifier.width(10.dp))
-    }
-}
-
-@Composable
-private fun StatusChip(state: PlanVisualState, modifier: Modifier = Modifier) {
-    val color = stateColor(state)
-    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        if (state == PlanVisualState.EXECUTING) InkPulseDot(color, dotSize = 5.dp)
-        else Box(Modifier.size(5.dp).background(color, CircleShape))
-        Text(" ${state.label}", style = InkText.meta.copy(fontSize = 10.sp), color = color)
+        } else if (trailingAction != null) {
+            Spacer(Modifier.width(10.dp))
+        }
     }
 }
 
@@ -265,9 +277,9 @@ fun ExecutionStatusCard(
             }
             Text(if (paused) " 已暂停" else " 进行中",
                 modifier = Modifier.sharedPlanElement(sharedKey?.let { "$it-status" }, true, sharedDuration),
-                color = accent, style = InkText.meta.copy(fontWeight = FontWeight.Bold))
+                color = accent, style = InkText.meta.copy(fontWeight = FontWeight.SemiBold))
             Spacer(Modifier.weight(1f))
-            Text(endsAtText, style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint, maxLines = 1)
+            Text(endsAtText, style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.soft, maxLines = 1)
         }
         Text(planName, modifier = Modifier.sharedPlanElement(sharedKey?.let { "$it-name" }, duration = sharedDuration),
             color = InkTone.text, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -294,7 +306,7 @@ fun StatTile(value: String, label: String, trend: String, danger: Boolean = fals
     ) {
         Text(value, style = InkText.numeral.copy(fontSize = 28.sp), color = accent, maxLines = 1)
         Text(label, style = MaterialTheme.typography.bodyMedium, color = InkTone.text, maxLines = 1)
-        Text(trend, style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.faint, maxLines = 1)
+        Text(trend, style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.soft, maxLines = 1)
     }
 }
 
@@ -385,12 +397,12 @@ internal fun AppRow(app: AppOption, selected: Boolean, locked: Boolean, onClick:
     ) {
         Box(Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(InkTone.sunk), contentAlignment = Alignment.Center) {
             if (app.icon != null) Image(app.icon, app.name, Modifier.size(28.dp))
-            else Text(app.name.take(1), fontFamily = InkTone.display, fontWeight = FontWeight.Bold, color = InkTone.text)
+            else Text(app.name.take(1), fontFamily = InkTone.display, fontWeight = FontWeight.SemiBold, color = InkTone.text)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(app.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(app.category, style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint)
+            Text(app.category, style = InkText.caption, color = InkTone.soft)
         }
         if (locked) {
             Icon(Icons.Filled.Lock, contentDescription = "已锁定", modifier = Modifier.size(20.dp))

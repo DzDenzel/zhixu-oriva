@@ -26,6 +26,7 @@ data class TimelineEntry(
     val backgroundBand: Boolean = false,
     val originalStartMin: Int = startMin,
     val originalEndMin: Int = endMin,
+    val occurrenceEnded: Boolean = false,
 )
 
 data class TimelineWindow(val startMin: Int, val endMin: Int) {
@@ -69,10 +70,15 @@ object DayTimeline {
                 val end = minutes(plan.endTime) ?: return@forEach
                 if (start == end) return@forEach
                 if (PlanOccurrence.occursOn(plan, calendarDate)) {
-                    add(entry(TimelineKind.PLAN,plan.id,plan.name,start,if(end>start) end else 1440,false,end<=start,state(plan.status,start,if(end>start) end else 1440,nowMinutes),"计划").copy(originalStartMin=start,originalEndMin=end))
+                    val ended = PlanOccurrence.isEndedOn(plan, date)
+                    val occurrenceState = if(ended) TimelineState.ENDED else state(plan.status,start,if(end>start) end else 1440,nowMinutes)
+                    add(entry(TimelineKind.PLAN,plan.id,plan.name,start,if(end>start) end else 1440,false,end<=start,occurrenceState,"计划").copy(originalStartMin=start,originalEndMin=end,occurrenceEnded=ended))
                 }
                 if (end < start && PlanOccurrence.occursOn(plan.repeatRule, previous)) {
-                    add(entry(TimelineKind.PLAN,plan.id,plan.name,0,end,true,false,state(plan.status,0,end,nowMinutes),"计划").copy(originalStartMin=start,originalEndMin=end))
+                    val previousKey="%04d-%02d-%02d".format(Locale.ROOT,previous.year,previous.month,previous.day)
+                    val ended = PlanOccurrence.isEndedOn(plan, previousKey)
+                    val occurrenceState=if(ended) TimelineState.ENDED else state(plan.status,0,end,nowMinutes)
+                    add(entry(TimelineKind.PLAN,plan.id,plan.name,0,end,true,false,occurrenceState,"计划").copy(originalStartMin=start,originalEndMin=end,occurrenceEnded=ended))
                 }
             }
             schedules.filter { it.status == 1 && occurs(it,date,calendarDate) }.forEach { schedule ->

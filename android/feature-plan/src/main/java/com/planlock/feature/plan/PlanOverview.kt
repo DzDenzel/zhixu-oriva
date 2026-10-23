@@ -15,7 +15,7 @@ data class PlanOverviewModel(
 )
 
 object PlanOverview {
-    fun build(plans: List<PlanSnapshotEntity>, nowMinutes: Int, today: OccurrenceDate): PlanOverviewModel {
+    fun build(plans: List<PlanSnapshotEntity>, nowMinutes: Int, today: OccurrenceDate, customTypes: List<com.planlock.app.api.PlanTypeDefinition> = emptyList()): PlanOverviewModel {
         val unique = plans.distinctBy { it.id }
         val scheduled = unique.filter(::isScheduled)
         val current = scheduled.filter { PlanTime.isActive(it, nowMinutes, today) }
@@ -28,7 +28,7 @@ object PlanOverview {
                 .thenBy { PlanTime.minutesOfDay(it.plan.startTime) ?: Int.MAX_VALUE }
                 .thenBy { it.plan.name })
             .toList()
-        val categoryCounts = scheduled.groupingBy { it.type.trim().ifEmpty { "其他" } }
+        val categoryCounts = scheduled.groupingBy { com.planlock.app.api.PlanTypes.label(it.type, customTypes) }
             .eachCount().toSortedMap()
         return PlanOverviewModel(
             current = current,

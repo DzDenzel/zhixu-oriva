@@ -63,8 +63,11 @@ fun StatusActionRow(
 /** Reserve the same header geometry when a continuing status appears or disappears. */
 @Composable
 fun StatusRegion(content: @Composable () -> Unit) {
-    // 最小宽度固定，保证状态出现 / 消失时页头不跳；同步失败胶囊展开时可略宽
-    Box(Modifier.widthIn(min = 128.dp).height(48.dp), contentAlignment = Alignment.CenterEnd) { content() }
+    // 最小宽度固定，保证状态出现 / 消失时页头不跳；同步失败胶囊展开时可略宽。
+    // v4.5（BUG-110 K3）：窄屏（< 380dp）只预留一个圆钮的宽度，未登录胶囊此时也收成圆钮，
+    // 否则 128dp 的空位会把计划页「计划 / 日程」切换签挤得只剩印章和数字。
+    val narrow = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 380
+    Box(Modifier.widthIn(min = if (narrow) 48.dp else 128.dp).height(48.dp), contentAlignment = Alignment.CenterEnd) { content() }
 }
 
 @Composable

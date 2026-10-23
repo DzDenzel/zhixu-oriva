@@ -25,9 +25,9 @@ class PlanStrategyDraftTest {
             assertFalse(draft.shouldWriteStrategy)
         }
     }
-    @Test fun newPlanKeepsItsExistingEnabledDefaults() {
+    @Test fun newPlanStartsWithBothOptionalCapabilitiesDisabled() {
         val draft=PlanStrategyDraft.fromSnapshot(null,true)
-        assertEquals(true,draft.autoDnd); assertEquals(true,draft.notifySilence)
+        assertEquals(false,draft.autoDnd); assertEquals(false,draft.notifySilence)
         assertTrue(draft.shouldWriteStrategy)
     }
     @Test fun changingOneToggleDoesNotFillTheOtherUnconfiguredField() {

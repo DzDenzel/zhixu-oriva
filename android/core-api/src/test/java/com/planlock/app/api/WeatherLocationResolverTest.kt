@@ -9,8 +9,9 @@ class WeatherLocationResolverTest {
     private val manual = WeatherLocation("广州 · 广东 · 中国", 23.12, 113.26, "Asia/Shanghai")
 
     @Test
-    fun `located source wins then falls back to manual or none`() {
-        assertEquals(located, WeatherLocationChoice.select(located, manual))
+    fun `manual choice persists until user explicitly returns to current location`() {
+        assertEquals(manual, WeatherLocationChoice.select(located, manual))
+        assertEquals(located, WeatherLocationChoice.select(located, null))
         assertEquals(manual, WeatherLocationChoice.select(null, manual))
         assertNull(WeatherLocationChoice.select(null, null))
     }

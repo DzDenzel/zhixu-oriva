@@ -20,12 +20,17 @@ android {
 
     defaultConfig {
         minSdk = 24
-        buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
     }
 
     buildTypes {
-        debug { buildConfigField("boolean", "USE_MOCK", "$debugUseMock") }
-        release { buildConfigField("boolean", "USE_MOCK", "false") }
+        debug {
+            buildConfigField("boolean", "USE_MOCK", "$debugUseMock")
+            buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
+        }
+        release {
+            buildConfigField("boolean", "USE_MOCK", "false")
+            buildConfigField("String", "API_BASE_URL", "\"\"")
+        }
     }
 
     buildFeatures {

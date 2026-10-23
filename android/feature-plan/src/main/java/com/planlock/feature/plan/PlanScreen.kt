@@ -1,6 +1,9 @@
 package com.planlock.feature.plan
 
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.animation.togetherWith
+import com.planlock.design.inkPressClick
+import com.planlock.design.inkPressScale
 import androidx.compose.foundation.border
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -21,6 +24,7 @@ import com.planlock.design.tint
 import com.planlock.design.inkTint
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import com.planlock.design.InkText
@@ -41,6 +45,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
@@ -56,6 +61,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.semantics.selected
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -104,7 +111,6 @@ import java.util.Date
 import java.util.Locale
 
 private enum class PlanShelfMode { PLANS, SCHEDULES }
-private data class ScheduleOccurrence(val date: String, val schedule: ScheduleSnapshotEntity)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -127,6 +133,7 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
     val scope = rememberCoroutineScope()
     val clock = rememberPlanClock()
     var plans by remember { mutableStateOf<List<PlanSnapshotEntity>>(emptyList()) }
+    var executionHistory by remember { mutableStateOf<List<com.planlock.app.record.entity.ExecutionHistoryEntity>>(emptyList()) }
     var schedules by remember { mutableStateOf<List<ScheduleSnapshotEntity>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -143,6 +150,7 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
     var confirmationBusy by remember { mutableStateOf(false) }
     var confirmationError by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
+    val allListState = rememberLazyListState()
     val scheduleListState = rememberLazyListState()
 
     PlanActionDialogHost(actionGate, pendingAction) { pendingAction = null }
@@ -158,7 +166,9 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
         if (confirmation != null) openConfirmation(confirmation) else onOpenDetail(value.id)
     }
 
-    fun cardData(value: PlanSnapshotEntity, state: PlanVisualState) = value.toCardData(state).copy(
+    fun cardData(value: PlanSnapshotEntity, state: PlanVisualState) = value.toCardData(value.visualState(Calendar.getInstance(), executionHistory).takeIf {
+        it == PlanVisualState.TODAY_ENDED || it == PlanVisualState.TODAY_DONE
+    } ?: state).copy(
         supportingText = if (confirmations.any { it.affectedPlanId() == value.id }) "需要确认" else null,
     )
 
@@ -193,8 +203,14 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
     suspend fun refresh() {
         error = null
         try {
-            plans = store.plans()
-            schedules = store.schedules()
+            val owned = store.forScope(authState.dataScope)
+            val loadedPlans = owned.plans()
+            val loadedSchedules = owned.schedules()
+            val (fromDate, throughDate) = executionHistoryDates(clock)
+            val loadedHistory = owned.executionHistoryForDates(fromDate, throughDate)
+            plans = loadedPlans
+            schedules = loadedSchedules
+            executionHistory = loadedHistory
             schedules.forEach(reminderScheduler::schedule)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -204,7 +220,12 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
         loading = false
     }
     val localRevision by store.localRevision.collectAsState()
-    LaunchedEffect(syncState.revision, localRevision) { refresh() }
+    LaunchedEffect(syncState.revision, localRevision, authState.dataScope, executionHistoryDates(clock)) {
+        if (plans.any { it.scope != authState.dataScope } || schedules.any { it.scope != authState.dataScope }) {
+            plans = emptyList(); schedules = emptyList(); executionHistory = emptyList()
+        }
+        refresh()
+    }
 
     selectedConfirmation?.let { selected ->
         SyncConfirmationDialog(selected, confirmationBusy, confirmationError,
@@ -259,7 +280,9 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
     val filteredAll = remember(overview.scheduled, selectedCategory) {
         overview.scheduled.filter { selectedCategory == null || it.type.trim().ifEmpty { "其他" } == selectedCategory }
     }
-    val scheduleOccurrences = remember(schedules) { upcomingScheduleOccurrences(schedules) }
+    // BUG-105：切换签数字与列表同源
+    val scheduleShelf = remember(schedules, today) { scheduleShelf(schedules, today) }
+    val planCount = planShelfCount(overview)
 
     if (showScheduleEditor) ScheduleEditorSheet(
         current = editingSchedule,
@@ -281,9 +304,7 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
         },
         onDelete = editingSchedule?.let { old -> {
             scope.launch {
-                store.enqueueScheduleDelete(old.id)
-                reminderScheduler.cancel(old.id)
-                runCatching { syncClient.pushPendingRecords() }
+                deleteSchedule(store, reminderScheduler, syncClient, old)
                 showScheduleEditor = false
             }
         } },
@@ -303,7 +324,7 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
             loginRequired = syncState.loginRequired,
             errorEventKey = "${com.planlock.app.api.TokenStore.userId}:${syncState.attempts}") { syncStatus ->
         Column(Modifier.fillMaxSize()) {
-            PlanShelfHeader(shelfMode, planCount = plans.size, scheduleCount = schedules.size, onChange = { shelfMode = it }, onCreate = createAction, syncStatus = syncStatus)
+            PlanShelfHeader(shelfMode, planCount = planCount, scheduleCount = scheduleShelf.count, onChange = { shelfMode = it }, onCreate = createAction, syncStatus = syncStatus)
             SyncConfirmationStatus(confirmations, bulkDeletion, onSelect = ::openConfirmation,
                 onBulkSelect = { confirmationError = null; selectedConfirmation = null; selectedBulkDeletion = it })
             if (confirmationError != null && selectedConfirmation == null && selectedBulkDeletion == null) {
@@ -315,7 +336,7 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
             error != null && plans.isEmpty() && schedules.isEmpty() -> UIStatePanel(UiState.ERROR, error, { scope.launch { refresh() } }, Modifier.weight(1f).verticalScroll(rememberScrollState()))
             shelfMode == PlanShelfMode.SCHEDULES -> androidx.compose.foundation.layout.Box(modifier = Modifier.weight(1f)) {
                 ScheduleList(
-                    occurrences = scheduleOccurrences,
+                    shelf = scheduleShelf,
                     deliveryMode = reminderScheduler.deliveryMode().name,
                     state = scheduleListState,
                     needsConfirmation = { schedule -> confirmations.any { it.kind == "schedule" && it.id == schedule.id } },
@@ -331,15 +352,24 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
             plans.isEmpty() -> androidx.compose.foundation.layout.Box(
                 Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).semantics { contentDescription = "计划列表" },
             )
-            else -> androidx.compose.foundation.layout.Box(modifier = Modifier.weight(1f)) {
-                // 默认只看「正在 / 接下来」；两者都没有时直接展示全部。
-                val showAll = allExpanded || (overview.current.isEmpty() && overview.upcoming.isEmpty())
+            else -> Column(modifier = Modifier.weight(1f)) {
+                // v4.2：「近期 / 全部」两个范围标签放在列表顶部（替代列表底部的「全部 N 项 →」小链接）。
+                // 只有在「接下来」有内容时才需要选择；否则直接是全部。
+                val hasUpcoming = overview.current.isNotEmpty() || overview.upcoming.isNotEmpty()
+                val showAll = allExpanded || !hasUpcoming
+                if (hasUpcoming) PlanScopeTabs(showAll, planCount, onSelect = { all -> allExpanded = all; if (!all) selectedCategory = null })
+                androidx.compose.animation.AnimatedContent(
+                    targetState = showAll,
+                    modifier = Modifier.weight(1f),
+                    transitionSpec = { planScopeTransition(targetState, reducedMotion) },
+                    label = "plan-scope",
+                ) { all ->
                 LazyColumn(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-                    state = listState,
+                    state = if (all) allListState else listState,
                     contentPadding = PaddingValues(bottom = 96.dp),
                 ) {
-                    if (!showAll) {
+                    if (!all) {
                         if (overview.current.isNotEmpty()) {
                             item { ShelfLabel("正在进行", dot = InkTone.vermilion) }
                             items(overview.current, key = { "current-${it.id}" }) { plan ->
@@ -364,7 +394,7 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
                             item { ShelfLabel("接下来", dot = InkHue.study.color()) }
                             overview.upcoming.groupBy { it.dayOffset }.forEach { (offset, group) ->
                                 item(key = "day-$offset") {
-                                    Text(nextLabel(offset), style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint,
+                                    Text(nextLabel(offset), style = InkText.caption, color = InkTone.soft,
                                         modifier = Modifier.padding(start = 10.dp, top = 8.dp, bottom = 2.dp))
                                 }
                                 itemsIndexed(group, key = { _, o -> "upcoming-${o.plan.id}" }) { index, occurrence ->
@@ -373,26 +403,9 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
                                 }
                             }
                         }
-                        item {
-                            TextButton(onClick = { allExpanded = true }, modifier = Modifier.padding(top = 8.dp)
-                                .semantics { contentDescription = "全部计划，已收起" }) {
-                                Text("全部 ${plans.distinctBy { it.id }.size} 项 →", color = InkTone.soft, style = MaterialTheme.typography.labelLarge)
-                            }
-                        }
                     } else {
-                        // 只有暂停 / 时间不完整的计划时，直接把它们列出来，不再显示空的「全部」
+                        // 只有暂停 / 时间不完整的计划时，直接把它们列出来
                         val onlyStored = overview.scheduled.isEmpty()
-                        if (!onlyStored) item {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                ShelfLabel("全部", Modifier.weight(1f))
-                                if (overview.current.isNotEmpty() || overview.upcoming.isNotEmpty()) {
-                                    TextButton(onClick = { allExpanded = false; selectedCategory = null },
-                                        modifier = Modifier.semantics { contentDescription = "全部计划，已展开" }) {
-                                        Text("收起", color = InkTone.soft)
-                                    }
-                                }
-                            }
-                        }
                         if (overview.categoryCounts.size >= 2) item {
                             androidx.compose.foundation.lazy.LazyRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -414,18 +427,15 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
                                 PlanCard(cardData(plan, PlanVisualState.PAUSED), onClick = { openPlan(plan) })
                             }
                         } else if (overview.stored.isNotEmpty()) {
-                            item {
-                                TextButton(onClick = { storageExpanded = !storageExpanded }, modifier = Modifier.padding(top = 8.dp)
-                                    .semantics { contentDescription = if (storageExpanded) "暂停计划，已展开" else "暂停计划，已收起" }) {
-                                    Text("已暂停或时间不完整 ${overview.stored.size} 项 ${if (storageExpanded) "↑" else "↓"}", color = InkTone.soft,
-                                        style = MaterialTheme.typography.labelLarge)
-                                }
+                            item(key = "stored-toggle") {
+                                FoldToggle("已暂停或时间不完整", overview.stored.size, storageExpanded, { storageExpanded = !storageExpanded })
                             }
                             if (storageExpanded) items(overview.stored, key = { "stored-${it.id}" }) { plan ->
-                                PlanCard(cardData(plan, PlanVisualState.PAUSED), onClick = { openPlan(plan) })
+                                PlanCard(cardData(plan, PlanVisualState.PAUSED), onClick = { openPlan(plan) }, modifier = Modifier.animateItem())
                             }
                         }
                     }
+                }
                 }
             }
             }
@@ -520,18 +530,102 @@ private fun ShelfSegment(
         horizontalArrangement = Arrangement.Center,
     ) {
         Box(Modifier.size(26.dp).background(sealFill, androidx.compose.foundation.shape.RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-            Text(glyph, color = sealInk, fontFamily = InkTone.display, fontWeight = FontWeight.Black, fontSize = 14.sp,
+            Text(glyph, color = sealInk, fontFamily = InkTone.display, fontWeight = FontWeight.Bold, fontSize = 14.sp,
                 style = androidx.compose.ui.text.TextStyle(platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false)))
         }
         androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
         // 页头右侧胶囊展开时切换条会变窄：字号自动收小，不裁字
         com.planlock.design.FitText(label,
-            androidx.compose.ui.text.TextStyle(fontFamily = InkTone.display, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 17.sp),
+            androidx.compose.ui.text.TextStyle(fontFamily = InkTone.display, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, fontSize = 17.sp),
             text, Modifier.weight(1f, fill = false), minSize = 12.sp)
         androidx.compose.foundation.layout.Spacer(Modifier.width(6.dp))
-        Text(if (count > 99) "99+" else count.toString(), color = if (selected) tone else InkTone.faint,
-            style = InkText.meta.copy(fontSize = 11.sp), maxLines = 1, softWrap = false)
+        // 数量变化时数字上下滚动一格（增加向上、减少向下）；减弱动画时直接切换
+        val reduced = LocalReducedMotion.current
+        androidx.compose.animation.AnimatedContent(
+            targetState = count,
+            transitionSpec = {
+                if (reduced) androidx.compose.animation.EnterTransition.None togetherWith androidx.compose.animation.ExitTransition.None
+                else {
+                    val up = targetState > initialState
+                    (androidx.compose.animation.slideInVertically(tween(220, easing = com.planlock.design.Ink.Easing)) { if (up) it else -it } +
+                        androidx.compose.animation.fadeIn(tween(180))) togetherWith
+                        (androidx.compose.animation.slideOutVertically(tween(160)) { if (up) -it else it } + androidx.compose.animation.fadeOut(tween(120)))
+                }
+            },
+            label = "shelf-count",
+        ) { value ->
+            Text(if (value > 99) "99+" else value.toString(), color = if (selected) tone else InkTone.faint,
+                style = InkText.meta.copy(fontSize = 11.sp), maxLines = 1, softWrap = false)
+        }
     }
+}
+
+/**
+ * 计划列表的范围标签（v4.2）：「近期」看正在进行与接下来七天，「全部 N」看每一项（含已暂停）。
+ * 文字标签 + 跟随选中的 2dp 强调色下划线，层级明显低于上方的「计划 / 日程」切换条。
+ */
+@Composable
+private fun PlanScopeTabs(showAll: Boolean, total: Int, onSelect: (Boolean) -> Unit) {
+    var hint by remember { mutableStateOf(false) }
+    Column {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 2.dp).selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        PlanScopeTab("近期", null, !showAll, "近期计划", onLongClick = { hint = true }) { onSelect(false) }
+        PlanScopeTab("全部", total, showAll, "全部计划") { onSelect(true) }
+    }
+    // v4.3（审查 U7e）：长按「近期」说明它的范围（读屏用户可用「说明范围」操作）
+    androidx.compose.animation.AnimatedVisibility(hint) {
+        Text("近期：正在进行，以及今天起 7 天内的计划", style = InkText.caption, color = InkTone.soft,
+            modifier = Modifier.padding(start = 24.dp, top = 2.dp, bottom = 2.dp))
+    }
+    LaunchedEffect(hint) { if (hint) { kotlinx.coroutines.delay(3500); hint = false } }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun PlanScopeTab(label: String, count: Int?, selected: Boolean, description: String, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
+    val reduced = LocalReducedMotion.current
+    val line by androidx.compose.animation.core.animateFloatAsState(
+        if (selected) 1f else 0f, if (reduced) androidx.compose.animation.core.snap() else tween(220, easing = com.planlock.design.Ink.Easing),
+        label = "scope-line",
+    )
+    val color by androidx.compose.animation.animateColorAsState(if (selected) InkTone.text else InkTone.soft, label = "scope-text")
+    Column(
+        // 宽度跟随文字（下划线按文字宽度画，不撑满整行）
+        Modifier.width(androidx.compose.foundation.layout.IntrinsicSize.Max).heightIn(min = 48.dp)
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+            .combinedClickable(role = androidx.compose.ui.semantics.Role.Tab, onClick = onClick, onLongClick = onLongClick,
+                onLongClickLabel = if (onLongClick != null) "说明范围" else null)
+            .semantics(mergeDescendants = true) {
+                contentDescription = description
+                this.selected = selected
+            }
+            .padding(horizontal = 6.dp),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(label, color = color, style = MaterialTheme.typography.titleSmall,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium)
+            count?.let { Text(" $it", color = InkTone.soft, style = InkText.meta.copy(fontSize = 11.sp)) }
+        }
+        Box(Modifier.padding(top = 4.dp).height(2.dp).fillMaxWidth(line)
+            .background(InkTone.accent, androidx.compose.foundation.shape.RoundedCornerShape(1.dp)))
+    }
+}
+
+/** 范围切换的共享横轴过渡：去「全部」内容从右侧进入，回「近期」从左侧进入；退出快于进入。 */
+private fun androidx.compose.animation.AnimatedContentTransitionScope<Boolean>.planScopeTransition(
+    toAll: Boolean, reduced: Boolean,
+): androidx.compose.animation.ContentTransform {
+    if (reduced) return androidx.compose.animation.fadeIn(tween(150)) togetherWith androidx.compose.animation.fadeOut(tween(100))
+    val dir = if (toAll) 1 else -1
+    return (androidx.compose.animation.slideInHorizontally(tween(300, easing = com.planlock.design.Ink.Easing)) { dir * it / 8 } +
+        androidx.compose.animation.fadeIn(tween(220, delayMillis = 60))) togetherWith
+        (androidx.compose.animation.slideOutHorizontally(tween(200, easing = com.planlock.design.Ink.Easing)) { -dir * it / 8 } +
+            androidx.compose.animation.fadeOut(tween(120)))
 }
 
 @Composable
@@ -543,56 +637,128 @@ private fun ShelfLabel(text: String, modifier: Modifier = Modifier, dot: android
 }
 
 @Composable
+private fun ScheduleMonthLabel(text: String, modifier: Modifier = Modifier) {
+    Text(text, style = MaterialTheme.typography.titleMedium, color = InkTone.text,
+        modifier = modifier.padding(start = 10.dp, top = 18.dp, bottom = 4.dp))
+}
+
+/**
+ * 折叠段的标题行（v4.2）：「已过去 6 项」+ 转动的箭头图标；整行可点、至少 48dp 高。
+ * 日程的「已过去」与计划「全部」里的「已暂停或时间不完整」共用，替代原来用「↓」字符当图标的文字按钮。
+ */
+@Composable
+private fun FoldToggle(label: String, count: Int, open: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+    val reducedMotion = LocalReducedMotion.current
+    val turn by androidx.compose.animation.core.animateFloatAsState(if (open) 180f else 0f,
+        tween(if (reducedMotion) 0 else 220, easing = com.planlock.design.Ink.Easing), label = "fold")
+    Row(
+        modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp)
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+            .clickable(onClick = onToggle)
+            .semantics { contentDescription = "$label $count 项，" + if (open) "已展开" else "已收起" }
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.titleMedium, color = InkTone.soft)
+        Text("$count 项", style = InkText.caption, color = InkTone.soft, modifier = Modifier.padding(start = 8.dp))
+        Spacer(Modifier.weight(1f))
+        Icon(Icons.Filled.KeyboardArrowDown, null, tint = InkTone.faint,
+            modifier = Modifier.graphicsLayer { rotationZ = turn })
+    }
+}
+
+@Composable
 private fun ScheduleList(
-    occurrences: List<ScheduleOccurrence>,
+    shelf: ScheduleShelf,
     deliveryMode: String,
     state: androidx.compose.foundation.lazy.LazyListState,
     needsConfirmation: (ScheduleSnapshotEntity) -> Boolean,
     onOpen: (ScheduleSnapshotEntity) -> Unit,
 ) {
     // 没有日程：留白，但保留可滚动容器以接住下拉刷新手势（BUG-098）。
-    if (occurrences.isEmpty()) {
+    if (shelf.count == 0) {
         androidx.compose.foundation.layout.Box(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).semantics { contentDescription = "日程列表" },
         )
         return
     }
+    // BUG-105 + 负责人 2026-10-18：还没结束的在前（按月，从近到远）；已过去的收在最后一段「已过去 N 项」，
+    // 默认收起（没有未结束的日程时直接展开），点开即可找到——签上的数字仍包含它们。
+    val hasUpcoming = shelf.upcoming.isNotEmpty()
+    var pastOpen by rememberSaveable { mutableStateOf(false) }
+    val showPast = pastOpen || !hasUpcoming
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
         state = state,
         contentPadding = PaddingValues(bottom = 96.dp),
     ) {
-        occurrences.groupBy { it.date.substring(0, 7) }.forEach { (month, group) ->
-            item(key = "month-$month") {
-                Text(month.substring(5).trimStart('0') + " 月", style = MaterialTheme.typography.titleMedium, color = InkTone.text,
-                    modifier = Modifier.padding(start = 10.dp, top = 18.dp, bottom = 4.dp))
+        shelf.upcoming.forEach { group ->
+            item(key = "month-${group.key}") { ScheduleMonthLabel(group.label) }
+            itemsIndexed(group.entries, key = { _, e -> "schedule-${e.schedule.id}" }) { index, entry ->
+                ScheduleShelfRow(entry, needsConfirmation(entry.schedule), Modifier.inkReveal(index)) { onOpen(entry.schedule) }
             }
-            itemsIndexed(group, key = { _, o -> "${o.date}-${o.schedule.id}" }) { index, occurrence ->
-                Row(
-                    Modifier.fillMaxWidth().inkReveal(index).padding(vertical = 4.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                        .background(InkHue.amber.tint())
-                        .clickable { onOpen(occurrence.schedule) }.padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.widthIn(min = 52.dp).padding(end = 6.dp)) {
-                        Text(occurrence.date.substring(8), style = InkText.numeral.copy(fontSize = 22.sp, lineHeight = 26.sp), color = InkHue.amber.color())
-                        Text(weekdayOf(occurrence.date), style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.faint)
-                    }
-                    Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                        Text(occurrence.schedule.title, style = MaterialTheme.typography.titleMedium, color = InkTone.text, maxLines = 1)
-                        Text(listOfNotNull(
-                            if (occurrence.schedule.allDay) "全天" else occurrence.schedule.startTime?.take(5),
-                            occurrence.schedule.location?.takeIf { it.isNotBlank() },
-                        ).joinToString(" · "), style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint, maxLines = 1)
-                        if (needsConfirmation(occurrence.schedule)) Text("需要确认", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.vermilion)
-                    }
-
+        }
+        if (shelf.pastCount > 0) {
+            item(key = "past-toggle") {
+                if (hasUpcoming) FoldToggle("已过去", shelf.pastCount, pastOpen, { pastOpen = !pastOpen }, Modifier.animateItem())
+                else ShelfLabel("已过去")
+            }
+            if (showPast) shelf.past.forEach { group ->
+                item(key = "month-${group.key}") { ScheduleMonthLabel(group.label, Modifier.animateItem()) }
+                itemsIndexed(group.entries, key = { _, e -> "schedule-${e.schedule.id}" }) { index, entry ->
+                    ScheduleShelfRow(entry, needsConfirmation(entry.schedule), Modifier.animateItem().inkReveal(index)) { onOpen(entry.schedule) }
                 }
             }
         }
         if (deliveryMode != "EXACT") item {
-            Text("提醒可能有轻微延迟（系统未授予精确闹钟）", style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.faint,
+            Text("提醒可能有轻微延迟（系统未授予精确闹钟）", style = InkText.caption.copy(fontSize = 11.sp), color = InkTone.soft,
                 modifier = Modifier.padding(start = 10.dp, top = 16.dp))
+        }
+    }
+}
+
+/** 日程卡：琥珀淡底；已过去的一条退成淡纸色、字转淡，但照常列出（BUG-105 §3.2）。按下轻缩。 */
+@Composable
+private fun ScheduleShelfRow(entry: ScheduleShelfEntry, needsConfirmation: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val context = LocalContext.current
+    val schedule = entry.schedule
+    val amber = InkHue.amber.color()
+    val press = com.planlock.design.rememberInkPress()
+    Row(
+        modifier.fillMaxWidth().padding(vertical = 4.dp).then(Modifier.inkPressScale(press))
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+            .background(if (entry.past) InkTone.sunk.copy(alpha = .6f) else InkHue.amber.tint())
+            .then(Modifier.inkPressClick(press, onClick = onClick))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.widthIn(min = 52.dp).padding(end = 6.dp)) {
+            Text(entry.date.substring(8), style = InkText.numeral.copy(fontSize = 22.sp, lineHeight = 26.sp),
+                color = if (entry.past) InkTone.faint else amber)
+            Text(weekdayOf(entry.date), style = InkText.caption.copy(fontSize = 11.sp), color = InkTone.soft)
+        }
+        Column(Modifier.weight(1f).padding(start = 8.dp)) {
+            Text(schedule.title, style = MaterialTheme.typography.titleMedium, color = if (entry.past) InkTone.soft else InkTone.text, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            // v4.3（审查 U7b）：时刻粗、琥珀；重复与地点常规、软墨；正文字体，不用等宽字
+            // U5：有地点时前加定位图标，点地点打开地图（替代单独的「在地图打开」按钮）
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (schedule.allDay) "全天" else schedule.startTime?.take(5).orEmpty(),
+                    style = InkText.caption.copy(fontWeight = FontWeight.SemiBold), color = if (entry.past) InkTone.soft else amber, maxLines = 1)
+                if (!schedule.repeatRule.isNullOrBlank()) Text("重复", style = InkText.caption, color = InkTone.soft, maxLines = 1)
+                val place = schedule.location?.takeIf { it.isNotBlank() }
+                if (place != null || schedule.locationLat != null) Row(
+                    Modifier.weight(1f, fill = false).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                        .clickable(onClickLabel = "在地图中打开") { openScheduleMap(context, schedule) }
+                        .heightIn(min = 32.dp).padding(end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Place, null, tint = InkTone.soft, modifier = Modifier.size(14.dp))
+                    Text(place ?: "地图位置", style = InkText.caption, color = InkTone.soft, maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(start = 2.dp))
+                }
+            }
+            if (needsConfirmation) Text("需要确认", style = InkText.caption.copy(fontWeight = FontWeight.SemiBold), color = InkTone.vermilion)
         }
     }
 }
@@ -602,20 +768,6 @@ private fun weekdayOf(isoDate: String): String = runCatching {
     val day = Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_WEEK)
     "周" + listOf("日", "一", "二", "三", "四", "五", "六")[day - 1]
 }.getOrDefault("")
-
-private fun upcomingScheduleOccurrences(schedules: List<ScheduleSnapshotEntity>): List<ScheduleOccurrence> {
-    val format = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    val day = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-    return buildList {
-        repeat(366) {
-            val key = format.format(day.time)
-            DayTimeline.build(key, emptyList(), schedules, 0, collapseOverlaps = false)
-                .filter { it.kind == com.planlock.app.record.TimelineKind.SCHEDULE }
-                .forEach { entry -> schedules.firstOrNull { it.id == entry.id }?.let { add(ScheduleOccurrence(key, it)) } }
-            day.add(Calendar.DAY_OF_MONTH, 1)
-        }
-    }.take(200)
-}
 
 @Composable
 private fun CategoryFilter(label: String, selected: Boolean, onClick: () -> Unit) {

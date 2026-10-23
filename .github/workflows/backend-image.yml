@@ -99,6 +99,15 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+      - name: Verify image version matches release tag
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.image.outputs.version }}
+        run: |
+          docker pull "$IMAGE@$DIGEST"
+          actual="$(docker run --rm --entrypoint /usr/bin/printenv "$IMAGE@$DIGEST" PLANLOCK_VERSION)"
+          test "$actual" = "$VERSION"
       - name: Release manifest
         env:
           IMAGE_NAME: ${{ steps.image.outputs.name }}

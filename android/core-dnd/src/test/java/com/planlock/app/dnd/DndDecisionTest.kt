@@ -6,6 +6,20 @@ import org.junit.Test
 
 class DndDecisionTest {
     @Test
+    fun api35EndingDisablesOurRuleEvenWhenAnotherRuleAlreadyRequiredAlarms() {
+        assertEquals(DndAction.Restore(NotificationManager.INTERRUPTION_FILTER_ALL),
+            decideDndAction(DndState(recordedPlanId = 7, previousFilter = NotificationManager.INTERRUPTION_FILTER_ALARMS,
+                currentFilter = NotificationManager.INTERRUPTION_FILTER_ALARMS, api35Plus = true)))
+    }
+
+    @Test
+    fun api35EndingReleasesOurRuleWhenUserChangedTheCombinedFilter() {
+        assertEquals(DndAction.Restore(NotificationManager.INTERRUPTION_FILTER_ALL),
+            decideDndAction(DndState(recordedPlanId = 7, previousFilter = NotificationManager.INTERRUPTION_FILTER_ALL,
+                currentFilter = NotificationManager.INTERRUPTION_FILTER_PRIORITY, api35Plus = true)))
+    }
+
+    @Test
     fun recordedPlanKeepsDndWhenTheSamePlanStillNeedsIt() {
         assertEquals(
             DndAction.Keep,

@@ -16,9 +16,22 @@ class ConnectionPersistenceTest {
         override suspend fun updateData(transform: suspend (Preferences) -> Preferences) = transform(data.value).also { data.value = it }
     }
 
+    @Test fun unconnectedStoreCannotAcceptCredentials() = runBlocking {
+        val store = MemoryStore()
+        ConnectionStore.restore(store); TokenStore.restore(store)
+        TokenStore.changeConnection(store, null)
+        try { TokenStore.save(store, AuthSession("must-not-save", 42, 8, signedIn = true)); fail("Unconnected login accepted") }
+        catch (_: IllegalStateException) {
+            assertNull(TokenStore.token)
+            assertFalse(TokenStore.canSync)
+            assertTrue(store.data.value.asMap().keys.none { it.name == "token" })
+        }
+    }
+
     @Test fun sameInstanceGuestCanBecomeAccountButLateLoginCannotCommitAfterSwitch() = runBlocking {
         val store = MemoryStore()
         ConnectionStore.restore(store); TokenStore.restore(store)
+        importTestConnection(store)
         TokenStore.save(store, AuthSession("guest", 7, 8))
         TokenStore.save(store, AuthSession("account", 42, 8, guestUserId = 7, signedIn = true))
         assertTrue("Trusted same-instance guest merge must remain possible", TokenStore.canSync)
@@ -32,6 +45,7 @@ class ConnectionPersistenceTest {
 
     @Test fun explicitLogoutAndAccountSwitchRequireLoginEvenAfterReturningToSameBackend() = runBlocking {
         val store = MemoryStore(); TokenStore.restore(store)
+        importTestConnection(store)
         TokenStore.save(store, AuthSession("account", 42, 8, signedIn = true))
         val original = ConnectionStore.state.value.config
         TokenStore.signOut(store)
@@ -44,25 +58,27 @@ class ConnectionPersistenceTest {
         assertFalse("Previously signed-in account must explicitly authenticate after switching", TokenStore.canRegisterDevice)
     }
 
-    @Test fun switchingClearsCredentialsButPreservesOldOwnerAndOutboxBoundaryAcrossRestore() = runBlocking {
+    @Test fun switchingClearsCredentialsAndNewInstanceUsesDistinctScopeAcrossRestore() = runBlocking {
         val store = MemoryStore()
         ConnectionStore.restore(store)
         TokenStore.restore(store)
+        importTestConnection(store)
         TokenStore.save(store, AuthSession("old-token", 42, 8, signedIn = true))
         val original = ConnectionStore.state.value.config!!
         val other = original.copy(instanceLabel = "其他实例", apiBaseUrl = "https://other.invalid/api/v1/")
         TokenStore.changeConnection(store, other)
         assertNull(TokenStore.token)
-        assertEquals(42L, TokenStore.localDataUserId)
-        assertTrue(TokenStore.state.value.ownershipMismatch)
+        assertNull(TokenStore.localDataUserId)
+        assertFalse(TokenStore.state.value.ownershipMismatch)
         assertFalse(TokenStore.canSync)
         assertFalse(TokenStore.canRegisterDevice)
         ConnectionStore.restore(store)
         TokenStore.restore(store)
         assertEquals(other, ConnectionStore.state.value.config)
-        assertTrue(TokenStore.state.value.ownershipMismatch)
-        try { TokenStore.save(store, AuthSession("same-id-new-instance", 42, 8, signedIn = true)); fail("Same ID on another instance took old data") }
-        catch (_: IllegalStateException) { assertNull(TokenStore.token) }
+        assertFalse(TokenStore.state.value.ownershipMismatch)
+        TokenStore.save(store, AuthSession("same-id-new-instance", 42, 8, signedIn = true))
+        assertEquals(other.instanceId + "\n42", TokenStore.state.value.dataScope)
+        assertNotEquals(original.instanceId + "\n42", TokenStore.state.value.dataScope)
         TokenStore.changeConnection(store, original)
         TokenStore.save(store, AuthSession("restored", 42, 8, signedIn = true))
         assertTrue(TokenStore.canSync)

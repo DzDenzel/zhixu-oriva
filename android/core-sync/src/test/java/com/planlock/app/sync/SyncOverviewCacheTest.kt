@@ -13,6 +13,10 @@ class SyncOverviewCacheTest {
     @Test fun sameUserIdOnDifferentInstancesKeepsSeparateSnapshots() = runBlocking {
         val disk = MemoryStore()
         com.planlock.app.api.TokenStore.restore(disk)
+        com.planlock.app.api.TokenStore.changeConnection(disk, com.planlock.app.api.ConnectionConfig(
+            instanceLabel = "测试后端", apiBaseUrl = "https://example.invalid/api/v1/",
+            pluginsCatalogUrl = "https://example.invalid/plugins/catalog/",
+        ))
         val original = com.planlock.app.api.ConnectionStore.state.value.config!!
         val cache = SyncOverviewCache(disk)
         try {
@@ -26,11 +30,11 @@ class SyncOverviewCacheTest {
             com.planlock.app.api.TokenStore.restore(MemoryStore())
         }
     }
-    @Test fun retainedAccountOverviewStaysReachableWithoutUsingItsOldCredentials() {
+    @Test fun signedOutCannotReadRetainedAccountOverview() {
         val account = com.planlock.app.api.AuthSession("token", 99, 8, signedIn = true)
         val signedOut = com.planlock.app.api.AuthState(signedOut = true, dataOwner = 42)
-        assertEquals(42L, localOverviewOwner(null, signedOut))
-        assertEquals(42L, localOverviewOwner(99, signedOut.copy(session = account, signedOut = false)))
+        assertNull(localOverviewOwner(null, signedOut))
+        assertEquals(99L, localOverviewOwner(99, signedOut.copy(session = account, signedOut = false)))
         assertEquals(99L, localOverviewOwner(99, com.planlock.app.api.AuthState(session = account, dataOwner = 99)))
         assertNull(localOverviewOwner(null, com.planlock.app.api.AuthState()))
     }

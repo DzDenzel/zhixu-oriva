@@ -6,6 +6,7 @@ import com.planlock.common.BusinessException;
 import com.planlock.common.ErrorCode;
 import com.planlock.record.dto.DailyStat;
 import com.planlock.record.dto.EarlyEnding;
+import com.planlock.record.dto.RecordHistoryResponse;
 import com.planlock.record.dto.ExecutionRecordRequest;
 import com.planlock.record.dto.StatsResponse;
 import com.planlock.record.dto.TodaySummary;
@@ -43,8 +44,34 @@ public class RecordService {
     private final RecordPlanRefMapper planRefMapper;
     private final ObjectMapper objectMapper;
 
+    public RecordHistoryResponse history(Long userId, long executionAfterId, long unlockAfterId, int limit) {
+        return history(userId, executionAfterId, unlockAfterId, -1, limit);
+    }
+
+    public RecordHistoryResponse history(Long userId, long executionAfterId, long unlockAfterId, long behaviorAfterId, int limit) {
+        int pageSize = Math.clamp(limit, 1, 1000);
+        long executionCursor = Math.max(0, executionAfterId);
+        long unlockCursor = Math.max(0, unlockAfterId);
+        var executionPage = executionMapper.findHistoryAfter(userId, executionCursor, pageSize + 1);
+        var unlockPage = unlockMapper.findHistoryAfter(userId, unlockCursor, pageSize + 1);
+        // Old clients omit behaviorAfterId: do not let an unconsumed table hold their hasMore open.
+        var behaviorPage = behaviorAfterId < 0 ? List.<ViolationRecord>of()
+                : violationMapper.findHistoryAfter(userId, Math.max(0, behaviorAfterId), pageSize + 1);
+        boolean hasMore = executionPage.size() > pageSize || unlockPage.size() > pageSize || behaviorPage.size() > pageSize;
+        var behaviors = behaviorPage.stream().limit(pageSize).toList();
+        var executions = executionPage.stream().limit(pageSize).toList();
+        var unlocks = unlockPage.stream().limit(pageSize)
+                .map(u -> new RecordHistoryResponse.UnlockHistory(u.getId(), u.getPlanId(), u.getUnlockAt(), u.getMethod(), u.getClientId()))
+                .toList();
+        if (!executions.isEmpty()) executionCursor = executions.getLast().getId();
+        if (!unlocks.isEmpty()) unlockCursor = unlocks.getLast().id();
+        long behaviorCursor = behaviors.isEmpty() ? Math.max(0, behaviorAfterId) : behaviors.getLast().getId();
+        return new RecordHistoryResponse(executions, unlocks, executionCursor, unlockCursor, hasMore, behaviors, behaviorCursor);
+    }
+
     @Transactional
     public void reportExecution(Long userId, Long deviceId, ExecutionRecordRequest req) {
+        lockHistoryOwner(userId);
         requireOwnedPlan(userId, req.getPlanId());
         ExecutionRecord record = new ExecutionRecord();
         record.setPlanId(req.getPlanId());
@@ -59,6 +86,7 @@ public class RecordService {
 
     @Transactional
     public void reportViolation(Long userId, Long deviceId, ViolationRecordRequest req) {
+        lockHistoryOwner(userId);
         requireOwnedPlan(userId, req.getPlanId());
         ViolationRecord record = new ViolationRecord();
         record.setPlanId(req.getPlanId());
@@ -76,6 +104,7 @@ public class RecordService {
 
     @Transactional
     public void reportUnlock(Long userId, Long deviceId, UnlockRecordRequest req) {
+        lockHistoryOwner(userId);
         requireOwnedPlan(userId, req.getPlanId());
         UnlockRecord record = new UnlockRecord();
         record.setPlanId(req.getPlanId());
@@ -213,6 +242,13 @@ public class RecordService {
     private void requireOwnedPlan(Long userId, Long planId) {
         if (planRefMapper.countOwnedPlan(planId, userId) == 0) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
+        }
+    }
+
+    private void lockHistoryOwner(Long userId) {
+        // ID cursors require commit order within an owner; AUTO_INCREMENT alone does not provide it.
+        if (planRefMapper.lockOwner(userId) == null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
         }
     }
 

@@ -50,7 +50,7 @@ fun SettingsGlyph(glyph: String, hue: InkHue.Hue, size: Dp = 36.dp) {
         Modifier.size(size).background(hue.tint(), RoundedCornerShape(size * .31f)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(glyph, fontFamily = InkTone.display, fontWeight = FontWeight.Black,
+        Text(glyph, fontFamily = InkTone.display, fontWeight = FontWeight.Bold,
             fontSize = (size.value * .44f).sp, color = hue.color())
     }
 }
@@ -78,7 +78,7 @@ fun SettingsHero(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     status?.let { SettingsStateTag(it, statusOn) }
                     detail?.let {
-                        Text(it, style = InkText.meta.copy(fontSize = 11.sp, lineHeight = 15.sp), color = InkTone.faint,
+                        Text(it, style = InkText.caption, color = InkTone.soft,
                             maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     }
                 }
@@ -90,7 +90,7 @@ fun SettingsHero(
 /** 分组小标题（淡墨元信息字）。 */
 @Composable
 fun SettingsCaption(text: String, modifier: Modifier = Modifier) {
-    Text(text, style = InkText.meta, color = InkTone.faint, modifier = modifier.padding(start = 6.dp, top = 10.dp, bottom = 2.dp))
+    Text(text, style = InkText.caption, color = InkTone.soft, modifier = modifier.padding(start = 6.dp, top = 10.dp, bottom = 2.dp))
 }
 
 /** 一组设置：抬起的纸面，组内行之间用内缩发丝线分隔（用 [SettingsDivider]）。 */
@@ -120,9 +120,10 @@ fun SettingsItem(
     onClick: (() -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
+    val press = rememberInkPress()
     Row(
         Modifier.fillMaxWidth().heightIn(min = 60.dp)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick).semantics { role = Role.Button } else Modifier)
+            .then(if (onClick != null) Modifier.inkPressClick(press, onClick = onClick).semantics { role = Role.Button } else Modifier)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -130,7 +131,7 @@ fun SettingsItem(
         glyph?.let { SettingsGlyph(it, hue) }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, color = titleColor ?: InkTone.text)
-            detail?.let { Text(it, style = InkText.meta.copy(fontSize = 11.sp, lineHeight = 15.sp), color = InkTone.faint) }
+            detail?.let { Text(it, style = InkText.caption, color = InkTone.soft) }
         }
         when {
             trailing != null -> trailing()
@@ -169,6 +170,8 @@ fun SettingsChevron() {
 /** 状态签：开 = 草绿底 + 实心点；未开 = 琥珀底 + 空心圈。 */
 @Composable
 fun SettingsStateTag(text: String, on: Boolean) {
+    // v4.6（真机）：状态签只放短状态（2–4 字）；括号里的来源 / 说明属于副标题，不进签——否则签过宽，把行标题挤成竖排
+    val label = settingsTagLabel(text)
     val hue = if (on) InkHue.sport else InkHue.amber
     val tone = hue.color()
     Row(
@@ -180,6 +183,10 @@ fun SettingsStateTag(text: String, on: Boolean) {
             else Modifier.size(6.dp).border(1.2.dp, tone, CircleShape),
         )
         Spacer(Modifier.width(5.dp))
-        Text(text, style = InkText.meta.copy(fontSize = 11.sp, lineHeight = 14.sp), color = tone, fontWeight = FontWeight.Bold, maxLines = 1)
+        Text(label, style = InkText.caption.copy(fontSize = 12.sp, lineHeight = 14.sp), color = tone, fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
+
+/** 状态签文字：去掉全角 / 半角括号里的补充说明，「已开启（随通知使用权）」→「已开启」。 */
+fun settingsTagLabel(text: String): String =
+    text.substringBefore('（').substringBefore('(').trim().ifEmpty { text }

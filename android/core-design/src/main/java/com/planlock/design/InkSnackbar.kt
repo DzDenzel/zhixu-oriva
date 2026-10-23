@@ -80,7 +80,7 @@ fun InkSnackbar(data: SnackbarData) {
             )
             visuals.actionLabel?.let { label ->
                 TextButton(onClick = { data.performAction() }) {
-                    Text(label, color = InkTone.vermilion, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text(label, color = InkTone.vermilion, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                 }
             }
             if (visuals.withDismissAction) {

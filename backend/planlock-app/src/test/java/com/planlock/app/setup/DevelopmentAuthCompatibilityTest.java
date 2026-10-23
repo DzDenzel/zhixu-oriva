@@ -38,9 +38,25 @@ class DevelopmentAuthCompatibilityTest {
             var req = new DeviceRegisterRequest(); req.setDeviceUid("dev");
             assertThat(ctx.getBean(AuthService.class).deviceRegister(req).getUserId()).isEqualTo(42L);
             var existing = new Device(); existing.setId(7L); existing.setUserId(42L);
+            var anonymous = new User(); anonymous.setId(42L);
+            when(users.findById(42L)).thenReturn(anonymous);
             when(devices.findByDeviceUid("dev")).thenReturn(existing);
             assertThat(ctx.getBean(AuthService.class).deviceRegister(req).getDeviceId()).isEqualTo(7L);
             verify(users, times(1)).insert(any()); verify(devices).touch(eq(7L), any());
+        });
+    }
+
+    @Test void reinstallDeviceRegistrationCannotIssueThePreviousAccountToken() {
+        runner.run(ctx -> {
+            var users=ctx.getBean(UserMapper.class);var devices=ctx.getBean(DeviceMapper.class);
+            var member=new User();member.setId(9L);member.setEmail("member@example.invalid");
+            when(users.findById(9L)).thenReturn(member);
+            var device=new Device();device.setId(7L);device.setUserId(9L);device.setDeviceUid("reinstall");
+            when(devices.findByDeviceUid("reinstall")).thenReturn(device);
+            doAnswer(call->{((User)call.getArgument(0)).setId(10L);return 1;}).when(users).insert(any());
+            var request=new DeviceRegisterRequest();request.setDeviceUid("reinstall");
+            assertThat(ctx.getBean(AuthService.class).deviceRegister(request).getUserId()).isEqualTo(10L);
+            verify(devices).update(argThat(value->value.getUserId().equals(10L)));
         });
     }
 

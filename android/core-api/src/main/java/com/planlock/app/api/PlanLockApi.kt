@@ -106,7 +106,18 @@ interface PlanLockApi {
     suspend fun today(): ApiResponse<TodaySummary>
 
     @GET("records/stats")
+    @Deprecated("Use rhythm() for REQ-042 statistics")
     suspend fun stats(@Query("period") period: String = "week"): ApiResponse<StatsResponse>
+
+    @GET("stats/rhythm")
+    suspend fun rhythm(
+        @Query("days") days: Int = 62,
+        @Query("tz") timeZone: String = java.util.TimeZone.getDefault().id,
+    ): ApiResponse<com.planlock.app.api.dto.RhythmSummary>
+
+    @GET("records/history")
+    suspend fun recordHistory(@Query("executionAfterId") executionAfterId: Long, @Query("unlockAfterId") unlockAfterId: Long,
+        @Query("limit") limit: Int = 200, @Query("behaviorAfterId") behaviorAfterId: Long = 0): ApiResponse<com.planlock.app.api.dto.RecordHistoryPage>
 
     @GET("records/export")
     suspend fun exportRecords(@Query("format") format: String): ResponseBody

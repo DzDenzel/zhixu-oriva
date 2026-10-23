@@ -89,6 +89,8 @@ fun GuideScreen(onDone: () -> Unit = {}) {
     var reminder by remember { mutableIntStateOf(15) }
     var autoDnd by remember { mutableStateOf(true) }
     var notifySilence by remember { mutableStateOf(true) }
+    val capabilityGate = com.planlock.design.rememberCapabilityPermissionGate()
+    val editorScope = remember { store.currentScope() }
     var allowedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var apps by remember { mutableStateOf(categoryOptions) }
     var appsLoading by remember { mutableStateOf(true) }
@@ -156,11 +158,14 @@ fun GuideScreen(onDone: () -> Unit = {}) {
                     if (step > 1) OutlinedButton(onClick = { step-- }, modifier = Modifier.weight(1f)) { Text("上一步") }
                     Button(shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp), 
                         onClick = {
-                            if (step < 4) step++ else scope.launch {
-                                saveGuidePlan(type, startTime, endTime, reminder, autoDnd, notifySilence, apps, allowedIds, store, api)
-                                try { sync.pushPendingRecords() } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled } catch (_: Exception) { }
+                            if (step < 4) step++ else capabilityGate.beforeSave(com.planlock.app.security.CapabilityRequirements.plan(autoDnd,notifySilence,true)) { scope.launch {
+                                sync.withLocalMutation {
+                                    check(editorScope == store.currentScope()) { "账号已变化，请重新打开" }
+                                    saveGuidePlan(type, startTime, endTime, reminder, autoDnd, notifySilence, apps, allowedIds, store, api)
+                                }
+                                sync.localChangesCommitted()
                                 onDone()
-                            }
+                            } }
                         },
                         enabled = type.isNotBlank(),
                         modifier = Modifier.weight(1f)
@@ -218,8 +223,14 @@ fun GuideScreen(onDone: () -> Unit = {}) {
                                 }
                                 Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
                                     Column(Modifier.padding(14.dp)) {
-                                        SettingSwitch("免打扰", "执行时仅保留闹钟", autoDnd) { autoDnd = it }
-                                        SettingSwitch("通知静默", "减少无关通知干扰", notifySilence) { notifySilence = it }
+                                        SettingSwitch("免打扰", "执行时仅保留闹钟", autoDnd) { enabled ->
+                                            autoDnd = enabled
+                                            if (enabled) capabilityGate.request(com.planlock.app.security.Capability.DND) { autoDnd = it }
+                                        }
+                                        SettingSwitch("通知静默", "减少无关通知干扰", notifySilence) { enabled ->
+                                            notifySilence = enabled
+                                            if (enabled) capabilityGate.request(com.planlock.app.security.Capability.NOTIFICATION_SILENCE) { notifySilence = it }
+                                        }
                                     }
                                 }
                             }

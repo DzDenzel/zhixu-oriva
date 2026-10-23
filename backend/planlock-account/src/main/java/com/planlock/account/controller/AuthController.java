@@ -51,6 +51,6 @@ public class AuthController {
 
     @PostMapping("/merge")
     public ApiResponse<Map<String, Long>> merge(@Valid @RequestBody MergeRequest req) {
-        return ApiResponse.ok(authService.merge(UserContext.userId(), req.getGuestUserId()));
+        return ApiResponse.ok(authService.merge(UserContext.userId(), req.getGuestUserId(), req.getGuestToken()));
     }
 }

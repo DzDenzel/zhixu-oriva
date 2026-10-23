@@ -3,10 +3,10 @@ package com.planlock.plan.dto;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Pattern;
 import lombok.Data;
 
 import java.time.LocalTime;
+import java.time.LocalDate;
 
 /**
  * 创建 / 更新计划请求（PUT 更新时另行携带 baseVersion 查询参数）。
@@ -17,11 +17,14 @@ public class PlanUpsertRequest {
     @NotBlank(message = "计划名不能为空")
     private String name;
 
+    private LocalDate endedOccurrenceDate;
+    private String statusLog;
+
     @jakarta.validation.constraints.Size(min = 1, max = 64)
     private String clientId;
 
     @NotBlank(message = "计划类型不能为空")
-    @Pattern(regexp = "学习|运动|睡眠|工作|自定义", message = "计划类型取值仅支持 学习/运动/睡眠/工作/自定义")
+    @jakarta.validation.constraints.Size(max = 64, message = "计划类型值过长")
     private String type;
 
     @NotNull(message = "开始时间不能为空")

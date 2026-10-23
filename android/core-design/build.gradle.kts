@@ -23,6 +23,7 @@ android {
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 
 dependencies {
+    implementation(libs.androidx.activity.compose)
     implementation(project(":core-plugin"))
     implementation(project(":core-security"))
     implementation(libs.kotlinx.coroutines.android)

@@ -21,15 +21,24 @@ suspend fun saveSchedule(
         localId, scheduleWorkspaceOwner(current?.userId, TokenStore.state.value),
         request.title, request.startDate, request.startTime, request.endDate, request.endTime,
         request.allDay, request.location, request.note, request.remindAdvanceMin, request.repeatRule,
-        request.linkedPlanId, false, request.tzId, 1, current?.version ?: 0,
+        request.linkedPlanId, false, request.tzId, 1, current?.version ?: 0, scope = current?.scope ?: store.currentScope(),
+        locationLat = request.locationLat, locationLon = request.locationLon,
     )
-    store.saveScheduleChange(saved, request)
-    reminders.schedule(saved)
-    try { sync.pushPendingRecords() }
-    catch (cancelled: CancellationException) { throw cancelled }
-    catch (_: Exception) { /* Persisted local data and pending work remain available offline. */ }
-    if (shouldCancelProvisionalReminder(localId, store.resolveScheduleId(localId) == localId)) reminders.cancel(localId)
+    sync.withLocalMutation {
+        check(saved.scope == store.currentScope()) { "账号已变化，请重新打开编辑页" }
+        store.saveScheduleChange(saved, request)
+        store.schedule(localId)?.let { reminders.schedule(it) }
+    }
+    sync.localChangesCommitted()
 }
 
 internal fun scheduleWorkspaceOwner(existingOwner: Long?, auth: com.planlock.app.api.AuthState): Long =
-    existingOwner ?: auth.localDataUserId ?: 1L
+    auth.localDataUserId ?: 0L
+
+suspend fun deleteSchedule(store: RecordStore, reminders: ScheduleReminderScheduler, sync: AppSync, current: ScheduleSnapshotEntity) {
+    sync.withLocalMutation {
+        store.enqueueScheduleDelete(current.id, current.scope)
+        reminders.cancel(current.id)
+    }
+    sync.localChangesCommitted()
+}

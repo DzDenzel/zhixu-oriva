@@ -8,6 +8,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlanOverviewTest {
+    @Test fun `category counts resolve legacy and unknown keys without mutating plan values`() {
+        val plans = listOf(plan(10,"旧学习","study"),plan(11,"睡眠","睡眠"),plan(12,"未知","unknown"))
+        val result = PlanOverview.build(plans, 8 * 60, OccurrenceDate(2026, 10, 19, 1))
+        assertEquals(mapOf("学习" to 1, "休息" to 1, "其他" to 1), result.categoryCounts)
+        assertEquals(listOf("study", "睡眠", "unknown"), plans.map { it.type })
+    }
     private fun plan(
         id: Long,
         name: String,

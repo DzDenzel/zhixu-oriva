@@ -16,7 +16,7 @@ public class Schedule {
     private LocalDate endDate;
     private LocalTime endTime;
     private Boolean allDay;
-    private String location;
+    private String location; private Double locationLat; private Double locationLon;
     private String note;
     private Integer remindAdvanceMin;
     private String repeatRule;

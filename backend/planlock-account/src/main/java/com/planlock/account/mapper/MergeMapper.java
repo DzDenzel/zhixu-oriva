@@ -14,6 +14,18 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface MergeMapper {
 
+    @org.apache.ibatis.annotations.Insert("INSERT INTO plan_types(user_id,type_key,name,color,version,deleted,mutation_id) SELECT #{toUserId},source.type_key,source.name,source.color,source.version+1,source.deleted,source.mutation_id FROM plan_types source WHERE source.user_id=#{fromUserId} ON DUPLICATE KEY UPDATE deleted=GREATEST(plan_types.deleted,VALUES(deleted)),version=plan_types.version+1")
+    int transferPlanTypes(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
+
+    @org.apache.ibatis.annotations.Delete("DELETE FROM plan_types WHERE user_id=#{fromUserId}")
+    int clearGuestPlanTypes(@Param("fromUserId") Long fromUserId);
+
+    @Update("UPDATE plans p JOIN plan_types t ON p.user_id=t.user_id AND p.type=t.type_key SET p.type='其他',p.version=p.version+1 WHERE t.user_id=#{userId} AND t.deleted=1")
+    int reassignDeletedPlanTypes(@Param("userId") Long userId);
+
     @Update("UPDATE plans SET user_id = #{toUserId}, version = version + 1 WHERE user_id = #{fromUserId}")
     int transferPlans(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
+
+    @Update("UPDATE schedules SET user_id = #{toUserId}, version = version + 1 WHERE user_id = #{fromUserId}")
+    int transferSchedules(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
 }

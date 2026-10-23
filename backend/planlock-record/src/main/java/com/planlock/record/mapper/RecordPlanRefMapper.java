@@ -11,6 +11,10 @@ import org.apache.ibatis.annotations.Select;
 @Mapper
 public interface RecordPlanRefMapper {
 
+    /** Allocate record IDs only after earlier uploads for this owner have committed. */
+    @Select("SELECT id FROM users WHERE id = #{userId} FOR UPDATE")
+    Long lockOwner(@Param("userId") Long userId);
+
     @Select("SELECT COUNT(*) FROM plans WHERE id = #{planId} AND user_id = #{userId}")
     int countOwnedPlan(@Param("planId") Long planId, @Param("userId") Long userId);
 }

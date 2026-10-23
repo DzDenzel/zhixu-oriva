@@ -14,10 +14,10 @@ internal class SnapshotReconciler(
     private val store: RecordStore,
     private val cancelReminder: (Long) -> Unit,
 ) {
-    private val pending get() = db.pendingRecordDao()
-    private val plans get() = db.planSnapshotDao()
-    private val strategies get() = db.strategySnapshotDao()
-    private val schedules get() = db.scheduleSnapshotDao()
+    private val pending get() = store.pendingDao
+    private val plans get() = store.planDao
+    private val strategies get() = store.strategyDao
+    private val schedules get() = store.scheduleDao
 
     fun observeConfirmations() = pending.observeConfirmations().map { rows ->
         rows.filter { it.type == CONFLICT }.map { Json.decodeFromString<SyncConfirmation>(it.payload.orEmpty()) }
@@ -47,15 +47,15 @@ internal class SnapshotReconciler(
             intents.any { it.type == "strategy_upsert" } || deleting && archive?.strategy != null)
     }
 
-    suspend fun markConflict(row: PendingRecordEntity, remote: SyncPullResponse) = db.withTransaction {
-        val key = row.syncEntityKey() ?: return@withTransaction
+    suspend fun markConflict(row: PendingRecordEntity, remote: SyncPullResponse) = store.scopedTransaction {
+        val key = row.syncEntityKey() ?: return@scopedTransaction
         val id = key.substringAfter(':').toLong()
-        if (id <= 0 || pending.byId(row.id) == null) return@withTransaction
+        if (id <= 0 || pending.byId(row.id) == null) return@scopedTransaction
         val value = capture(key.substringBefore(':'), id, remote)
         metadata(CONFLICT, "conflict:$key", Json.encodeToString(value))
     }
 
-    suspend fun reconcile(remotePlans: List<SyncPlanView>, remoteStrategies: List<SyncStrategyView>, remoteSchedules: List<SyncScheduleView>) = db.withTransaction {
+    suspend fun reconcile(remotePlans: List<SyncPlanView>, remoteStrategies: List<SyncStrategyView>, remoteSchedules: List<SyncScheduleView>) = store.scopedTransaction {
         val remote = SyncPullResponse(remotePlans, remoteSchedules, remoteStrategies)
         val planIds = remotePlans.map { it.id }.toSet()
         val scheduleIds = remoteSchedules.map { it.id }.toSet()
@@ -122,20 +122,20 @@ internal class SnapshotReconciler(
         cancelReminder(id)
     }
 
-    suspend fun approveBulkDeletion(expected: BulkDeletion) = db.withTransaction {
+    suspend fun approveBulkDeletion(expected: BulkDeletion) = store.scopedTransaction {
         check(bulkDeletion() == expected) { "待清理的记录已变化，请重新确认" }
         metadata(BULK, BULK, Json.encodeToString(expected.copy(approved = true)))
     }
 
     suspend fun resolve(expected: SyncConfirmation, keepMine: Boolean) {
-        val resolved = db.withTransaction {
-            val row = pending.byClientId("conflict:${expected.key}") ?: return@withTransaction false
+        val resolved = store.scopedTransaction {
+            val row = pending.byClientId("conflict:${expected.key}") ?: return@scopedTransaction false
             val old = Json.decodeFromString<SyncConfirmation>(row.payload.orEmpty())
             val remote = SyncPullResponse(listOfNotNull(old.remotePlan), listOfNotNull(old.remoteSchedule), listOfNotNull(old.remoteStrategy))
             val current = capture(old.kind, old.id, remote)
             if (old != expected || current != old) {
                 metadata(CONFLICT, row.clientId, Json.encodeToString(current))
-                return@withTransaction false
+                return@scopedTransaction false
             }
             pending.delete(old.intentIds)
             pending.deleteByClientId(row.clientId)
@@ -201,7 +201,7 @@ internal class SnapshotReconciler(
     }
 }
 
-internal fun SyncPlanView.toSnapshot() = PlanSnapshotEntity(id,userId,name,type,startTime,endTime,repeatRule,color,icon,remindAdvanceMin,remindMethods,status,version)
+internal fun SyncPlanView.toSnapshot() = PlanSnapshotEntity(id,userId,name,type,startTime,endTime,repeatRule,color,icon,remindAdvanceMin,remindMethods,status,version,endedOccurrenceDate,statusLog)
 internal fun SyncStrategyView.toSnapshot() = StrategySnapshotEntity(id,planId,null,whitelistApps,autoDnd,notifySilence,version)
-internal fun SyncScheduleView.toSnapshot() = ScheduleSnapshotEntity(id,userId,title,startDate,startTime,endDate,endTime,allDay,location,note,remindAdvanceMin,repeatRule,linkedPlanId,false,tzId,status,version)
-internal fun ScheduleSnapshotEntity.toRequest() = ScheduleUpsertRequest(title,startDate,startTime,endDate,endTime,allDay,location,note,remindAdvanceMin,repeatRule,linkedPlanId,tzId)
+internal fun SyncScheduleView.toSnapshot() = ScheduleSnapshotEntity(id,userId,title,startDate,startTime,endDate,endTime,allDay,location,note,remindAdvanceMin,repeatRule,linkedPlanId,false,tzId,status,version,locationLat=locationLat,locationLon=locationLon)
+internal fun ScheduleSnapshotEntity.toRequest() = ScheduleUpsertRequest(title,startDate,startTime,endDate,endTime,allDay,location,note,remindAdvanceMin,repeatRule,linkedPlanId,tzId,locationLat=locationLat,locationLon=locationLon)

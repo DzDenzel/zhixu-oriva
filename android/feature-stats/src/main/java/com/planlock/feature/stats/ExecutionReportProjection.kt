@@ -5,7 +5,7 @@ import com.planlock.app.api.durationDisplayLabel
 import com.planlock.app.api.dto.PlanExecutionStat
 import com.planlock.app.api.dto.ViolationAppStat
 import com.planlock.app.record.OccurrenceDate
-import com.planlock.app.record.PlanOccurrence
+import com.planlock.app.record.LocalExecutionStats
 import com.planlock.app.record.entity.BehaviorAggregateEntity
 import com.planlock.app.record.entity.PlanSnapshotEntity
 import java.text.SimpleDateFormat
@@ -34,9 +34,10 @@ internal fun planReportRows(
     dates: List<OccurrenceDate>,
 ): List<PlanReportRow> {
     val byPlan = server.associateBy { it.planId }
-    return plans.filter { it.status == 1 }.map { plan ->
+    return plans.mapNotNull { plan ->
         val aggregate = byPlan[plan.id]
-        val expected = dates.count { PlanOccurrence.occursOn(plan, it) }
+        val expected = LocalExecutionStats.expectedCount(plan, dates)
+        if (plan.status != 1 && expected == 0 && aggregate == null) return@mapNotNull null
         val completed = aggregate?.completedCount ?: 0
         val early = aggregate?.earlyEndedCount ?: 0
         PlanReportRow(
@@ -50,6 +51,17 @@ internal fun planReportRows(
         )
     }.sortedWith(compareByDescending<PlanReportRow> { it.plannedDurationMs }.thenBy { it.name })
 }
+
+/** Cached behavior is period-scoped; execution fields are exclusively projected from local history. */
+internal fun withCachedBehavior(
+    execution: com.planlock.app.api.dto.StatsResponse,
+    cached: com.planlock.app.api.dto.StatsResponse?,
+): com.planlock.app.api.dto.StatsResponse = execution.copy(
+    violationCount = cached?.violationCount ?: 0,
+    violationDurationMs = cached?.violationDurationMs ?: 0,
+    violationByApp = cached?.violationByApp.orEmpty(),
+    legacyViolationCount = cached?.legacyViolationCount ?: 0,
+)
 
 internal fun localViolationRanking(
     values: List<BehaviorAggregateEntity>,

@@ -23,9 +23,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * @param firstRun 首启「连接我的后端」进入时为 true：页题改为「连接我的后端」，
+ * 不显示当前连接 / 仅本地状态段，直接给出粘贴与扫码入口；设置里进入保持默认。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConnectionSettingsScreen(onBack: () -> Unit, onLogin: () -> Unit = {}) {
+fun ConnectionSettingsScreen(onBack: () -> Unit, onLogin: () -> Unit = {}, firstRun: Boolean = false) {
     val context = LocalContext.current
     val connection by ConnectionStore.state.collectAsState()
     val auth by TokenStore.state.collectAsState()
@@ -137,13 +141,15 @@ fun ConnectionSettingsScreen(onBack: () -> Unit, onLogin: () -> Unit = {}) {
         modifier = Modifier.planLockAtmosphere(com.planlock.design.PageAtmosphere.QUIET),
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { TopAppBar(colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent), title = { Text("后端连接") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }) },
+        topBar = { TopAppBar(colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent), title = { Text(if (firstRun) "连接我的后端" else "后端连接") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }) },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text(connection.config?.instanceLabel ?: "仅本地使用", style = MaterialTheme.typography.titleLarge)
-            Text(connection.config?.apiBaseUrl ?: "无需连接后端，也可使用本地日程与计划")
-            Text("连接用于账号与同步；网络不可用时，本地功能继续可用。插件目录独立于业务地址。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (connection.config != null && !auth.session.usable && !auth.ownershipMismatch) {
+            if (!firstRun) {
+                Text(connection.config?.instanceLabel ?: "仅本地使用", style = MaterialTheme.typography.titleLarge)
+                Text(connection.config?.apiBaseUrl ?: "无需连接后端，也可使用本地日程与计划")
+                Text("连接用于账号与同步；网络不可用时，本地功能继续可用。插件目录独立于业务地址。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (!firstRun && connection.config != null && !auth.session.usable && !auth.ownershipMismatch) {
                 Text("已连接 ${connection.config?.instanceLabel}，登录后开始同步")
                 Button(onClick = onLogin, enabled = !busy) { Text("前往登录") }
             }
@@ -160,7 +166,7 @@ fun ConnectionSettingsScreen(onBack: () -> Unit, onLogin: () -> Unit = {}) {
                 try { scan.launch(Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")) }
                 catch (_: android.content.ActivityNotFoundException) { message = "此设备没有扫码应用，可从图片识别二维码或粘贴连接配置" }
             }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("使用系统扫码") }
-            if (connection.config != null) {
+            if (!firstRun && connection.config != null) {
                 TextButton(onClick = { showConfig = true }, enabled = !busy) { Text("查看公开连接配置") }
                 TextButton(onClick = { confirmLocal = true }, enabled = !busy) { Text("仅本地使用") }
             }

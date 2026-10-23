@@ -46,7 +46,7 @@ fun InkLedger(title: String, rows: List<Pair<String, String>>, modifier: Modifie
         Text(title, style = MaterialTheme.typography.titleMedium, color = InkTone.text)
         rows.forEach { (label, value) ->
             Row(Modifier.fillMaxWidth().padding(vertical = 9.dp), verticalAlignment = Alignment.Top) {
-                Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = InkTone.faint)
+                Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = InkTone.soft)
                 Text(value, Modifier.weight(2f), style = MaterialTheme.typography.bodyMedium, color = InkTone.text,
                     textAlign = TextAlign.End)
             }
@@ -55,11 +55,32 @@ fun InkLedger(title: String, rows: List<Pair<String, String>>, modifier: Modifie
     }
 }
 
+/** 等宽选项格里的文字：居中、单行、放不下按宽缩到 10sp。 */
+@Composable
+fun EqualChipLabel(label: String) {
+    FitText(label, MaterialTheme.typography.labelLarge.copy(textAlign = androidx.compose.ui.text.style.TextAlign.Center),
+        LocalContentColor.current, Modifier.fillMaxWidth(), minSize = 10.sp)
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun <T> ChoiceChips(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Unit,
-    modifier: Modifier = Modifier) {
+    modifier: Modifier = Modifier,
+    // v4.6（真机）：选项少且短（≤ 5 项、每项 ≤ 4 字，如「单次 每天 每周 每月 每年」）时排成一行等宽，
+    // 放不下就缩字，不再在大字号手机上掉出第二行；选项多或长（关联计划名等）仍自动换行
+    singleRow: Boolean = options.size in 2..5 && options.all { it.second.length <= 4 }) {
     val controls = LocalSecondaryControlColors.current
+    if (singleRow) {
+        Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            options.forEach { (value, label) ->
+                FilterChip(selected = selected == value, onClick = { onSelect(value) },
+                    label = { EqualChipLabel(label) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = controls.container,
+                        selectedLabelColor = controls.onContainer))
+            }
+        }
+        return
+    }
     FlowRow(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
         options.forEach { (value, label) ->
@@ -76,7 +97,7 @@ fun <T> ChoiceChips(options: List<Pair<T, String>>, selected: T, onSelect: (T) -
 fun SectionHeading(title: String, detail: String? = null) {
     Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 2.dp), verticalAlignment = Alignment.Bottom) {
         Text(title, style = MaterialTheme.typography.titleMedium, color = InkTone.text)
-        detail?.let { Text("  $it", style = InkText.meta.copy(fontSize = 11.sp), color = InkTone.faint, modifier = Modifier.padding(bottom = 2.dp)) }
+        detail?.let { Text("  $it", style = InkText.caption, color = InkTone.soft, modifier = Modifier.padding(bottom = 2.dp)) }
     }
 }
 
@@ -88,8 +109,11 @@ fun PickerField(title: String, value: String, modifier: Modifier = Modifier, onC
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(title, style = InkText.eyebrow, color = InkTone.faint)
-                Text(value.ifBlank { "请选择" }, style = MaterialTheme.typography.bodyLarge)
+                // v4.4：标签与数值同一字体族；标签用 soft（faint 对比度不足 4.5），数值用等宽数位，开始 / 结束两列对齐
+                Text(title, style = InkText.eyebrow, color = InkTone.soft)
+                // v4.6（真机）：大字号手机上「2026-10-20」曾折成两行；数值只占一行，放不下时按宽缩字
+                FitText(value.ifBlank { "请选择" }, MaterialTheme.typography.bodyLarge.copy(fontFeatureSettings = "tnum"),
+                    LocalContentColor.current, minSize = 11.sp)
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "选择$title")
         }

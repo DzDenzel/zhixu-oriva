@@ -4,6 +4,7 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.LocalDate;
 
 /**
  * plans 表实体（plan 模块）。repeat_rule / remind_methods 为 JSON 字符串。
@@ -14,6 +15,8 @@ public class Plan {
     private Long id;
     private String clientId;
     private Long userId;
+    private LocalDate endedOccurrenceDate;
+    private String statusLog;
     private String name;
     private String type;
     private LocalTime startTime;

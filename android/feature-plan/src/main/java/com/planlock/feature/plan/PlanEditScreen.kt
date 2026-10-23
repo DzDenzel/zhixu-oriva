@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import com.planlock.design.inkFormField
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -73,6 +75,7 @@ import com.planlock.design.AppPickerSheet
 import com.planlock.design.PlanTimePicker
 import com.planlock.design.PlanTypeSegmented
 import com.planlock.design.ReminderStepper
+import com.planlock.design.color
 import com.planlock.design.RepeatPreset
 import com.planlock.design.RepeatRuleSelector
 import com.planlock.design.SettingSwitch
@@ -90,17 +93,21 @@ import androidx.compose.material3.SnackbarHostState
 
 private enum class AppListKind { WHITE }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = {}) {
     val context = LocalContext.current
     val api = remember { ApiClient.create() }
     val store = remember { RecordStore(context) }
+    val editorScope = remember(planId) { store.currentScope() }
     val sync = remember { com.planlock.app.sync.AppSync.get(context) }
     val actionGate = remember { PlanActionGate(store, api, BackupPasswordStore(context.planLockPreferences), context.planLockPreferences, sync = sync) }
     val resolver = remember { AppPackageResolver(context) }
     val scope = rememberCoroutineScope()
+    val punctualStart by remember(context) { com.planlock.app.api.PlanTimingPreferences.enabled(context.planLockPreferences) }.collectAsState(initial = true)
     val loadedPlugins by PluginRuntimeRegistry.plugins.collectAsState()
+    val authState by TokenStore.state.collectAsState()
+    LaunchedEffect(authState.dataScope) { if (authState.dataScope != editorScope) onBack() }
     val granted = rememberPermissionPresentation().granted
     val editorContributions = visibleContributions(projectContributions(loadedPlugins, PluginSlots.PLAN_EDIT_CONFIGURATION), granted)
     val draftPlanId = rememberSaveable(planId) { planId ?: -System.currentTimeMillis() }
@@ -120,6 +127,7 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
     }
 
     fun runContribution(bound: BoundPluginContribution, action: PluginContribution.ActionRow, app: AppOption? = null) {
+        if (editorScope != store.currentScope()) return
         if (pluginBusy) return
         pluginBusy = true
         scope.launch {
@@ -138,7 +146,7 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
                     }
                     else -> {
                         val result = PluginRuntimeRegistry.dispatchAction(bound.pluginId,
-                            PluginActionEvent(saved?.id ?: configuration.canonicalPlanId(TokenStore.localDataUserId, draftPlanId), action.actionId, app?.id, app?.name, until))
+                            PluginActionEvent(saved?.id ?: configuration.canonicalPlanId(editorScope, draftPlanId), action.actionId, app?.id, app?.name, until))
                         result.message ?: when (result.status) {
                             PluginActionStatus.EXECUTED -> "操作已完成"
                             PluginActionStatus.UNAVAILABLE -> "此动作当前不可用"
@@ -181,15 +189,39 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
     var allApps by remember { mutableStateOf<List<AppOption>>(emptyList()) }
     var picker by remember { mutableStateOf<AppListKind?>(null) }
     var timePicker by remember { mutableStateOf<String?>(null) }
-    var validation by remember { mutableStateOf<String?>(null) }
     var pendingAction by remember { mutableStateOf<PendingPlanAction?>(null) }
-    var requestDnd by remember { mutableStateOf(false) }
-    if (requestDnd) AlertDialog(onDismissRequest = { requestDnd = false },
-        title = { Text("开启免打扰") },
-        text = { Text("此计划的免打扰需要系统授权。不授权时计划仍可执行，但自动勿扰不会生效。") },
-        confirmButton = { TextButton(onClick = { requestDnd = false; PermissionIntent.open(context, PermissionKind.DND) }) { Text("前往系统设置") } },
-        dismissButton = { TextButton(onClick = { requestDnd = false }) { Text("稍后") } },
-    )
+    val capabilityGate = com.planlock.design.rememberCapabilityPermissionGate()
+    val typeCatalog = remember(store, sync, scope) { PlanTypeCatalog(store, sync, scope) }
+    val typeCatalogState by typeCatalog.state.collectAsState()
+    // v4.5（U-c）：自定义类型面板；新建后自动选中新类型（目录刷新后按名称找到它的键）
+    var typeEditor by remember { mutableStateOf<TypeEditorTarget?>(null) }
+    var pendingCustomName by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(typeCatalogState.types, pendingCustomName) {
+        val wanted = pendingCustomName ?: return@LaunchedEffect
+        typeCatalogState.types.lastOrNull { it.key.startsWith("custom:") && it.name == wanted }?.let { type = it.key; pendingCustomName = null }
+    }
+    typeEditor?.let { target ->
+        val editing = (target as? TypeEditorTarget.Edit)?.type
+        com.planlock.design.PlanTypeEditorSheet(
+            initialName = editing?.name.orEmpty(),
+            initialColor = editing?.color ?: com.planlock.app.api.PlanTypes.colors.first(),
+            colorKeys = com.planlock.app.api.PlanTypes.colors.toList(),
+            existingNames = typeCatalogState.types.filter { it.key != editing?.key }.map { it.name },
+            usage = editing?.let { typeCatalogState.usageCounts[it.key] ?: 0 },
+            onSave = { name, color ->
+                if (editing == null) { typeCatalog.create(name, color); pendingCustomName = name }
+                else typeCatalog.rename(editing.key, name, color)
+                typeEditor = null
+            },
+            onDelete = if (editing == null) null else ({
+                typeCatalog.delete(editing.key, confirmed = true)
+                if (type == editing.key) type = "其他"
+                typeEditor = null
+            }),
+            onDismiss = { typeEditor = null },
+        )
+    }
+    var deniedCapabilities by remember { mutableStateOf(emptySet<com.planlock.app.security.Capability>()) }
 
     PlanActionDialogHost(actionGate, pendingAction, onDismiss = { pendingAction = null })
 
@@ -208,7 +240,7 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
         if (planId != null) {
             store.plan(planId)?.let { plan ->
                 name = plan.name
-                type = plan.type.takeIf { it in listOf("学习", "工作", "运动", "睡眠") } ?: "学习"
+                type = plan.type
                 startTime = PlanTime.format(plan.startTime)
                 endTime = PlanTime.format(plan.endTime)
                 reminder = plan.remindAdvanceMin
@@ -267,6 +299,38 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
         )
     }
 
+    // BUG-112（v4.4）：保存栏贴底、随输入法上移；点保存先校验，不通过不弹窗——直接滚到第一项并在保存栏上方提醒。
+    val targets = com.planlock.design.rememberInkFormTargets()
+    var attempted by remember { mutableStateOf(false) }
+    val issues = planFormIssues(name, preset, weekdays)
+    val shownIssues = if (attempted) issues else emptyList()
+    val revealFirst: () -> Unit = { issues.firstOrNull()?.let { scope.launch { targets.reveal(it.field) } } }
+    val onSave: () -> Unit = save@{
+        attempted = true
+        if (issues.isNotEmpty()) { revealFirst(); return@save }
+        capabilityGate.beforeSave(com.planlock.app.security.CapabilityRequirements.plan(strategyDraft.autoDnd, strategyDraft.notifySilence, reminder != null, punctualStart)) { scope.launch {
+            val save = suspend {
+                sync.withLocalMutation {
+                    check(editorScope == store.currentScope()) { "账号已变化，请重新打开编辑页" }
+                    val savedId = savePlan(planId, name.trim(), type, startTime, endTime, preset, weekdays, reminder, strategyDraft, allApps, whiteIds, store, api, draftPlanId)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { configuration.movePlan(editorScope, draftPlanId, savedId) }
+                }
+                sync.localChangesCommitted()
+            }
+            val existing = planId?.let { store.plan(it) }
+            if (existing == null) {
+                save()
+                onDone()
+            } else {
+                requestOrRunPlanAction(
+                    actionGate, existing, ProtectedPlanAction.EDIT, editOperation = save,
+                    onPrompt = { pendingAction = it },
+                    onCompleted = { onDone() },
+                )
+            }
+        } }
+    }
+
     Scaffold(modifier = Modifier.planLockAtmosphere(com.planlock.design.PageAtmosphere.QUIET),
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
         snackbarHost = { com.planlock.design.InkSnackbarHost(snackbar) }, contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = {
@@ -276,23 +340,42 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
             windowInsets = WindowInsets(0, 0, 0, 0),
         )
-    }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item {
-                OutlinedTextField(value = name, onValueChange = { name = it; validation = null }, label = { Text("计划名称") }, trailingIcon = { Icon(Icons.Filled.Edit, null) }, singleLine = true, modifier = Modifier.fillMaxWidth(), isError = validation != null, supportingText = validation?.let { { Text(it) } })
+    }, bottomBar = { com.planlock.design.InkSaveBar("保存计划", onSave, enabled = strategyLoaded,
+        hint = com.planlock.design.saveBarHint(shownIssues), onHint = revealFirst) }) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("计划名称") }, trailingIcon = { Icon(Icons.Filled.Edit, null) }, singleLine = true,
+                modifier = Modifier.fillMaxWidth().inkFormField(targets, PlanField.NAME, focusable = true, cornerRadius = 6.dp),
+                isError = shownIssues.messageFor(PlanField.NAME) != null, supportingText = shownIssues.messageFor(PlanField.NAME)?.let { { Text(it) } })
+            Section("类型") {
+                // v4.4（U6）：带类别色的类型网格，一行 4 格；颜色取自类型目录（自定义类型用它自己选的颜色）。
+                val typeOptions = if (typeCatalogState.dataScope == editorScope) typeCatalogState.types else com.planlock.app.api.PlanTypes.presets
+                val selectedTypeKey = typeOptions.firstOrNull { it.key == type }?.key
+                    ?: if (!type.startsWith("custom:")) com.planlock.app.api.PlanTypes.definition(type).key else null
+                com.planlock.design.PlanTypeGrid(
+                    typeOptions.map { com.planlock.design.PlanTypeChoice(it.key, it.name, it.color) },
+                    selectedTypeKey,
+                    { type = it },
+                    onAddCustom = { typeEditor = TypeEditorTarget.New },
+                    onEdit = { key -> typeOptions.firstOrNull { it.key == key }?.let { typeEditor = TypeEditorTarget.Edit(it) } },
+                )
+                // v4.5（U-c）：自定义类型长按可编辑；目录读写失败时在这里说一句
+                if (typeOptions.any { it.key.startsWith("custom:") })
+                    Text("长按自定义类型可改名、换色或删除", style = com.planlock.design.InkText.caption, color = com.planlock.design.InkTone.soft)
+                typeCatalogState.error?.let { Text(it, style = com.planlock.design.InkText.caption, color = MaterialTheme.colorScheme.error) }
             }
-            item { Section("类型") { PlanTypeSegmented(type) { type = it } } }
-            item {
-                Section("时间") {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TimeField("开始", startTime, { timePicker = "start" }, Modifier.weight(1f))
-                        TimeField("结束", endTime, { timePicker = "end" }, Modifier.weight(1f))
-                    }
-                    if ((PlanTime.minutesOfDay(endTime) ?: 0) <= (PlanTime.minutesOfDay(startTime) ?: 0)) Text("结束时间早于开始时间，将自动标记为次日", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
+            Section("时间") {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TimeField("开始", startTime, { timePicker = "start" }, Modifier.weight(1f))
+                    TimeField("结束", endTime, { timePicker = "end" }, Modifier.weight(1f))
                 }
+                if ((PlanTime.minutesOfDay(endTime) ?: 0) <= (PlanTime.minutesOfDay(startTime) ?: 0)) Text("结束时间早于开始时间，将自动标记为次日", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
             }
-            item { Section("重复") { RepeatRuleSelector(preset, weekdays, { choice -> preset = choice; weekdays = presetDays(choice) }, { day -> weekdays = if (day in weekdays) weekdays - day else weekdays + day; preset = RepeatPreset.CUSTOM }) } }
-            item { Section("提醒") {
+            Section("重复", Modifier.inkFormField(targets, PlanField.REPEAT, cornerRadius = 18.dp)) {
+                RepeatRuleSelector(preset, weekdays, { choice -> preset = choice; weekdays = presetDays(choice) }, { day -> weekdays = if (day in weekdays) weekdays - day else weekdays + day; preset = RepeatPreset.CUSTOM })
+                shownIssues.messageFor(PlanField.REPEAT)?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
+            }
+            Section("提醒") {
                 val selectedReminder = reminder
                 if (selectedReminder == null) {
                     Text("未设置", style = MaterialTheme.typography.bodyMedium)
@@ -300,24 +383,52 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
                 } else {
                     ReminderStepper(selectedReminder) { reminder = it }
                     TextButton(onClick = { reminder = null }) { Text("不提醒") }
-                }
-            } }
-            item {
-                Section("行为记录") {
-                    AppSelectionRow("不计入分心", if (appsLoading) "正在读取已安装应用…" else "这些应用不会进入执行报告", allApps, whiteIds) { picker = AppListKind.WHITE }
+                    // BUG-125（v4.6）：已进入本次提醒窗口时，保存前就说明今天这次不再提醒
+                    // Sample just after the trigger boundary, rather than keeping exact equality for a minute.
+                    val clockNow = rememberPlanClock(boundaryOffsetMillis = 1000L)
+                    val isoDay = (clockNow.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7 + 1
+                    reminderWindowNote(startTime, selectedReminder, weekdays,
+                        clockNow.get(java.util.Calendar.HOUR_OF_DAY) * 60 + clockNow.get(java.util.Calendar.MINUTE), isoDay,
+                        clockNow.get(java.util.Calendar.SECOND) * 1000 + clockNow.get(java.util.Calendar.MILLISECOND))?.let { note ->
+                        Text(note, style = com.planlock.design.InkText.caption, color = com.planlock.design.InkHue.amber.color())
+                    }
                 }
             }
-            item {
-                Section("执行设置") {
-                    SettingSwitch("免打扰", if (strategyDraft.autoDnd == null) "未配置；开启后执行时仅保留闹钟" else "执行时仅保留闹钟", strategyDraft.autoDnd == true) {
-                        strategyDraft = strategyDraft.withAutoDnd(it)
-                        if (it && PermissionChecker.check(context)[PermissionKind.DND] != true) requestDnd = true
+            Section("行为记录") {
+                AppSelectionRow("不计入分心", if (appsLoading) "正在读取已安装应用…" else "这些应用不会进入执行报告", allApps, whiteIds) { picker = AppListKind.WHITE }
+            }
+            Section("执行设置") {
+                SettingSwitch("免打扰", if (strategyDraft.autoDnd == null) "未配置；开启后执行时仅保留闹钟" else "执行时仅保留闹钟", strategyDraft.autoDnd == true) {
+                    strategyDraft = strategyDraft.withAutoDnd(it)
+                    if (it) capabilityGate.request(com.planlock.app.security.Capability.DND) { granted ->
+                        strategyDraft = strategyDraft.withAutoDnd(granted)
+                        deniedCapabilities = if (granted) deniedCapabilities - com.planlock.app.security.Capability.DND else deniedCapabilities + com.planlock.app.security.Capability.DND
                     }
-                    SettingSwitch("通知静默", if (strategyDraft.notifySilence == null) "未配置；开启后减少无关通知干扰" else "减少无关通知干扰", strategyDraft.notifySilence == true) { strategyDraft = strategyDraft.withNotifySilence(it) }
                 }
+                // v4.5（U-b）：琥珀小字，点它重新打开说明面板
+                if (com.planlock.app.security.Capability.DND in deniedCapabilities) com.planlock.design.CapabilityDeniedNote(onClick = {
+                    capabilityGate.request(com.planlock.app.security.Capability.DND) { granted ->
+                        strategyDraft = strategyDraft.withAutoDnd(granted)
+                        deniedCapabilities = if (granted) deniedCapabilities - com.planlock.app.security.Capability.DND else deniedCapabilities + com.planlock.app.security.Capability.DND
+                    }
+                })
+                SettingSwitch("通知静默", if (strategyDraft.notifySilence == null) "未配置；开启后减少无关通知干扰" else "减少无关通知干扰", strategyDraft.notifySilence == true) {
+                    strategyDraft = strategyDraft.withNotifySilence(it)
+                    if (it) capabilityGate.request(com.planlock.app.security.Capability.NOTIFICATION_SILENCE) { granted ->
+                        strategyDraft = strategyDraft.withNotifySilence(granted)
+                        deniedCapabilities = if (granted) deniedCapabilities - com.planlock.app.security.Capability.NOTIFICATION_SILENCE else deniedCapabilities + com.planlock.app.security.Capability.NOTIFICATION_SILENCE
+                    }
+                }
+                // v4.5（U-b）：琥珀小字，点它重新打开说明面板
+                if (com.planlock.app.security.Capability.NOTIFICATION_SILENCE in deniedCapabilities) com.planlock.design.CapabilityDeniedNote(onClick = {
+                    capabilityGate.request(com.planlock.app.security.Capability.NOTIFICATION_SILENCE) { granted ->
+                        strategyDraft = strategyDraft.withNotifySilence(granted)
+                        deniedCapabilities = if (granted) deniedCapabilities - com.planlock.app.security.Capability.NOTIFICATION_SILENCE else deniedCapabilities + com.planlock.app.security.Capability.NOTIFICATION_SILENCE
+                    }
+                })
             }
             val actionContributions = editorContributions.filterNot { it.contribution is PluginContribution.FormSection }
-            if (actionContributions.isNotEmpty()) item(key = "plugin:editor-actions") {
+            if (actionContributions.isNotEmpty()) androidx.compose.runtime.key("plugin:editor-actions") {
                 PluginContributionContent(actionContributions, granted,
                     onAction = { bound, action -> runContribution(bound, action) },
                     onRequest = { bound, request ->
@@ -327,19 +438,21 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
             }
             editorContributions.forEach { bound ->
                 val form = bound.contribution as? PluginContribution.FormSection
-                if (form != null) item(key = "plugin:${bound.pluginId}:${form.id}") {
-                    val values = remember(configRevision, draftPlanId, form, TokenStore.localDataUserId) {
-                        configuration.values(TokenStore.localDataUserId, draftPlanId, bound.pluginId, form.fields)
+                if (form != null) androidx.compose.runtime.key("plugin:${bound.pluginId}:${form.id}") {
+                    val values = remember(configRevision, draftPlanId, form, authState.dataScope) {
+                        if (authState.dataScope == editorScope) configuration.values(editorScope, draftPlanId, bound.pluginId, form.fields) else emptyMap()
                     }
                     PluginFormContent(form, values, pluginBusy) { field, value ->
                         if (!pluginBusy) {
                             pluginBusy = true
                             scope.launch {
                             val message = try {
+                                check(editorScope == store.currentScope()) { "账号已变化，请重新打开编辑页" }
                                 val result = PluginRuntimeRegistry.dispatchAction(bound.pluginId,
-                                    PluginActionEvent(configuration.canonicalPlanId(TokenStore.localDataUserId, draftPlanId), field.onEvent, fieldId = field.id, value = value))
+                                    PluginActionEvent(configuration.canonicalPlanId(editorScope, draftPlanId), field.onEvent, fieldId = field.id, value = value))
                                 if (result.status == PluginActionStatus.EXECUTED) {
-                                    configuration.save(TokenStore.localDataUserId, draftPlanId, bound.pluginId, field, value)
+                                    check(editorScope == store.currentScope()) { "账号已变化，请重新打开编辑页" }
+                                    configuration.save(editorScope, draftPlanId, bound.pluginId, field, value)
                                     configRevision++
                                 }
                                 result.message ?: if (result.status == PluginActionStatus.EXECUTED) "配置已保存" else "配置未保存，请重试"
@@ -350,41 +463,13 @@ fun PlanEditScreen(planId: Long?, onDone: () -> Unit = {}, onBack: () -> Unit = 
                     }
                 }
             }
-            item {
-                Button(shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp), enabled = strategyLoaded, 
-                    onClick = {
-                        if (name.isBlank()) { validation = "请输入计划名称"; return@Button }
-                        scope.launch {
-                            val save = suspend {
-                                sync.withSessionChange {
-                                    val savedId = savePlan(planId, name.trim(), type, startTime, endTime, preset, weekdays, reminder, strategyDraft, allApps, whiteIds, store, api, draftPlanId)
-                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { configuration.movePlan(TokenStore.localDataUserId, draftPlanId, savedId) }
-                                }
-                                try { sync.pushPendingRecords() } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled } catch (_: Exception) { }
-                            }
-                            val existing = planId?.let { store.plan(it) }
-                            if (existing == null) {
-                                save()
-                                onDone()
-                            } else {
-                                requestOrRunPlanAction(
-                                    actionGate, existing, ProtectedPlanAction.EDIT, editOperation = save,
-                                    onPrompt = { pendingAction = it },
-                                    onCompleted = { onDone() },
-                                )
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("保存计划") }
-            }
         }
     }
 }
 
 @Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
-    PresentationCard {
+private fun Section(title: String, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    PresentationCard(modifier) {
         Text(title, style = com.planlock.design.InkText.meta, color = com.planlock.design.InkTone.faint)
         content()
     }
@@ -445,4 +530,10 @@ private fun parseRepeat(raw: String?): Pair<RepeatPreset, Set<Int>> = when {
     raw.contains("1,2,3,4,5") || raw.contains("1, 2, 3, 4, 5") -> RepeatPreset.WEEKDAY to setOf(1, 2, 3, 4, 5)
     raw.contains("6,7") || raw.contains("6, 7") -> RepeatPreset.WEEKEND to setOf(6, 7)
     else -> RepeatPreset.CUSTOM to Regex("[1-7]").findAll(raw).map { it.value.toInt() }.toSet()
+}
+
+/** 自定义类型面板的打开方式：新建，或编辑某个已有的自定义类型。 */
+private sealed interface TypeEditorTarget {
+    object New : TypeEditorTarget
+    data class Edit(val type: com.planlock.app.api.PlanTypeDefinition) : TypeEditorTarget
 }

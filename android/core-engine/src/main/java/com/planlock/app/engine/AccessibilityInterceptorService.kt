@@ -44,6 +44,7 @@ class AccessibilityInterceptorService : AccessibilityService() {
     private lateinit var healthStore: AccessibilityHealthStore
     private var pluginOverlay: View? = null
     private var foregroundPackage: String? = null
+    private var intervalScope: String? = null
     private val removePluginOverlay = Runnable {
         pluginOverlay?.let { view ->
             runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
@@ -80,6 +81,11 @@ class AccessibilityInterceptorService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         foregroundPackage = packageName
         val now = System.currentTimeMillis()
+        val currentScope = com.planlock.app.api.TokenStore.state.value.dataScope
+        if (intervalScope != currentScope) {
+            persist(intervals.close(now))
+            intervalScope = currentScope
+        }
         val decision = ExecutionEngine.inspect(packageName)
         if (decision == null) {
             persist(intervals.close(now))
@@ -113,7 +119,8 @@ class AccessibilityInterceptorService : AccessibilityService() {
 
     private fun persist(interval: ForegroundUsageInterval?) {
         if (interval == null || interval.durationMillis <= 0L || !::recordStore.isInitialized) return
-        recordScope.launch { recordStore.enqueueViolation(recordFactory.behavior(interval)) }
+        val owner = intervalScope ?: return
+        recordScope.launch { recordStore.forScope(owner).enqueueViolation(recordFactory.behavior(interval)) }
     }
 
     private fun pluginCapabilities(planId: Long): PluginCapabilities = object : PluginCapabilities {

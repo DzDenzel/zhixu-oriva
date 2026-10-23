@@ -17,26 +17,26 @@ interface StrategySnapshotDao {
     suspend fun upsertRemote(strategies: List<StrategySnapshotEntity>) {
         upsertAll(strategies.map { remote ->
             // 首次同步的服务端策略 ID 可能与本地临时 ID 不同，避免同一计划留下两份策略。
-            deleteByPlanId(remote.planId)
+            deleteByPlanId(remote.scope, remote.planId)
             remote.copy(blacklistApps = null, strictMode = null)
         })
     }
 
-    @Query("SELECT * FROM strategy_snapshot")
-    suspend fun all(): List<StrategySnapshotEntity>
+    @Query("SELECT * FROM strategy_snapshot WHERE scope = :scope")
+    suspend fun all(scope: String): List<StrategySnapshotEntity>
 
-    @Query("DELETE FROM strategy_snapshot")
-    suspend fun clear()
+    @Query("DELETE FROM strategy_snapshot WHERE scope = :scope")
+    suspend fun clear(scope: String)
 
-    @Query("UPDATE strategy_snapshot SET planId = :newPlanId WHERE planId = :oldPlanId")
-    suspend fun replacePlanId(oldPlanId: Long, newPlanId: Long)
+    @Query("UPDATE strategy_snapshot SET planId = :newPlanId WHERE scope = :scope AND planId = :oldPlanId")
+    suspend fun replacePlanId(scope: String, oldPlanId: Long, newPlanId: Long)
 
-    @Query("UPDATE strategy_snapshot SET version = :version WHERE planId = :planId AND COALESCE(version, 0) <= :version")
-    suspend fun updateVersion(planId: Long, version: Long)
+    @Query("UPDATE strategy_snapshot SET version = :version WHERE scope = :scope AND planId = :planId AND COALESCE(version, 0) <= :version")
+    suspend fun updateVersion(scope: String, planId: Long, version: Long)
 
-    @Query("SELECT * FROM strategy_snapshot WHERE planId = :planId")
-    suspend fun byPlanId(planId: Long): StrategySnapshotEntity?
+    @Query("SELECT * FROM strategy_snapshot WHERE scope = :scope AND planId = :planId")
+    suspend fun byPlanId(scope: String, planId: Long): StrategySnapshotEntity?
 
-    @Query("DELETE FROM strategy_snapshot WHERE planId = :planId")
-    suspend fun deleteByPlanId(planId: Long)
+    @Query("DELETE FROM strategy_snapshot WHERE scope = :scope AND planId = :planId")
+    suspend fun deleteByPlanId(scope: String, planId: Long)
 }

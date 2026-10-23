@@ -93,10 +93,8 @@ import com.planlock.feature.plan.PlanDetailScreen
 import com.planlock.feature.plan.PlanEditScreen
 import com.planlock.feature.plan.PlanScreen
 import com.planlock.feature.plan.TodayScreen
-import com.planlock.feature.plan.TodayFirstFrame
 import com.planlock.feature.plan.TodayLocalKey
 import com.planlock.feature.plan.TodayLocalPhase
-import com.planlock.feature.plan.TodayLocalRead
 import com.planlock.feature.plan.TodayLocalStateHolder
 import com.planlock.feature.settings.SettingsScreen
 import com.planlock.feature.settings.SettingsDetailScreen
@@ -128,6 +126,7 @@ class MainActivity : ComponentActivity() {
         val systemSplashGone = mutableStateOf(android.os.Build.VERSION.SDK_INT < 31)
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             splashScreen.setOnExitAnimationListener {
+                android.util.Log.i("OrivaSplash", "system-splash-exit uptimeMs=${android.os.SystemClock.uptimeMillis()}")
                 it.remove()
                 systemSplashGone.value = true
             }
@@ -150,6 +149,10 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
     val preference = remember { ThemePreference(context) }
     var themeMode by remember { mutableStateOf(ThemeMode.SYSTEM) }
     var loaded by remember { mutableStateOf(false) }
+    var needsConnectionChoice by remember { mutableStateOf(false) }
+    var connecting by remember { mutableStateOf(false) }
+    var choosingConnection by remember { mutableStateOf(false) }
+    var connectionError by remember { mutableStateOf<String?>(null) }
     var loadError by remember { mutableStateOf(false) }
     var retry by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
@@ -166,8 +169,16 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
                 com.planlock.app.api.ConnectionStore.restore(context.planLockPreferences)
                 com.planlock.plugin.PluginPublicTransport.get = com.planlock.app.api.ConnectionHttp::publicGet
                 TokenStore.restore(context.planLockPreferences)
+                // Preserve request history from the former settings-only location launcher.
+                if (context.planLockPreferences.data.first()[com.planlock.app.api.PlanLockPreferenceKeys.locationPermissionRequested] == true) {
+                    context.getSharedPreferences("capability_requests", android.content.Context.MODE_PRIVATE)
+                        .edit().putBoolean(com.planlock.app.security.Capability.LOCATION.name, true).apply()
+                }
+                com.planlock.plugin.PluginConfigurationStore(context).registerLegacyOwner(
+                    TokenStore.legacyOwnerScope(context.planLockPreferences.data.first()))
                 val key = TodayLocalKey(
                     userId = TokenStore.localDataUserId,
+                    scope = TokenStore.state.value.dataScope,
                     dateKey = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date()),
                 )
                 key to preference.mode.first()
@@ -175,6 +186,7 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
             todayKey = restored.first
             if (showColdSplash) todayHolder.prefetch(restored.first)
             themeMode = restored.second
+            needsConnectionChoice = com.planlock.app.api.ConnectionStore.needsChoice(context.planLockPreferences)
             loaded = true
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { loadError = true }
@@ -195,19 +207,33 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
             UIStatePanel(if (loadError) UiState.ERROR else UiState.LOADING,
                 message = if (loadError) "本机偏好读取失败，请重试" else null,
                 onAction = if (loadError) ({ retry++ }) else null)
+        } else if (needsConnectionChoice) {
+            androidx.activity.compose.BackHandler(enabled = connecting) { connecting = false }
+            if (connecting) {
+                val connection by com.planlock.app.api.ConnectionStore.state.collectAsState()
+                com.planlock.feature.settings.ConnectionSettingsScreen(onBack = { connecting = false }, onLogin = { needsConnectionChoice = false }, firstRun = true)
+                LaunchedEffect(connection) { if (connection.config != null) needsConnectionChoice = false }
+            } else FirstConnectionScreen(choosingConnection, connectionError, onLocal = {
+                if (!choosingConnection) scope.launch {
+                    choosingConnection = true
+                    try {
+                        TokenStore.changeConnection(context.planLockPreferences, null)
+                        needsConnectionChoice = false
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { connectionError = "选择保存失败，请重试" }
+                    finally { choosingConnection = false }
+                }
+            }, onConnect = { connecting = true })
         } else todayKey?.let { key ->
             val decision = startupContentDecision(showColdSplash, splashVisible, revealComplete, key, todayState)
             when (decision.stage) {
                 StartupContentStage.BLOCKED -> Unit
-                StartupContentStage.FIRST_FRAME,
                 StartupContentStage.FULL -> AppContent(
                     themeMode = themeMode,
                     snackbar = snackbar,
                     splashVisible = splashVisible,
                     todayHolder = todayHolder,
                     todayKey = key,
-                    startupStage = decision.stage,
-                    startupRead = decision.read,
                 ) { mode ->
                     scope.launch {
                         try { preference.save(mode); themeMode = mode }
@@ -236,25 +262,6 @@ private fun AppRoot(showColdSplash: Boolean, systemSplashGone: Boolean, onThemeC
     }
 }
 
-@Composable
-private fun TodayStartupShell(read: TodayLocalRead) {
-    Scaffold(
-        modifier = Modifier.planLockBackdrop(),
-        containerColor = androidx.compose.ui.graphics.Color.Transparent,
-        // 透明底的 Scaffold 推不出内容色：显式给墨 / 月白，未着色的文字在深色下不再发黑
-        contentColor = androidx.compose.material3.MaterialTheme.colorScheme.onBackground,
-        bottomBar = {
-            NavigationBar(
-                selectedRoute = TopLevelDestination.TODAY.route,
-                onSelect = {},
-                onAssistant = {},
-            )
-        },
-    ) { innerPadding ->
-        TodayFirstFrame(read, Modifier.fillMaxSize().padding(innerPadding))
-    }
-}
-
 @OptIn(ExperimentalSharedTransitionApi::class)
 @SuppressLint("InlinedApi")
 @Composable
@@ -264,18 +271,8 @@ private fun AppContent(
     splashVisible: Boolean,
     todayHolder: TodayLocalStateHolder,
     todayKey: TodayLocalKey,
-    startupStage: StartupContentStage,
-    startupRead: TodayLocalRead?,
     onThemeModeChange: (ThemeMode) -> Unit,
 ) {
-    if (startupStage == StartupContentStage.FIRST_FRAME) {
-        val admissionLogged = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-        if (admissionLogged.compareAndSet(false, true)) {
-            android.util.Log.i("OrivaSplash", "admission-open stage=first-frame event=composition-entry presented=false")
-        }
-        TodayStartupShell(requireNotNull(startupRead))
-        return
-    }
     val reducedMotion = LocalReducedMotion.current
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -286,23 +283,33 @@ private fun AppContent(
             android.util.Log.i("OrivaSplash", "full-content-commit event=composition-commit presented=false")
         }
     }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(splashVisible) {
+        if (splashVisible) return@LaunchedEffect
+        // Allow a draw after the final tree commits; plugin I/O and cold sync
+        // should not compete with the brand fade or its first revealed frame.
+        androidx.compose.runtime.withFrameNanos { }
+        androidx.compose.runtime.withFrameNanos { }
+        android.util.Log.i("OrivaSplash", "startup-effects-after-frame-boundary presented=unverified")
         // UI contributions must load even when no system service has been granted.
         // Keep signature verification and Dex I/O off the first-frame/main-thread path.
         withContext(Dispatchers.IO) {
             com.planlock.plugin.PluginHostQueries.provider = CachedPluginQueries(context)
             val configuration = com.planlock.plugin.PluginConfigurationStore(context)
+            configuration.registerLegacyOwner(com.planlock.app.api.TokenStore.legacyOwnerScope(context.planLockPreferences.data.first()))
             com.planlock.plugin.PluginHostConfiguration.read = { manifest, planId ->
-                configuration.values(com.planlock.app.api.TokenStore.localDataUserId, planId, manifest.id,
+                configuration.values(com.planlock.app.api.TokenStore.state.value.dataScope, planId, manifest.id,
                     manifest.contributions.filterIsInstance<com.planlock.plugin.PluginContribution.FormSection>().flatMap { it.fields })
             }
             com.planlock.plugin.PluginPlatform.get(context)
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(splashVisible) {
+        if (splashVisible) return@LaunchedEffect
+        androidx.compose.runtime.withFrameNanos { }
+        androidx.compose.runtime.withFrameNanos { }
         sync.coordinator.coldStart()
-        runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
+        ExecutionService.reconcile(context)
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -314,6 +321,10 @@ private fun AppContent(
             }
             if (event == Lifecycle.Event.ON_RESUME) {
                 if (sync.foregroundGate.resumed()) sync.coordinator.foregrounded()
+                lifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                    sync.withLocalMutation { com.planlock.app.record.PlanAlarmScheduler(context).reconcile() }
+                    ExecutionService.reconcile(context)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -322,6 +333,16 @@ private fun AppContent(
 
 
     val navController = rememberNavController()
+    LaunchedEffect(navController) {
+        val activity = context as? android.app.Activity
+        val incoming = activity?.intent
+        if (incoming?.getStringExtra("notification_scope") == TokenStore.state.value.dataScope) {
+            val planId = incoming.getLongExtra("notification_plan_id", Long.MIN_VALUE)
+            if (planId != Long.MIN_VALUE) navController.navigate("detail/$planId")
+        }
+        incoming?.removeExtra("notification_plan_id")
+        incoming?.removeExtra("notification_scope")
+    }
     val entry by navController.currentBackStackEntryAsState()
     // Keep the same real nav underlay while NavHost publishes its initial entry.
     val route = entry?.destination?.route ?: TopLevelDestination.TODAY.route
@@ -419,7 +440,7 @@ private fun AppContent(
                 )
             }
             }
-            composable(TopLevelDestination.STATS.route) { StatsScreen() }
+            composable(TopLevelDestination.STATS.route) { StatsScreen(onOpenPlan = { id -> navController.navigate("detail/$id") }) }
             composable(TopLevelDestination.SETTINGS.route) {
                 SettingsScreen(
                     themeMode = themeMode,

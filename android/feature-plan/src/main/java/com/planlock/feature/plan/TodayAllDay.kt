@@ -61,10 +61,23 @@ internal fun todayBriefLine(entries: List<TimelineEntry>, isToday: Boolean): Str
 /** 时间卡状态行：全天日程只写「日程」，不写「进行中」（任务包 K3）。 */
 internal fun todayRowStatus(entry: TimelineEntry): String = when {
     entry.isAllDay -> "日程"
+    entry.occurrenceEnded -> "计划 · 今天已结束"
     else -> (if (entry.kind == TimelineKind.PLAN) "计划" else "日程") + " · " + when (entry.state) {
         TimelineState.RUNNING -> "进行中"
         TimelineState.UPCOMING -> "待开始"
         TimelineState.ENDED -> "已结束"
         TimelineState.PAUSED -> "已暂停"
     }
+}
+
+/** v4.3（方案 B）：卡片元信息的第一项——计划写它的类型（学习 / 工作…），日程写「日程」。 */
+internal fun todayRowKind(entry: TimelineEntry, planType: String?): String =
+    if (entry.kind == TimelineKind.PLAN) planType?.trim()?.ifEmpty { null } ?: "计划" else "日程"
+
+/** v4.3（方案 B）：卡片最右的状态；全天日程不写状态（它是当天的背景，BUG-102）。 */
+internal fun todayRowStateLabel(entry: TimelineEntry): String? = if (entry.isAllDay) null else when (entry.state) {
+    TimelineState.RUNNING -> if (entry.isRunningNow) "进行中" else "待开始"
+    TimelineState.UPCOMING -> "待开始"
+    TimelineState.ENDED -> "已结束"
+    TimelineState.PAUSED -> "已暂停"
 }

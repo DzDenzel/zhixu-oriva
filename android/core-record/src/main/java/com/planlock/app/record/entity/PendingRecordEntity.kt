@@ -27,4 +27,5 @@ data class PendingRecordEntity(
     val createdAt: Long = System.currentTimeMillis(),
     val baseVersion: Long? = null,
     val localSnapshot: String? = null,
+    @androidx.room.ColumnInfo(defaultValue = "''") val scope: String = "local\nlocal",
 )

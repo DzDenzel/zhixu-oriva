@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.planlock.common.BusinessException;
 import com.planlock.common.ErrorCode;
+import com.planlock.common.PlanStatusLogRules;
 import com.planlock.plan.dto.PlanResponse;
 import com.planlock.plan.dto.PlanUpsertRequest;
 import com.planlock.plan.dto.RemindMethods;
@@ -96,11 +97,24 @@ public class PlanService {
 
     @Transactional
     public PlanResponse pause(Long userId, Long id) {
-        Plan existing = planMapper.findById(id);
+        return pause(userId, id, null);
+    }
+
+    @Transactional
+    public PlanResponse pause(Long userId, Long id, LocalDate userDate) {
+        Plan existing = planMapper.findByIdForUpdate(id);
         if (existing == null || !existing.getUserId().equals(userId)) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
         }
-        planMapper.togglePause(id, userId);
+        PlanStatusLogRules.validate(existing.getStatusLog(), objectMapper);
+        var log = existing.getStatusLog() == null ? objectMapper.createArrayNode()
+                : (com.fasterxml.jackson.databind.node.ArrayNode) readJson(existing.getStatusLog(), com.fasterxml.jackson.databind.JsonNode.class);
+        int nextStatus = existing.getStatus() == 1 ? 0 : 1;
+        log.addObject().put("date", (userDate == null ? LocalDate.now() : userDate).toString()).put("status", nextStatus);
+        while (log.size() > 50) log.remove(0);
+        existing.setStatus(nextStatus);
+        existing.setStatusLog(writeJson(log));
+        planMapper.updatePause(existing);
         return toResponse(planMapper.findById(id));
     }
 
@@ -145,8 +159,11 @@ public class PlanService {
     }
 
     private void apply(Plan plan, PlanUpsertRequest req) {
+        PlanStatusLogRules.validate(req.getStatusLog(), objectMapper);
+        plan.setEndedOccurrenceDate(req.getEndedOccurrenceDate());
+        plan.setStatusLog(req.getStatusLog());
         plan.setName(req.getName());
-        plan.setType(req.getType());
+        plan.setType(req.getType() != null && req.getType().startsWith("custom:") && Integer.valueOf(1).equals(planMapper.isDeletedPlanType(plan.getUserId(),req.getType())) ? "其他" : req.getType());
         plan.setStartTime(req.getStartTime());
         plan.setEndTime(req.getEndTime());
         plan.setRepeatRule(writeJson(req.getRepeatRule()));
@@ -160,6 +177,8 @@ public class PlanService {
         return PlanResponse.builder()
                 .id(p.getId()).clientId(p.getClientId())
                 .userId(p.getUserId())
+                .endedOccurrenceDate(p.getEndedOccurrenceDate())
+                .statusLog(p.getStatusLog())
                 .name(p.getName())
                 .type(p.getType())
                 .startTime(p.getStartTime())

@@ -14,13 +14,27 @@ data class ConnectionState(val config: ConnectionConfig?, val revision: Long = 0
 object ConnectionStore {
     internal val configKey = stringPreferencesKey("backend_connection_v1")
     internal val localOnlyKey = booleanPreferencesKey("backend_local_only")
-    private val mutableState = MutableStateFlow(ConnectionState(ConnectionConfig.default))
+    private val mutableState = MutableStateFlow(ConnectionState(ConnectionConfig.initial))
     val state = mutableState.asStateFlow()
 
     suspend fun restore(store: DataStore<Preferences>) {
         val prefs = store.data.first()
-        val config = if (prefs[localOnlyKey] == true) null else prefs[configKey]?.let(ConnectionConfig::decode) ?: ConnectionConfig.default
+        val config = restoredConfig(prefs, ConnectionConfig.initial)
         publish(config)
+    }
+
+    internal fun restoredConfig(prefs: Preferences, initial: ConnectionConfig?): ConnectionConfig? = when {
+        prefs[localOnlyKey] == true -> null
+        prefs[configKey] != null -> ConnectionConfig.decode(requireNotNull(prefs[configKey]))
+        // A persisted device session proves the implicit default once connected successfully.
+        !prefs[stringPreferencesKey("token")].isNullOrBlank() && prefs[longPreferencesKey("user_id")] != null &&
+            prefs[longPreferencesKey("device_id")] != null -> initial ?: ConnectionConfig.legacyDefault()
+        else -> initial
+    }
+
+    suspend fun needsChoice(store: DataStore<Preferences>): Boolean {
+        val prefs = store.data.first()
+        return state.value.config == null && prefs[localOnlyKey] != true
     }
 
     internal fun publish(config: ConnectionConfig?) {

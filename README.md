@@ -178,7 +178,8 @@ npm run verify
 ## 安全与隐私
 
 - **数据归属**：本项目不运营托管服务；你的日程、计划与执行记录只存储在你的设备和你部署的后端上。
-- **App 访问的外部服务**：除你配置的后端与插件目录外，天气功能会向 [Open-Meteo](https://open-meteo.com/) 发送你搜索的城市名（`geocoding-api.open-meteo.com`）或所选城市的经纬度与时区（`api.open-meteo.com`），用于查询城市与当前天气，不发送账号或日程数据。使用定位时，地点解析由系统定位服务完成。
+- **App 访问的外部服务**：除你配置的后端与插件目录外，天气功能会向 [Open-Meteo](https://open-meteo.com/) 发送你搜索的城市名（`geocoding-api.open-meteo.com`）或所选城市的经纬度与时区（`api.open-meteo.com`），用于查询城市与当前天气。地点搜索与反查优先使用 Android 系统 Geocoder（服务提供方由设备决定），发送查询地名或选点坐标；地名搜索不可用时使用 Open-Meteo 城市搜索。地图默认向 [OpenStreetMap](https://www.openstreetmap.org/copyright) 瓦片服务（`tile.openstreetmap.org`）发送当前视野的缩放级别和瓦片编号，以加载底图；服务方也可见网络地址和应用 User-Agent。这些查询不携带知序账号凭据、日程标题或日程备注。系统定位需要定位授权；手动天气地点保持有效，直到选择使用当前位置。
+- **地图配置与署名**：`MapTileSettings` 可配置 HTTPS XYZ 瓦片地址与对应署名，坐标使用 WGS84；默认服务遵守 [OpenStreetMap 瓦片使用政策](https://operations.osmfoundation.org/policies/tiles/)，保留可见署名，使用独立应用 User-Agent、至少七天缓存，不提供区域预取或离线下载。地图组件为 [osmdroid 6.1.20](https://github.com/osmdroid/osmdroid)（Apache-2.0）；仓库已归档，升级或替换风险见真机能力实现记录。
 - **传输**：公网地址强制 HTTPS。局域网 HTTP 仅对连接配置中显式允许、且解析结果全部为私网地址的端点生效，不放宽系统全局的明文传输策略。
 - **部署默认值**：密钥在安装时随机生成且仅当前用户可读；数据库与 Redis 不暴露端口；部署模式关闭公开注册与验证码登录。
 - **连接配置**：二维码与连接 JSON 只包含公开字段（实例名称、地址等），不含密码或令牌。

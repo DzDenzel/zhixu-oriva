@@ -11,8 +11,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 
 /** Reads Room and the same per-user cache as visible pages. No API client exists here. */
-class CachedPluginQueries(context: Context) : PluginQueryProvider {
-    private val store = RecordStore(context.applicationContext)
+class CachedPluginQueries(context: Context, private val store: RecordStore = RecordStore(context.applicationContext)) : PluginQueryProvider {
     private val sync = AppSync.get(context.applicationContext)
     override fun queryToday(date: String): String = runBlocking(Dispatchers.IO) {
         val value = loadAssistantSnapshot(store, sync, date)
@@ -28,11 +27,15 @@ class CachedPluginQueries(context: Context) : PluginQueryProvider {
         }.toString()
     }
     override fun queryPlan(id: Long): String = runBlocking(Dispatchers.IO) {
-        val userId = TokenStore.userId
-        val plan = store.plan(id)
-        check(userId == TokenStore.userId) { "User changed during query" }
+        val scope = store.currentScope()
+        val scoped = store.forScope(scope)
+        val plan = scoped.plan(id)
+        val customTypes = scoped.planTypes()
+        check(scope == store.currentScope()) { "Scope changed during query" }
         plan?.let { buildJsonObject {
             put("id", it.id); put("name", it.name); put("type", it.type)
+            put("typeName", com.planlock.app.api.PlanTypes.label(it.type, customTypes))
+            put("typeColor", com.planlock.app.api.PlanTypes.definition(it.type, customTypes).color)
             put("startTime", it.startTime?.let(::JsonPrimitive) ?: JsonNull)
             put("endTime", it.endTime?.let(::JsonPrimitive) ?: JsonNull)
             put("repeatRule", it.repeatRule?.let(::JsonPrimitive) ?: JsonNull)
@@ -42,9 +45,9 @@ class CachedPluginQueries(context: Context) : PluginQueryProvider {
     }
     override fun queryReport(period: String): String = runBlocking(Dispatchers.IO) {
         require(period in setOf("day", "week", "month"))
-        val userId = TokenStore.userId
-        val report = sync.cache.read(userId).stats(period)
-        check(userId == TokenStore.userId) { "User changed during query" }
+        val scope = store.currentScope()
+        val report = sync.cache.readScope(scope).stats(period)
+        check(scope == store.currentScope()) { "Scope changed during query" }
         report?.let { Json.encodeToString(it) } ?: "null"
     }
 }

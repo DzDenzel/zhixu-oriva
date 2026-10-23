@@ -13,6 +13,7 @@ object ExecutionEngine {
         val exemptions: Set<String>,
         val classifiedPackages: Set<String>,
         val exemptionSnapshotGeneration: Long?,
+        val ownerScope: String,
     )
 
     @Volatile private var state: State? = null
@@ -26,6 +27,7 @@ object ExecutionEngine {
         exemptPackages: Set<String>,
         classifiedPackages: Set<String> = emptySet(),
         exemptionSnapshotGeneration: Long? = null,
+        ownerScope: String = com.planlock.app.api.TokenStore.state.value.dataScope,
     ) {
         val next = State(
             planId = planId,
@@ -33,6 +35,7 @@ object ExecutionEngine {
             exemptions = exemptPackages.toSet(),
             classifiedPackages = classifiedPackages.toSet(),
             exemptionSnapshotGeneration = exemptionSnapshotGeneration,
+            ownerScope = ownerScope,
         )
         if (state != next) {
             state = next
@@ -47,15 +50,16 @@ object ExecutionEngine {
         }
     }
 
-    fun isRunning(): Boolean = state != null
+    fun isRunning(): Boolean = activePlanId() != null
 
-    fun activePlanId(): Long? = state?.planId
+    fun activePlanId(): Long? = state?.takeIf { it.ownerScope == com.planlock.app.api.TokenStore.state.value.dataScope }?.planId
 
     fun shouldTrack(packageName: String?): Boolean = inspect(packageName)?.shouldTrack ?: false
 
     fun inspect(packageName: String?): EnginePackageDecision? {
         val current = state ?: return null
-        val eligiblePackage = !packageName.isNullOrBlank() && packageName != "com.planlock.app"
+        if (current.ownerScope != com.planlock.app.api.TokenStore.state.value.dataScope) return null
+        val eligiblePackage = !packageName.isNullOrBlank() && !com.planlock.app.api.HostApplication.owns(packageName)
         val whitelisted = packageName in current.whitelist
         val exempt = packageName in current.exemptions
         return EnginePackageDecision(

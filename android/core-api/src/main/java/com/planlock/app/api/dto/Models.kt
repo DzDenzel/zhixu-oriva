@@ -44,7 +44,7 @@ data class SendCodeRequest(
 )
 
 @Serializable
-data class MergeRequest(val guestUserId: Long? = null)
+data class MergeRequest(val guestUserId: Long? = null, val guestToken: String? = null)
 
 @Serializable
 data class AuthResponse(
@@ -108,6 +108,8 @@ data class PlanUpsertRequest(
     val remindAdvanceMin: Int? = 15,
     val remindMethods: RemindMethods? = null,
     val clientId: String? = null,
+    val endedOccurrenceDate: String? = null,
+    val statusLog: String? = null,
 )
 
 @Serializable
@@ -126,6 +128,8 @@ data class PlanDto(
     val status: Int? = null,
     val version: Long? = null,
     val clientId: String? = null,
+    val endedOccurrenceDate: String? = null,
+    val statusLog: String? = null,
 )
 
 @Serializable
@@ -143,6 +147,8 @@ data class ScheduleUpsertRequest(
     val linkedPlanId: Long? = null,
     val tzId: String? = null,
     val clientId: String? = null,
+    val locationLat: Double? = null,
+    val locationLon: Double? = null,
 )
 
 @Serializable
@@ -164,6 +170,8 @@ data class ScheduleDto(
     val status: Int = 1,
     val version: Long = 0,
     val clientId: String? = null,
+    val locationLat: Double? = null,
+    val locationLon: Double? = null,
 )
 
 @Serializable
@@ -297,6 +305,8 @@ data class SyncPlanView(
     val status: Int? = null,
     val version: Long? = null,
     val clientId: String? = null,
+    val endedOccurrenceDate: String? = null,
+    val statusLog: String? = null,
 )
 
 @Serializable
@@ -320,6 +330,8 @@ data class SyncScheduleView(
     val linkedPlanId: Long? = null, val tzId: String? = null,
     val status: Int = 1, val version: Long = 0,
     val clientId: String? = null,
+    val locationLat: Double? = null,
+    val locationLon: Double? = null,
 )
 
 @Serializable
@@ -327,7 +339,8 @@ data class SyncPullResponse(
     val plans: List<SyncPlanView>? = null,
     val schedules: List<SyncScheduleView>? = null,
     val strategies: List<SyncStrategyView>? = null,
-    val recordCounts: Map<String, Int>? = null
+    val recordCounts: Map<String, Int>? = null,
+    val planTypes: List<SyncPlanTypeView>? = null,
 )
 
 @Serializable
@@ -345,6 +358,22 @@ data class SyncPlanItem(
     val remindMethods: String? = null,
     val status: Int? = null,
     val clientId: String? = null,
+    val endedOccurrenceDate: String? = null,
+    val statusLog: String? = null,
+)
+
+@Serializable
+data class UnlockRecordDto(val id: Long = 0, val planId: Long = 0, val unlockAt: String? = null, val method: String? = null, val clientId: String? = null)
+
+@Serializable
+data class RecordHistoryPage(
+    val executions: List<ExecutionRecordDto> = emptyList(),
+    val unlocks: List<UnlockRecordDto> = emptyList(),
+    val executionCursor: Long = 0,
+    val unlockCursor: Long = 0,
+    val hasMore: Boolean = false,
+    val behaviors: List<RhythmBehavior> = emptyList(),
+    val behaviorCursor: Long = 0,
 )
 
 @Serializable
@@ -366,6 +395,8 @@ data class SyncScheduleItem(
     val remindAdvanceMin: Int? = null, val repeatRule: String? = null,
     val linkedPlanId: Long? = null, val tzId: String? = null, val status: Int = 1,
     val clientId: String? = null,
+    val locationLat: Double? = null,
+    val locationLon: Double? = null,
 )
 
 @Serializable
@@ -373,7 +404,14 @@ data class SyncPushRequest(
     val plans: List<SyncPlanItem>? = null,
     val strategies: List<SyncStrategyItem>? = null,
     val schedules: List<SyncScheduleItem>? = null,
+    val planTypes: List<SyncPlanTypeItem>? = null,
 )
+
+@Serializable
+data class SyncPlanTypeView(val typeKey: String, val userId: Long, val name: String, val color: String, val version: Long = 0, val deleted: Boolean = false)
+
+@Serializable
+data class SyncPlanTypeItem(val typeKey: String, val name: String, val color: String, val deleted: Boolean = false, val mutationId: String)
 
 @Serializable
 data class SyncItemResult(

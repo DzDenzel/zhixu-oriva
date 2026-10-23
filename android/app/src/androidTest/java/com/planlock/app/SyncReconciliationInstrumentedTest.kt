@@ -19,8 +19,8 @@ class SyncReconciliationInstrumentedTest {
     private fun schedule(id: Long) = ScheduleSnapshotEntity(id,1,"schedule-$id","2026-10-13","10:00:00","2026-10-13","11:00:00",false,null,null,15,null,null,false,"Asia/Shanghai",1,0)
     private suspend fun withStore(block: suspend (RecordStore,PlanLockDatabase) -> Unit) {
         val name="reconcile-${UUID.randomUUID()}.db"
-        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).build()
-        try { block(RecordStore(db),db) } finally { db.close(); context.deleteDatabase(name) }
+        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration).build()
+        try { block(RecordStore(db, historyScope = { "local\nlocal" }),db) } finally { db.close(); context.deleteDatabase(name) }
     }
     @Test fun completeEmptyPullRemovesConfirmedRowsAndStrategiesButKeepsDrafts() = runBlocking { withStore { store,db ->
         store.saveLocalPlan(plan(41)); store.saveLocalPlan(plan(-41))
@@ -29,7 +29,7 @@ class SyncReconciliationInstrumentedTest {
         store.saveSnapshots(emptyList(),emptyList(),emptyList())
         assertEquals(listOf(-41L),store.plans().map { it.id })
         assertEquals(listOf(-61L),store.schedules().map { it.id })
-        assertTrue(db.strategySnapshotDao().all().isEmpty())
+        assertTrue(db.strategySnapshotDao().all("local\nlocal").isEmpty())
     } }
     @Test fun pendingDeleteAlreadyMissingFromCompletePullIsAcknowledged() = runBlocking { withStore { store,_ ->
         store.saveLocalPlan(plan(41)); store.saveLocalSchedule(schedule(61))
@@ -40,14 +40,14 @@ class SyncReconciliationInstrumentedTest {
     } }
     @Test fun missingEditIsDurableConfirmationAndNeverARetryFailure() = runBlocking {
         val name="restart-confirm-${UUID.randomUUID()}.db"
-        var db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).build()
+        var db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration).build()
         try {
-            var store=RecordStore(db)
+            var store=RecordStore(db, historyScope = { "local\nlocal" })
             store.updateLocalPlan(plan(41).copy(name="my-edit"))
             store.saveSnapshots(emptyList(),emptyList(),emptyList())
             assertTrue(store.pending().isEmpty())
             assertEquals("my-edit",store.confirmations().single().localPlan!!.name)
-            db.close(); db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).build(); store=RecordStore(db)
+            db.close(); db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration).build(); store=RecordStore(db, historyScope = { "local\nlocal" })
             assertTrue(store.confirmations().single().remoteDeleted)
             store.resolveConfirmation(store.confirmations().single(),false)
             assertTrue(store.plans().isEmpty()); assertTrue(store.confirmations().isEmpty())
@@ -120,7 +120,7 @@ class SyncReconciliationInstrumentedTest {
     } }
     @Test fun scheduleCleanupCancelsItsAlarm() = runBlocking { withStore { original,db ->
         val cancelled=mutableListOf<Long>()
-        val store=RecordStore(db) { cancelled+=it }
+        val store=RecordStore(db, historyScope = { "local\nlocal" }) { cancelled+=it }
         original.saveLocalSchedule(schedule(61))
         store.saveSnapshots(emptyList(),emptyList(),emptyList())
         assertEquals(listOf(61L),cancelled)
@@ -139,17 +139,20 @@ class SyncReconciliationInstrumentedTest {
             old.execSQL("INSERT INTO pending_record (id,type,planId,clientId,createdAt) VALUES (1,'plan_upsert',-41,'old-key',1)")
             old.version=5
         } finally { old.close() }
-        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).build()
+        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration).build()
         try {
-            assertEquals("old-draft",db.planSnapshotDao().all().single().name)
-            assertEquals("old-key",db.pendingRecordDao().all().single().clientId)
-            assertNull(db.pendingRecordDao().all().single().baseVersion)
-            assertNull(db.pendingRecordDao().all().single().localSnapshot)
+            assertEquals("old-draft",db.planSnapshotDao().all("legacy\n1").single().name)
+            assertEquals("old-key",db.pendingRecordDao().all("legacy\n1").single().clientId)
+            assertNull(db.pendingRecordDao().all("legacy\n1").single().baseVersion)
+            assertNull(db.pendingRecordDao().all("legacy\n1").single().localSnapshot)
         } finally { db.close(); context.deleteDatabase(name) }
     }
 
     @Test fun allConflictChoicesConvergeWithoutAutomaticRetryOrDuplicates() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.startActivitySync(android.content.Intent(context, MainActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
         for(kind in listOf("plan","schedule")) for(scenario in listOf("edit-edit","edit-delete","delete-edit")) for(mine in listOf(false,true)) withStore { store,_ ->
+            android.util.Log.i("ConflictQA", "case=$kind/$scenario/$mine begin")
             val remote=DurableOutboxInstrumentedTest.Remote()
             remote.plans[41]=SyncPlanView(41,1,"plan-41","study","10:00:00","11:00:00",remindAdvanceMin=15,status=1,version=0)
             remote.schedules[51]=ScheduleDto(51,1,"schedule-51","2026-10-13","10:00:00","2026-10-13","11:00:00",false,remindAdvanceMin=15,tzId="Asia/Shanghai",version=0)
@@ -173,7 +176,9 @@ class SyncReconciliationInstrumentedTest {
             store.enqueueExecution(ExecutionRecordRequest(41,"2026-10-13",1,clientId="other-record"))
             client.pushPendingRecords(); assertTrue(store.pending().isEmpty())
             store.resolveConfirmation(conflict,mine)
+            android.util.Log.i("ConflictQA", "case=$kind/$scenario/$mine resolved")
             client.pushPendingRecords(); client.pull()
+            android.util.Log.i("ConflictQA", "case=$kind/$scenario/$mine synchronized")
             assertTrue(store.confirmations().isEmpty()); assertTrue(store.pending().isEmpty())
             val expected=if(mine && scenario=="delete-edit" || !mine && scenario=="edit-delete") null else if(mine) "mine" else "theirs"
             if(kind=="plan") {
@@ -206,10 +211,10 @@ class SyncReconciliationInstrumentedTest {
     @Test fun batchProtectionAlsoRetainsExecutionStrategiesUntilApproval() = runBlocking { withStore { store,db ->
         (1L..12L).forEach { store.saveLocalPlan(plan(it)); store.saveLocalStrategy(StrategySnapshotEntity(100+it,it,null,"[]",true,true,0)) }
         store.saveSnapshots(emptyList(),emptyList(),emptyList())
-        assertEquals(12,db.strategySnapshotDao().all().size)
+        assertEquals(12,db.strategySnapshotDao().all("local\nlocal").size)
         store.approveBulkDeletion(store.bulkDeletion()!!)
         store.saveSnapshots(emptyList(),emptyList(),emptyList())
-        assertTrue(db.strategySnapshotDao().all().isEmpty())
+        assertTrue(db.strategySnapshotDao().all("local\nlocal").isEmpty())
     } }
     @Test fun earlierDeleteCannotAcknowledgeAnEditSavedAfterIt() = runBlocking { withStore { store,_ ->
         store.saveLocalPlan(plan(41)); store.saveLocalSchedule(schedule(51))
@@ -251,7 +256,7 @@ class SyncReconciliationInstrumentedTest {
         val id=store.plans().single().id
         assertTrue(id<0)
         assertTrue(store.pending().filter { it.type in setOf("execution","violation","unlock") }.all { it.planId==id })
-        assertEquals(id,db.behaviorAggregateDao().all().single().planId)
+        assertEquals(id,db.behaviorAggregateDao().all("local\nlocal").single().planId)
     } }
 
 }

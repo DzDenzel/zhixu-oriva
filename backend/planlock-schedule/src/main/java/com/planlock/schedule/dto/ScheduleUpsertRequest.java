@@ -16,7 +16,7 @@ public class ScheduleUpsertRequest {
     @NotNull(message = "结束日期不能为空") private LocalDate endDate;
     private LocalTime endTime;
     @NotNull private Boolean allDay = false;
-    private String location;
+    private String location; private Double locationLat; private Double locationLon;
     private String note;
     @Min(0) private Integer remindAdvanceMin;
     private String repeatRule;

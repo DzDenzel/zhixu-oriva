@@ -20,6 +20,7 @@ class AuthResponseTest {
             override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences =
                 transform(data.value).also { data.value = it }
         }
+        importTestConnection(store)
         TokenStore.save(store, AuthSession("response-test-token", 42, 8, signedIn = true))
         fun response(path: String, status: Int, body: String, token: String = "response-test-token") {
             val request = Request.Builder().url("https://example.invalid/api/v1/$path")
@@ -46,10 +47,8 @@ class AuthResponseTest {
         response("records/today", 401, "")
         assertEquals(AuthValidity.REJECTED, TokenStore.state.value.validity)
         TokenStore.save(store, AuthSession("account-b", 99, 9, signedIn = true))
-        try {
-            authorizedRequest(Request.Builder().url("https://example.invalid/api/v1/plans").build())
-            fail("Different account must not authorize the retained local workspace")
-        } catch (_: java.io.IOException) { }
+        assertEquals("Bearer account-b", authorizedRequest(Request.Builder().url("https://example.invalid/api/v1/plans").build()).header("Authorization"))
+        assertEquals(99L, TokenStore.localDataUserId)
         assertEquals("Bearer account-b", authorizedRequest(Request.Builder().url("https://example.invalid/api/v1/auth/login").build()).header("Authorization"))
     }
 }

@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.library)
@@ -6,12 +7,19 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val localMapProperties = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use(::load)
+}
+val domesticMapKey = localMapProperties.getProperty("TIANDITU_KEY", "").trim()
+require(domesticMapKey.matches(Regex("[A-Za-z0-9_-]*"))) { "TIANDITU_KEY 格式无效" }
+
 android {
     namespace = "com.planlock.feature.plan"
     compileSdk = 36
 
     defaultConfig {
         minSdk = 24
+        buildConfigField("String", "TIANDITU_KEY", "\"$domesticMapKey\"")
     }
 
     compileOptions {
@@ -21,6 +29,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -31,6 +40,7 @@ kotlin {
 }
 
 dependencies {
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
     implementation(project(":core-plugin"))
     implementation(project(":core-api"))
     implementation(project(":core-record"))

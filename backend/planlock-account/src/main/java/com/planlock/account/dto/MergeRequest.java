@@ -9,4 +9,5 @@ import lombok.Data;
 public class MergeRequest {
 
     private Long guestUserId;
+    private String guestToken;
 }

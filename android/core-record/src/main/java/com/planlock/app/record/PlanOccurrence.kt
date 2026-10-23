@@ -68,7 +68,25 @@ object PlanOccurrence {
     private val monthPattern = Regex("\"month\"\\s*:\\s*(\\d+)")
 
     fun isActive(plan: PlanSnapshotEntity, nowMinutes: Int, date: OccurrenceDate): Boolean =
-        plan.status == 1 && isWithinOccurrence(plan, nowMinutes, date)
+        plan.status == 1 && isWithinOccurrence(plan, nowMinutes, date) &&
+            !isEnded(plan, nowMinutes, date)
+
+    /** One end marker belongs to the occurrence's start date, including its overnight tail. */
+    fun isEndedOn(plan: PlanSnapshotEntity, occurrenceDate: String): Boolean =
+        plan.endedOccurrenceDate == occurrenceDate
+
+    fun isEnded(plan: PlanSnapshotEntity, nowMinutes: Int, date: OccurrenceDate): Boolean =
+        isEndedOn(plan, occurrenceDate(plan, nowMinutes, date))
+
+    fun canToggleExecution(plan: PlanSnapshotEntity, nowMinutes: Int, date: OccurrenceDate): Boolean =
+        plan.status != 1 || !isEnded(plan, nowMinutes, date)
+
+    fun occurrenceDate(plan: PlanSnapshotEntity, nowMinutes: Int, date: OccurrenceDate): String {
+        val start = minutesOfDay(plan.startTime) ?: 0
+        val end = minutesOfDay(plan.endTime) ?: 0
+        val value = if (end < start && nowMinutes < end) date.previous() else date
+        return "%04d-%02d-%02d".format(Locale.ROOT, value.year, value.month, value.day)
+    }
 
     fun isWithinOccurrence(plan: PlanSnapshotEntity, nowMinutes: Int, date: OccurrenceDate): Boolean {
         if (nowMinutes !in 0 until 1440) return false

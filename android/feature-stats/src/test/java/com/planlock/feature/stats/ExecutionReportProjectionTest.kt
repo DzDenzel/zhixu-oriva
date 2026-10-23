@@ -11,6 +11,56 @@ import org.junit.Test
 class ExecutionReportProjectionTest {
 
     @Test
+    fun cachedBehaviorNeverOverridesLocalExecutionStatistics() {
+        val local = StatsResponse(period = "day", completedCount = 2, continuousDays = 1,
+            planExecution = listOf(PlanExecutionStat(7, completedCount = 1, earlyEndedCount = 1)))
+        val cached = StatsResponse(period = "day", completedCount = 99, continuousDays = 20,
+            violationCount = 3, violationDurationMs = 600_000, legacyViolationCount = 4)
+        val combined = withCachedBehavior(local, cached)
+        assertEquals(2, combined.completedCount)
+        assertEquals(1, combined.continuousDays)
+        assertEquals(local.planExecution, combined.planExecution)
+        assertEquals(3, combined.violationCount)
+        assertEquals(600_000L, combined.violationDurationMs)
+        assertEquals(4, combined.legacyViolationCount)
+        assertEquals(local, withCachedBehavior(local, null))
+    }
+
+    @Test
+    fun restoredStatusHistoryExcludesPausedDaysAcrossMonthBoundary() {
+        val restored = plan(7, "专注", "09:00", "10:00", null).copy(
+            statusLog = """[{"date":"2026-09-29","status":0},{"date":"2026-10-02","status":1}]""",
+        )
+        val dates = scopeDates("week", OccurrenceDate(2026, 10, 4, 7))
+        val row = planReportRows(listOf(restored), emptyList(), dates).single()
+        assertEquals(5 * 3_600_000L, row.plannedDurationMs)
+        assertEquals(5, row.missedCount)
+    }
+
+    @Test
+    fun currentlyDisabledPlanStillShowsExpectedAndExecutedOccurrences() {
+        val disabled = plan(7, "专注", "09:00", "10:00", null).copy(status = 0,
+            statusLog = """[{"date":"2026-10-02","status":0}]""")
+        val row = planReportRows(listOf(disabled), listOf(PlanExecutionStat(7, earlyEndedCount = 1)),
+            scopeDates("month", OccurrenceDate(2026, 10, 4, 7))).single()
+        assertEquals(2 * 3_600_000L, row.plannedDurationMs)
+        assertEquals(1, row.missedCount)
+        assertEquals(emptyList<PlanReportRow>(), planReportRows(listOf(disabled), emptyList(),
+            listOf(OccurrenceDate(2026, 10, 4, 7))))
+        assertEquals(1, planReportRows(listOf(disabled), listOf(PlanExecutionStat(7, completedCount = 1)),
+            listOf(OccurrenceDate(2026, 10, 4, 7))).size)
+    }
+
+    @Test
+    fun disableAndEnableSameDayCountOnceAndLegacyNullHistoryMeansAlwaysEnabled() {
+        val date = OccurrenceDate(2026, 10, 4, 7)
+        val sameDay = plan(7, "专注", "09:00", "10:00", null).copy(status = 0,
+            statusLog = """[{"date":"2026-10-01","status":0},{"date":"2026-10-04","status":1},{"date":"2026-10-04","status":0}]""")
+        assertEquals(1, planReportRows(listOf(sameDay), emptyList(), listOf(date)).single().missedCount)
+        assertEquals(1, planReportRows(listOf(sameDay.copy(statusLog = null)), emptyList(), listOf(date)).single().missedCount)
+    }
+
+    @Test
     fun plannedActualAndThreeStatesUseTheSharedOccurrenceRule() {
         val daily = plan(7, "每日专注", "09:00", "10:00", "{\"type\":\"daily\"}")
         val weekly = plan(8, "周三复盘", "20:00", "20:30", "{\"type\":\"weekly\",\"weekdays\":[3]}")

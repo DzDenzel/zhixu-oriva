@@ -52,8 +52,15 @@ public class AuthService {
         }
         Device existing = deviceMapper.findByDeviceUid(req.getDeviceUid());
         if (existing != null) {
-            deviceMapper.touch(existing.getId(), LocalDateTime.now());
-            return buildAuth(existing, null);
+            User owner = userMapper.findById(existing.getUserId());
+            if (owner != null && owner.getPhone() == null && owner.getEmail() == null) {
+                deviceMapper.touch(existing.getId(), LocalDateTime.now());
+                return buildAuth(existing, null);
+            }
+            // A device identifier is not an account credential (e.g. after reinstall).
+            User anonymous = new User();
+            userMapper.insert(anonymous);
+            return buildAuth(bindDevice(req.getDeviceUid(), req.getDeviceName(), req.getPlatform(), anonymous.getId()), null);
         }
         User anonymous = new User();
         userMapper.insert(anonymous);
@@ -137,14 +144,29 @@ public class AuthService {
     }
 
     @Transactional
-    public Map<String, Long> merge(Long currentUserId, Long guestUserId) {
+    public Map<String, Long> merge(Long currentUserId, Long guestUserId, String guestToken) {
         Map<String, Long> result = new HashMap<>();
         if (guestUserId == null || guestUserId.equals(currentUserId)) {
             result.put("mergedPlans", 0L);
+            result.put("mergedSchedules", 0L);
             return result;
         }
+        User source = userMapper.findById(guestUserId);
+        boolean permitted = false;
+        try {
+            var proof = jwtUtil.parse(guestToken);
+            permitted = source != null && source.getPhone() == null && source.getEmail() == null
+                    && guestUserId.equals(proof.get("uid", Long.class))
+                    && java.util.Objects.equals(com.planlock.common.auth.UserContext.deviceId(), proof.get("did", Long.class))
+                    && proof.get("did", Long.class) != null;
+        } catch (Exception ignored) { /* Missing, expired or forged source proof is never a merge grant. */ }
+        if (!permitted) throw new BusinessException(ErrorCode.UNAUTHORIZED, "游客合并来源未验证，原内容已保留");
         int plans = mergeMapper.transferPlans(guestUserId, currentUserId);
+        result.put("mergedPlanTypes", (long) mergeMapper.transferPlanTypes(guestUserId, currentUserId));
+        mergeMapper.clearGuestPlanTypes(guestUserId);
         result.put("mergedPlans", (long) plans);
+        result.put("mergedSchedules", (long) mergeMapper.transferSchedules(guestUserId, currentUserId));
+        mergeMapper.reassignDeletedPlanTypes(currentUserId);
         return result;
     }
 

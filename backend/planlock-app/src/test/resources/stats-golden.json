@@ -1,0 +1,1326 @@
+{
+  "today": "2026-10-02",
+  "expected": {
+    "day": {
+      "earlyEndings": [
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:52:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:51:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:50:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:49:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:48:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:47:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:46:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:45:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:44:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:43:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:42:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:41:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:40:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:39:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:38:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:37:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:36:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:35:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:34:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:33:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:32:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:31:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:30:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:29:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:28:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:27:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:26:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:25:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:24:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:23:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:22:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:21:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:20:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:19:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:18:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:17:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:16:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:15:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:14:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:13:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:12:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:11:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:10:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:09:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:08:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:07:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:06:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:05:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:04:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:03:00"
+        }
+      ],
+      "daily": [
+        {
+          "completed": 1,
+          "date": "2026-10-02"
+        }
+      ],
+      "period": "day",
+      "planExecution": [
+        {
+          "completedCount": 1,
+          "planId": 1,
+          "earlyEndedCount": 0,
+          "actualDurationMs": 1800000
+        }
+      ],
+      "completedCount": 1,
+      "unlockCount": 52,
+      "continuousDays": 1
+    },
+    "week": {
+      "earlyEndings": [
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:52:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:51:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:50:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:49:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:48:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:47:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:46:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:45:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:44:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:43:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:42:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:41:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:40:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:39:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:38:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:37:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:36:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:35:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:34:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:33:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:32:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:31:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:30:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:29:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:28:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:27:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:26:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:25:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:24:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:23:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:22:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:21:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:20:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:19:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:18:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:17:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:16:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:15:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:14:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:13:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:12:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:11:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:10:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:09:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:08:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:07:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:06:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:05:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:04:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:03:00"
+        }
+      ],
+      "daily": [
+        {
+          "completed": 1,
+          "date": "2026-09-26"
+        },
+        {
+          "completed": 1,
+          "date": "2026-09-27"
+        },
+        {
+          "completed": 1,
+          "date": "2026-09-29"
+        },
+        {
+          "completed": 1,
+          "date": "2026-09-30"
+        },
+        {
+          "completed": 1,
+          "date": "2026-10-01"
+        },
+        {
+          "completed": 1,
+          "date": "2026-10-02"
+        }
+      ],
+      "period": "week",
+      "planExecution": [
+        {
+          "completedCount": 6,
+          "planId": 1,
+          "earlyEndedCount": 0,
+          "actualDurationMs": 10800000
+        },
+        {
+          "completedCount": 0,
+          "planId": 2,
+          "earlyEndedCount": 1,
+          "actualDurationMs": 1800000
+        }
+      ],
+      "completedCount": 6,
+      "unlockCount": 52,
+      "continuousDays": 4
+    },
+    "month": {
+      "earlyEndings": [
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:52:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:51:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:50:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:49:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:48:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:47:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:46:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:45:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:44:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:43:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:42:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:41:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:40:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:39:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:38:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:37:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:36:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:35:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:34:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:33:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:32:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:31:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:30:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:29:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:28:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:27:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:26:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:25:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:24:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:23:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:22:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:21:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:20:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:19:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:18:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:17:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:16:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:15:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:14:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:13:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:12:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:11:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:10:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:09:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:08:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:07:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:06:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:05:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:04:00"
+        },
+        {
+          "planId": 2,
+          "method": "backup_password",
+          "at": "2026-10-02T10:03:00"
+        }
+      ],
+      "daily": [
+        {
+          "completed": 1,
+          "date": "2026-10-01"
+        },
+        {
+          "completed": 1,
+          "date": "2026-10-02"
+        }
+      ],
+      "period": "month",
+      "planExecution": [
+        {
+          "completedCount": 2,
+          "planId": 1,
+          "earlyEndedCount": 0,
+          "actualDurationMs": 3600000
+        },
+        {
+          "completedCount": 0,
+          "planId": 2,
+          "earlyEndedCount": 1,
+          "actualDurationMs": 1800000
+        }
+      ],
+      "completedCount": 2,
+      "unlockCount": 52,
+      "continuousDays": 2
+    }
+  },
+  "unlocks": [
+    {
+      "clientId": null,
+      "unlockAt": "2026-10-02T10:01:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 1
+    },
+    {
+      "clientId": "golden-unlock-2",
+      "unlockAt": "2026-10-02T10:02:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 2
+    },
+    {
+      "clientId": "golden-unlock-3",
+      "unlockAt": "2026-10-02T10:03:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 3
+    },
+    {
+      "clientId": "golden-unlock-4",
+      "unlockAt": "2026-10-02T10:04:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 4
+    },
+    {
+      "clientId": "golden-unlock-5",
+      "unlockAt": "2026-10-02T10:05:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 5
+    },
+    {
+      "clientId": "golden-unlock-6",
+      "unlockAt": "2026-10-02T10:06:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 6
+    },
+    {
+      "clientId": "golden-unlock-7",
+      "unlockAt": "2026-10-02T10:07:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 7
+    },
+    {
+      "clientId": "golden-unlock-8",
+      "unlockAt": "2026-10-02T10:08:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 8
+    },
+    {
+      "clientId": "golden-unlock-9",
+      "unlockAt": "2026-10-02T10:09:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 9
+    },
+    {
+      "clientId": "golden-unlock-10",
+      "unlockAt": "2026-10-02T10:10:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 10
+    },
+    {
+      "clientId": "golden-unlock-11",
+      "unlockAt": "2026-10-02T10:11:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 11
+    },
+    {
+      "clientId": "golden-unlock-12",
+      "unlockAt": "2026-10-02T10:12:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 12
+    },
+    {
+      "clientId": "golden-unlock-13",
+      "unlockAt": "2026-10-02T10:13:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 13
+    },
+    {
+      "clientId": "golden-unlock-14",
+      "unlockAt": "2026-10-02T10:14:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 14
+    },
+    {
+      "clientId": "golden-unlock-15",
+      "unlockAt": "2026-10-02T10:15:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 15
+    },
+    {
+      "clientId": "golden-unlock-16",
+      "unlockAt": "2026-10-02T10:16:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 16
+    },
+    {
+      "clientId": "golden-unlock-17",
+      "unlockAt": "2026-10-02T10:17:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 17
+    },
+    {
+      "clientId": "golden-unlock-18",
+      "unlockAt": "2026-10-02T10:18:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 18
+    },
+    {
+      "clientId": "golden-unlock-19",
+      "unlockAt": "2026-10-02T10:19:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 19
+    },
+    {
+      "clientId": "golden-unlock-20",
+      "unlockAt": "2026-10-02T10:20:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 20
+    },
+    {
+      "clientId": "golden-unlock-21",
+      "unlockAt": "2026-10-02T10:21:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 21
+    },
+    {
+      "clientId": "golden-unlock-22",
+      "unlockAt": "2026-10-02T10:22:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 22
+    },
+    {
+      "clientId": "golden-unlock-23",
+      "unlockAt": "2026-10-02T10:23:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 23
+    },
+    {
+      "clientId": "golden-unlock-24",
+      "unlockAt": "2026-10-02T10:24:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 24
+    },
+    {
+      "clientId": "golden-unlock-25",
+      "unlockAt": "2026-10-02T10:25:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 25
+    },
+    {
+      "clientId": "golden-unlock-26",
+      "unlockAt": "2026-10-02T10:26:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 26
+    },
+    {
+      "clientId": "golden-unlock-27",
+      "unlockAt": "2026-10-02T10:27:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 27
+    },
+    {
+      "clientId": "golden-unlock-28",
+      "unlockAt": "2026-10-02T10:28:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 28
+    },
+    {
+      "clientId": "golden-unlock-29",
+      "unlockAt": "2026-10-02T10:29:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 29
+    },
+    {
+      "clientId": "golden-unlock-30",
+      "unlockAt": "2026-10-02T10:30:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 30
+    },
+    {
+      "clientId": "golden-unlock-31",
+      "unlockAt": "2026-10-02T10:31:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 31
+    },
+    {
+      "clientId": "golden-unlock-32",
+      "unlockAt": "2026-10-02T10:32:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 32
+    },
+    {
+      "clientId": "golden-unlock-33",
+      "unlockAt": "2026-10-02T10:33:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 33
+    },
+    {
+      "clientId": "golden-unlock-34",
+      "unlockAt": "2026-10-02T10:34:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 34
+    },
+    {
+      "clientId": "golden-unlock-35",
+      "unlockAt": "2026-10-02T10:35:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 35
+    },
+    {
+      "clientId": "golden-unlock-36",
+      "unlockAt": "2026-10-02T10:36:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 36
+    },
+    {
+      "clientId": "golden-unlock-37",
+      "unlockAt": "2026-10-02T10:37:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 37
+    },
+    {
+      "clientId": "golden-unlock-38",
+      "unlockAt": "2026-10-02T10:38:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 38
+    },
+    {
+      "clientId": "golden-unlock-39",
+      "unlockAt": "2026-10-02T10:39:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 39
+    },
+    {
+      "clientId": "golden-unlock-40",
+      "unlockAt": "2026-10-02T10:40:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 40
+    },
+    {
+      "clientId": "golden-unlock-41",
+      "unlockAt": "2026-10-02T10:41:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 41
+    },
+    {
+      "clientId": "golden-unlock-42",
+      "unlockAt": "2026-10-02T10:42:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 42
+    },
+    {
+      "clientId": "golden-unlock-43",
+      "unlockAt": "2026-10-02T10:43:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 43
+    },
+    {
+      "clientId": "golden-unlock-44",
+      "unlockAt": "2026-10-02T10:44:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 44
+    },
+    {
+      "clientId": "golden-unlock-45",
+      "unlockAt": "2026-10-02T10:45:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 45
+    },
+    {
+      "clientId": "golden-unlock-46",
+      "unlockAt": "2026-10-02T10:46:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 46
+    },
+    {
+      "clientId": "golden-unlock-47",
+      "unlockAt": "2026-10-02T10:47:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 47
+    },
+    {
+      "clientId": "golden-unlock-48",
+      "unlockAt": "2026-10-02T10:48:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 48
+    },
+    {
+      "clientId": "golden-unlock-49",
+      "unlockAt": "2026-10-02T10:49:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 49
+    },
+    {
+      "clientId": "golden-unlock-50",
+      "unlockAt": "2026-10-02T10:50:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 50
+    },
+    {
+      "clientId": "golden-unlock-51",
+      "unlockAt": "2026-10-02T10:51:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 51
+    },
+    {
+      "clientId": "golden-unlock-52",
+      "unlockAt": "2026-10-02T10:52:00",
+      "planId": 2,
+      "method": "backup_password",
+      "id": 52
+    }
+  ],
+  "executions": [
+    {
+      "id": 1,
+      "deviceId": 1,
+      "planDate": "2026-09-25",
+      "planId": 1,
+      "endedAt": "2026-09-25T09:30:00",
+      "startedAt": "2026-09-25T09:00:00",
+      "status": 1,
+      "clientId": "golden-execution-1"
+    },
+    {
+      "id": 2,
+      "deviceId": 1,
+      "planDate": "2026-09-26",
+      "planId": 1,
+      "endedAt": "2026-09-26T09:30:00",
+      "startedAt": "2026-09-26T09:00:00",
+      "status": 1,
+      "clientId": null
+    },
+    {
+      "id": 3,
+      "deviceId": 2,
+      "planDate": "2026-09-27",
+      "planId": 1,
+      "endedAt": "2026-09-27T09:30:00",
+      "startedAt": "2026-09-27T09:00:00",
+      "status": 1,
+      "clientId": "golden-execution-3"
+    },
+    {
+      "id": 4,
+      "deviceId": 1,
+      "planDate": "2026-09-28",
+      "planId": 1,
+      "endedAt": "2026-09-28T09:30:00",
+      "startedAt": "2026-09-28T09:00:00",
+      "status": 3,
+      "clientId": "golden-execution-4"
+    },
+    {
+      "id": 5,
+      "deviceId": 2,
+      "planDate": "2026-09-29",
+      "planId": 1,
+      "endedAt": "2026-09-29T09:30:00",
+      "startedAt": "2026-09-29T09:00:00",
+      "status": 1,
+      "clientId": "golden-execution-5"
+    },
+    {
+      "id": 6,
+      "deviceId": 1,
+      "planDate": "2026-09-30",
+      "planId": 1,
+      "endedAt": "2026-09-30T09:30:00",
+      "startedAt": "2026-09-30T09:00:00",
+      "status": 1,
+      "clientId": "golden-execution-6"
+    },
+    {
+      "id": 7,
+      "deviceId": 2,
+      "planDate": "2026-10-01",
+      "planId": 1,
+      "endedAt": "2026-10-01T09:30:00",
+      "startedAt": "2026-10-01T09:00:00",
+      "status": 1,
+      "clientId": "golden-execution-7"
+    },
+    {
+      "id": 8,
+      "deviceId": 1,
+      "planDate": "2026-10-01",
+      "planId": 2,
+      "endedAt": "2026-10-01T09:30:00",
+      "startedAt": "2026-10-01T09:00:00",
+      "status": 2,
+      "clientId": "golden-execution-8"
+    },
+    {
+      "id": 9,
+      "deviceId": 1,
+      "planDate": "2026-10-02",
+      "planId": 1,
+      "endedAt": "2026-10-02T09:30:00",
+      "startedAt": "2026-10-02T09:00:00",
+      "status": 1,
+      "clientId": "golden-execution-9"
+    },
+    {
+      "id": 10,
+      "deviceId": 1,
+      "planDate": "2026-10-02",
+      "planId": 1,
+      "endedAt": null,
+      "startedAt": "2026-10-02T09:00:00",
+      "status": 0,
+      "clientId": "golden-execution-10"
+    }
+  ]
+}
+

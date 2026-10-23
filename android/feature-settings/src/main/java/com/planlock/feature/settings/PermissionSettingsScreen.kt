@@ -4,8 +4,6 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -32,13 +30,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import androidx.datastore.preferences.core.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.planlock.app.api.PlanLockPreferenceKeys
@@ -47,7 +44,10 @@ import com.planlock.app.security.AccessibilityHealth
 import com.planlock.app.security.PermissionChecker
 import com.planlock.app.security.PermissionIntent
 import com.planlock.app.security.PermissionKind
+import com.planlock.app.security.PlanReminderChannel
 import com.planlock.app.security.basePermissionKinds
+import com.planlock.app.security.Capability
+import com.planlock.design.rememberCapabilityPermissionGate
 import com.planlock.design.PageAtmosphere
 import com.planlock.design.SettingsChevron
 import com.planlock.design.SettingsDivider
@@ -55,11 +55,13 @@ import com.planlock.design.SettingsGroup
 import com.planlock.design.SettingsHero
 import com.planlock.design.SettingsItem
 import com.planlock.design.SettingsStateTag
+import com.planlock.design.SettingsSwitchItem
 import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.Alignment
 import com.planlock.design.planLockAtmosphere
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,34 +69,55 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
-    var states by remember { mutableStateOf(PermissionChecker.check(context)) }
+    val gate = rememberCapabilityPermissionGate()
+    fun readStates() = PermissionChecker.check(context) + mapOf(
+        PermissionKind.LOCATION to gate.access.check(Capability.LOCATION),
+        PermissionKind.NOTIFICATIONS to gate.access.check(Capability.NOTIFICATIONS),
+    )
+    fun hasRequestedLocation() = context.getSharedPreferences("capability_requests", Context.MODE_PRIVATE)
+        .getBoolean(Capability.LOCATION.name, false)
+    var states by remember { mutableStateOf(readStates()) }
+    var reminderCanAlert by remember { mutableStateOf(PlanReminderChannel.canAlert(context)) }
     var locationRequested by remember { mutableStateOf(false) }
+    var locationRationale by remember { mutableStateOf(activity?.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_COARSE_LOCATION) == true) }
     var requestMarkerLoaded by remember { mutableStateOf(false) }
     var pendingPermission by remember { mutableStateOf<PermissionKind?>(null) }
     // 已开启的权限也能点：说明用途，并可前往系统设置查看或关闭（v4.1）。
     var grantedPermission by remember { mutableStateOf<PermissionKind?>(null) }
-
-    val locationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        states = PermissionChecker.check(context)
+    val scope = rememberCoroutineScope()
+    var punctualStart by remember { mutableStateOf<Boolean?>(null) }
+    var timingSaving by remember { mutableStateOf(false) }
+    var timingError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(context) {
+        com.planlock.app.api.PlanTimingPreferences.enabled(context.planLockPreferences).collect { punctualStart = it }
     }
-
-    fun requestLocation() {
-        locationRequested = true
+    fun updateTiming(enabled: Boolean) {
         scope.launch {
-            context.planLockPreferences.edit { it[PlanLockPreferenceKeys.locationPermissionRequested] = true }
+            timingSaving = true; timingError = null
+            try {
+                com.planlock.app.sync.AppSync.get(context).setPunctualPlanStart(enabled)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                timingError = "闹钟设置更新失败，请重试"
+                android.util.Log.w("OrivaAlarms", "Plan timing setting update failed", error)
+            } finally { timingSaving = false }
         }
-        locationLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
     }
 
     LaunchedEffect(Unit) {
-        locationRequested = context.planLockPreferences.data.first()[PlanLockPreferenceKeys.locationPermissionRequested] ?: false
+        locationRequested = hasRequestedLocation() || context.planLockPreferences.data.first()[PlanLockPreferenceKeys.locationPermissionRequested] == true
         requestMarkerLoaded = true
-        states = PermissionChecker.check(context)
+        states = readStates()
+        locationRationale = activity?.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_COARSE_LOCATION) == true
     }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) states = PermissionChecker.check(context)
+            if (event == Lifecycle.Event.ON_RESUME) {
+                states = readStates()
+                reminderCanAlert = PlanReminderChannel.canAlert(context)
+                locationRequested = locationRequested || hasRequestedLocation()
+                locationRationale = activity?.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_COARSE_LOCATION) == true
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -103,25 +126,17 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
     val locationState = locationPermissionUiState(
         granted = states[PermissionKind.LOCATION] == true,
         requestedBefore = locationRequested,
-        shouldShowRationale = activity?.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_COARSE_LOCATION) == true,
+        shouldShowRationale = locationRationale,
     )
 
     pendingPermission?.let { kind -> AlertDialog(
         onDismissRequest = { pendingPermission = null },
         title = { Text(kind.title) },
-        text = { Text("${kind.consequence}。${if (kind == PermissionKind.LOCATION && locationState != LocationPermissionUiState.APP_SETTINGS) "将请求系统定位权限" else "将打开系统设置"}；可以取消或返回，未授权时仍可继续使用。") },
+        text = { Text("${kind.consequence}。将打开系统设置；可以取消或返回，未授权时仍可继续使用。") },
         confirmButton = { TextButton(onClick = {
             pendingPermission = null
-            states = PermissionChecker.check(context)
-            if (states[kind] != true) {
-                if (kind != PermissionKind.LOCATION) PermissionIntent.open(context, kind)
-                else when (locationPermissionUiState(false, locationRequested,
-                    activity?.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_COARSE_LOCATION) == true)) {
-                    LocationPermissionUiState.ASK, LocationPermissionUiState.ASK_AGAIN -> requestLocation()
-                    LocationPermissionUiState.APP_SETTINGS -> context.startActivity(PermissionIntent.appDetails(context))
-                    LocationPermissionUiState.ENABLED -> Unit
-                }
-            }
+            states = readStates()
+            if (states[kind] != true) PermissionIntent.open(context, kind)
         }) { Text("继续") } },
         dismissButton = { TextButton(onClick = { pendingPermission = null }) { Text("取消") } },
     ) }
@@ -164,7 +179,10 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
                     kinds.forEachIndexed { index, kind ->
                         if (index > 0) SettingsDivider()
                         val granted = states[kind] == true
+                        val inheritedDnd = kind == PermissionKind.DND && granted &&
+                            com.planlock.app.security.CapabilityAccess(context).dndSource() == com.planlock.app.security.DndAccessSource.NOTIFICATION_LISTENER
                         val status = when {
+                            kind == PermissionKind.NOTIFICATIONS && !reminderCanAlert -> "不会弹出"
                             kind == PermissionKind.LOCATION -> when (locationState) {
                                 LocationPermissionUiState.ENABLED -> "已开启"
                                 LocationPermissionUiState.ASK -> "去开启"
@@ -177,24 +195,50 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
                         val mark = permissionMark(kind)
                         SettingsItem(
                             title = kind.title,
-                            detail = kind.consequence,
+                            detail = when {
+                                kind == PermissionKind.NOTIFICATIONS && !reminderCanAlert -> "提醒不会弹出，点按前往系统设置调整"
+                                inheritedDnd -> "随通知使用权获得；关闭通知使用权后，此来源的勿扰访问也会失效"
+                                else -> kind.consequence
+                            },
                             glyph = mark.glyph,
                             hue = mark.hue,
                             onClick = {
-                                states = PermissionChecker.check(context)
+                                states = readStates()
                                 when {
+                                    kind == PermissionKind.NOTIFICATIONS && states[kind] == true && !PlanReminderChannel.canAlert(context) ->
+                                        runCatching { context.startActivity(PlanReminderChannel.settingsIntent(context)) }
                                     states[kind] == true -> grantedPermission = kind
-                                    kind != PermissionKind.LOCATION || requestMarkerLoaded -> pendingPermission = kind
+                                    kind == PermissionKind.LOCATION && requestMarkerLoaded || kind == PermissionKind.NOTIFICATIONS -> {
+                                        gate.request(if (kind == PermissionKind.LOCATION) Capability.LOCATION else Capability.NOTIFICATIONS) {
+                                            states = readStates()
+                                            locationRequested = locationRequested || hasRequestedLocation()
+                                            locationRationale = activity?.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_COARSE_LOCATION) == true
+                                        }
+                                    }
+                                    kind != PermissionKind.LOCATION -> pendingPermission = kind
                                 }
                             },
                             trailing = {
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    SettingsStateTag(status, granted)
+                                    SettingsStateTag(status, granted && (kind != PermissionKind.NOTIFICATIONS || reminderCanAlert))
                                     SettingsChevron()
                                 }
                             },
                         )
                     }
+                }
+            }
+            item {
+                SettingsGroup {
+                    SettingsSwitchItem("准时开始",
+                        if (punctualStart != false) "用系统闹钟通道让计划准点开始；部分手机还需在系统里允许后台运行"
+                        else "部分手机可能推迟提醒与开始",
+                        checked = punctualStart != false, enabled = punctualStart != null && !timingSaving,
+                    ) { enabled ->
+                        if (enabled) gate.request(Capability.EXACT_ALARM) { updateTiming(true) }
+                        else updateTiming(false)
+                    }
+                    timingError?.let { Text(it, Modifier.padding(horizontal = 14.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.error) }
                 }
             }
         }

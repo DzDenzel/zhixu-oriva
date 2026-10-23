@@ -156,7 +156,7 @@ fun PluginSettingsScreen(
                 }
             }
             item {
-                Text("已安装插件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, color = com.planlock.design.InkTone.text)
+                Text("已安装插件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = com.planlock.design.InkTone.text)
             }
             if (snapshot.installed.isEmpty()) {
                 item { UIStatePanel(UiState.EMPTY, "暂无已安装插件", emptySubject = "插件") }
@@ -191,7 +191,7 @@ private fun InstalledPluginCard(
     PluginCard(Modifier.clickable(onClick = onOpen)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Column(Modifier.weight(1f)) {
-                Text(record.manifest.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(record.manifest.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text("${record.manifest.version} · ${pluginSourceLabel(record.manifest.sourceType)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Switch(checked = record.enabled, enabled = !suspendedBySafeMode, onCheckedChange = { onAction(InstalledAction.TOGGLE) })
@@ -311,7 +311,7 @@ private fun CatalogPluginCard(
     onInstall: () -> Unit,
 ) {
     PluginCard {
-        Text(item.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(item.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(item.version, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(pluginSourceLabel(sourceType), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(presentation.statusLabel, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
@@ -332,7 +332,7 @@ private fun RepositoryRow(title: String, summary: String, onClick: () -> Unit) {
     PluginCard(Modifier.clickable(onClick = onClick)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(summary, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "进入")

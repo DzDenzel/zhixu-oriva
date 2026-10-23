@@ -101,6 +101,13 @@ class MockApi : PlanLockApi {
     override suspend fun stats(period: String): ApiResponse<StatsResponse> =
         ApiResponse(0, "ok", StatsResponse(period = period))
 
+    override suspend fun rhythm(days: Int, timeZone: String) = ApiResponse(data = com.planlock.app.api.dto.RhythmSummary(
+        "还没有执行记录，开始一个计划后这里会出现你的节奏。", 0, com.planlock.app.api.dto.Ratio(), com.planlock.app.api.dto.Ratio(),
+        0, 0, 0, 0, emptyList(), emptyList()))
+
+    override suspend fun recordHistory(executionAfterId: Long, unlockAfterId: Long, limit: Int, behaviorAfterId: Long) =
+        ApiResponse(data = com.planlock.app.api.dto.RecordHistoryPage(executionCursor = executionAfterId, unlockCursor = unlockAfterId, behaviorCursor = behaviorAfterId))
+
     override suspend fun exportRecords(format: String): ResponseBody =
         (if (format == "csv") "date,completed,violations\n" else "[]").toResponseBody()
 

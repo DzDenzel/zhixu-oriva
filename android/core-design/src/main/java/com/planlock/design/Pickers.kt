@@ -243,9 +243,11 @@ fun RepeatRuleSelector(preset: RepeatPreset, weekdays: Set<Int>, onPreset: (Repe
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         ChoiceChips(RepeatPreset.entries.map { it to it.label }, preset, onPreset)
         if (preset == RepeatPreset.CUSTOM) {
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // v4.6（真机）：七天排一行等宽
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 listOf("一", "二", "三", "四", "五", "六", "日").forEachIndexed { index, label ->
-                    FilterChip(modifier = Modifier.heightIn(min = 48.dp), selected = index + 1 in weekdays, onClick = { onWeekday(index + 1) }, label = { Text(label) }, colors = chipColors)
+                    FilterChip(modifier = Modifier.weight(1f).heightIn(min = 48.dp), selected = index + 1 in weekdays, onClick = { onWeekday(index + 1) },
+                        label = { EqualChipLabel(label) }, colors = chipColors)
                 }
             }
         }

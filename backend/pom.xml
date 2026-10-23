@@ -13,7 +13,7 @@
 
     <groupId>com.planlock</groupId>
     <artifactId>planlock-backend</artifactId>
-    <version>2.1.0</version>
+    <version>2.1.1</version>
     <packaging>pom</packaging>
     <name>planlock-backend</name>
     <description>律刻 PlanLock Backend（V1.0，Maven 多模块）</description>

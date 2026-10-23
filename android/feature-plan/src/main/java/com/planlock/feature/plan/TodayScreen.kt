@@ -17,6 +17,10 @@ import com.planlock.design.color
 import com.planlock.design.InkHue
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.layout.layout
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.Today
 import com.planlock.design.LocalReducedMotion
 import com.planlock.design.InkRoundAction
 import com.planlock.design.DayRibbon
@@ -121,6 +125,9 @@ import java.util.Calendar
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.compose.animation.togetherWith
+import com.planlock.design.inkPressClick
+import com.planlock.design.inkPressScale
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -138,10 +145,12 @@ fun TodayScreen(
     val actionGate = remember { PlanActionGate(store, api, BackupPasswordStore(context.planLockPreferences), context.planLockPreferences, sync = AppSync.get(context)) }
     val syncClient = remember { AppSync.get(context) }
     val syncState by syncClient.coordinator.state.collectAsState()
+    val authState by com.planlock.app.api.TokenStore.state.collectAsState()
     val scope = rememberCoroutineScope()
     val clock = rememberPlanClock()
     val observedLocalKey = TodayLocalKey(
-        userId = com.planlock.app.api.TokenStore.userId,
+        userId = authState.localDataUserId,
+        scope = authState.dataScope,
         dateKey = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(clock.time),
     )
     val currentLocalKey = if (observedLocalKey == localKey) localKey else observedLocalKey
@@ -241,9 +250,7 @@ fun TodayScreen(
         },
         onDelete = editingSchedule?.let { old -> {
             scope.launch {
-                store.enqueueScheduleDelete(old.id)
-                reminderScheduler.cancel(old.id)
-                runCatching { syncClient.pushPendingRecords() }
+                deleteSchedule(store, reminderScheduler, syncClient, old)
                 showScheduleEditor = false
             }
         } },
@@ -324,6 +331,11 @@ fun TodayScreen(
         }
     }
 }
+
+/**
+ * 今日页的入场时钟键（v4.6）：首帧（开屏下）与完整今日页共用，日晷「转圈」与各块落笔只播一次、换树不重播不闪。
+ */
+private const val TODAY_INTRO = "today"
 
 /** Cheap display-only projection used under the final splash fade. */
 @Composable
@@ -449,7 +461,7 @@ private fun TodayOverviewContent(
             // 表盘是一块整体图形：直径随可用宽度收缩（上限 280dp），盘内文字随盘缩放、不随系统字号放大，
             // 避免窄屏 / 大字体下中心时间撞上刻度数字。
             androidx.compose.foundation.layout.BoxWithConstraints(
-                Modifier.fillMaxWidth().padding(top = 10.dp).inkReveal(1), contentAlignment = Alignment.Center,
+                Modifier.fillMaxWidth().padding(top = 10.dp).inkReveal(1, introKey = TODAY_INTRO, introLeadMs = com.planlock.design.TODAY_INTRO_LEAD_MS), contentAlignment = Alignment.Center,
             ) {
                 val dial = minOf(280.dp, maxWidth)
                 val k = dial / 280.dp
@@ -458,6 +470,7 @@ private fun TodayOverviewContent(
                 // BUG-102：全天日程不画 24 小时弧段，只在内圈画一道细环
                 val layers = todayDialLayers(entries)
                 SundialDial(
+                    introKey = TODAY_INTRO, introLeadMs = com.planlock.design.TODAY_INTRO_LEAD_MS,
                     arcs = layers.arcs.map { entry ->
                         DialArc(entry.startMin.coerceAtLeast(0), entry.endMin.coerceAtMost(1440), entryHue(entry, typeOf(entry)).color(),
                             emphasized = entry.isRunningNow)
@@ -478,8 +491,9 @@ private fun TodayOverviewContent(
                             Text(model.selectedKey.takeLast(5).replace('-', '.'),
                                 style = V2Tokens.numeralLarge.themed().copy(fontSize = dialSp(38f), lineHeight = dialSp(44f)), color = InkTone.text)
                         }
-                        if (entries.isNotEmpty()) Text("${entries.size} 项安排",
-                            style = InkText.meta.copy(fontSize = dialSp(12f), lineHeight = dialSp(16f)), color = InkTone.soft)
+                        // v4.3（审查 U7g）：没有安排时盘内直接说一句，而不是只留空盘
+                        Text(if (entries.isNotEmpty()) "${entries.size} 项安排" else if (isToday) "今日无事" else "这天无事",
+                            style = InkText.caption.copy(fontSize = dialSp(12f), lineHeight = dialSp(16f)), color = InkTone.soft)
                     }
                 }
             }
@@ -490,8 +504,12 @@ private fun TodayOverviewContent(
         item {
             Column {
                 if (!isToday) {
-                    TextButton(onClick = actions.onBackToday, contentPadding = PaddingValues(horizontal = 0.dp)) {
-                        Text("← 回到今天", color = InkTone.vermilion, style = MaterialTheme.typography.labelLarge)
+                    // v4.3（审查 U7d）：图标 + 文字，不再用「←」字符当图标
+                    TextButton(onClick = actions.onBackToday, modifier = Modifier.heightIn(min = 48.dp),
+                        contentPadding = PaddingValues(start = 0.dp, end = 12.dp)) {
+                        Icon(androidx.compose.material.icons.Icons.Filled.Today, null, tint = InkTone.vermilion, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("回到今天", color = InkTone.vermilion, style = MaterialTheme.typography.labelLarge)
                     }
                 }
                 model.active?.let { plan -> NowStrip(plan, model.nowMinutes) { actions.onPause(plan) } }
@@ -500,7 +518,7 @@ private fun TodayOverviewContent(
         if (entries.isNotEmpty()) {
             item { Spacer(Modifier.height(12.dp)) }
             itemsIndexed(entries, key = { _, entry -> "entry-${entry.kind}-${entry.id}-${entry.startMin}" }) { index, entry ->
-                TimelineRow(entry, entryHue(entry, typeOf(entry)), Modifier.inkReveal(3 + index)) {
+                TimelineRow(entry, entryHue(entry, typeOf(entry)), todayRowKind(entry, typeOf(entry)), Modifier.inkReveal(3 + index, introKey = TODAY_INTRO, introLeadMs = com.planlock.design.TODAY_INTRO_LEAD_MS)) {
                     if (entry.kind == TimelineKind.PLAN) actions.onOpenPlan(entry.id) else actions.onOpenSchedule(entry.id)
                 }
             }
@@ -512,8 +530,8 @@ private fun TodayOverviewContent(
                         "连续 ${model.streak} 天".takeIf { model.streak > 0 },
                         "违规 ${model.violations}".takeIf { model.violations > 0 },
                         "解锁 ${model.unlocks}".takeIf { model.unlocks > 0 },
-                    ).joinToString("  ·  "),
-                    style = InkText.meta, color = InkTone.faint,
+                    ).joinToString("　"),
+                    style = InkText.caption, color = InkTone.soft,
                     modifier = Modifier.fillMaxWidth().padding(top = 22.dp),
                 )
             }
@@ -534,9 +552,9 @@ private fun greeting(clock: Calendar): String = when (clock.get(Calendar.HOUR_OF
 
 @Composable
 private fun TodayHeader(clock: Calendar, syncStatus: @Composable () -> Unit, onCreate: () -> Unit) {
-    Row(Modifier.fillMaxWidth().inkReveal(0), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().inkReveal(0, introKey = TODAY_INTRO, introLeadMs = com.planlock.design.TODAY_INTRO_LEAD_MS), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            com.planlock.design.FitText(formatCurrentDate(clock), InkText.meta, InkTone.faint)
+            com.planlock.design.FitText(formatCurrentDate(clock), InkText.caption, InkTone.soft)
             Text(greeting(clock), style = InkText.masthead, color = InkTone.text)
         }
         syncStatus()
@@ -558,19 +576,30 @@ private fun AssistantBrief(
     // BUG-102：优先级见 todayBriefLine（全天日程永不作为「正在进行」）
     val line = todayBriefLine(entries, isToday)
     Row(
-        Modifier.fillMaxWidth().padding(top = 16.dp).inkReveal(1)
+        Modifier.fillMaxWidth().padding(top = 16.dp).inkReveal(1, introKey = TODAY_INTRO, introLeadMs = com.planlock.design.TODAY_INTRO_LEAD_MS)
             .clip(RoundedCornerShape(18.dp)).background(InkTone.raised)
             .clickable(onClick = onAsk)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AssistantMark(markSize = 28.dp)
-        Text(line ?: "和${AssistantIdentity.NAME}说说今天", style = MaterialTheme.typography.bodyMedium,
-            color = if (line != null) InkTone.text else InkTone.faint,
-            modifier = Modifier.weight(1f).padding(horizontal = 10.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
+        // 简报换句（如一项安排开始 / 结束）时淡出淡入，让变化可见；减弱动画时直接切换
+        val reduced = com.planlock.design.LocalReducedMotion.current
+        androidx.compose.animation.AnimatedContent(
+            targetState = line,
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+            transitionSpec = {
+                if (reduced) androidx.compose.animation.EnterTransition.None togetherWith androidx.compose.animation.ExitTransition.None
+                else androidx.compose.animation.fadeIn(tween(240, delayMillis = 80)) togetherWith androidx.compose.animation.fadeOut(tween(120))
+            },
+            label = "brief-line",
+        ) { text ->
+            Text(text ?: "和${AssistantIdentity.NAME}说说今天", style = MaterialTheme.typography.bodyMedium,
+                color = if (text != null) InkTone.text else InkTone.faint, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
         weather?.let { snapshot ->
             Text("${weatherLabel(snapshot.weatherCode)} ${"%.0f".format(Locale.US, snapshot.temperatureC)}°",
-                style = InkText.meta, color = InkTone.soft,
+                style = InkText.caption, color = InkTone.soft,
                 modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onWeatherInfo).padding(4.dp))
         }
     }
@@ -598,20 +627,34 @@ private fun WeekIndicator(todayKey: String, selectedKey: String, plans: List<Pla
         }
     }
     val accent = InkTone.vermilion
-    Row(Modifier.fillMaxWidth().padding(top = 14.dp).inkReveal(1), horizontalArrangement = Arrangement.SpaceBetween) {
+    // v4.3（审查 U7f）：七格等分整行，并向两侧各借 14dp 页边距——日期格的可点区域在 360dp 屏上 ≥ 48dp
+    //（320dp 窄屏约 43dp，为七格同排的上限）；每格高度 ≥ 56dp。
+    Row(Modifier.fillMaxWidth().padding(top = 14.dp).inkReveal(1, introKey = TODAY_INTRO, introLeadMs = com.planlock.design.TODAY_INTRO_LEAD_MS).layout { measurable, constraints ->
+            val extra = 14.dp.roundToPx()
+            val width = constraints.maxWidth + extra * 2
+            val placeable = measurable.measure(constraints.copy(minWidth = width, maxWidth = width))
+            layout(constraints.maxWidth, placeable.height) { placeable.place(-extra, 0) }
+        }) {
         days.forEach { day ->
             val selected = day.dateKey == selectedKey
             val isToday = day.dateKey == todayKey
             val bg by animateColorAsState(if (selected) InkTone.inverse else androidx.compose.ui.graphics.Color.Transparent,
                 tween(240, easing = Ink.Easing), label = "week-day")
             Column(
-                Modifier.width(40.dp).clip(RoundedCornerShape(20.dp)).clickable { onSelect(day.dateKey) }.padding(vertical = 4.dp),
+                Modifier.weight(1f).heightIn(min = 56.dp).clip(RoundedCornerShape(20.dp))
+                    .clickable(onClickLabel = "查看这一天") { onSelect(day.dateKey) }
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "周${day.label} ${day.dayOfMonth} 日" + (if (isToday) "，今天" else "") +
+                            (if (day.count > 0) "，${day.count} 项安排" else "，无安排")
+                        this.selected = day.dateKey == selectedKey
+                    }
+                    .padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(day.label, style = InkText.meta.copy(fontSize = 10.sp), color = if (isToday) accent else InkTone.faint)
+                Text(day.label, style = InkText.caption.copy(fontSize = 11.sp), color = if (isToday) accent else InkTone.soft)
                 Box(Modifier.padding(top = 4.dp).size(32.dp).clip(androidx.compose.foundation.shape.CircleShape).background(bg),
                     contentAlignment = Alignment.Center) {
-                    Text("${day.dayOfMonth}", fontFamily = InkTone.display, fontWeight = FontWeight.Bold, fontSize = 15.sp,
+                    Text("${day.dayOfMonth}", fontFamily = InkTone.display, fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
                         color = when { selected -> InkTone.onInverse; isToday -> accent; else -> InkTone.text })
                 }
                 Box(Modifier.padding(top = 4.dp).size(4.dp).clip(androidx.compose.foundation.shape.CircleShape)
@@ -655,7 +698,11 @@ private fun WeatherInfoDialog(snapshot: WeatherSnapshot, fromCache: Boolean, onD
     )
 }
 
-/** 此刻：一行名称、衬线倒计时、一根朱色细线；「结束」是文字动作。 */
+/**
+ * 此刻：一行名称、衬线倒计时、一根朱色细线；「结束」是文字动作。
+ * v4.6（真机宽度 360dp）：「结束」移到卡片右上角——原来在右下角，正好落在右下「+」悬浮按钮下面被挡住一半；
+ * 起止时间移到名称同一行右端，右下角只留倒计时与进度线，悬浮按钮压上去也不挡操作。
+ */
 @Composable
 private fun NowStrip(plan: PlanSnapshotEntity, nowMinutes: Int, onPause: () -> Unit) {
     val remaining = PlanTime.remainingMinutes(plan, nowMinutes)
@@ -664,23 +711,22 @@ private fun NowStrip(plan: PlanSnapshotEntity, nowMinutes: Int, onPause: () -> U
     val grow by androidx.compose.animation.core.animateFloatAsState(progress,
         if (reduced) androidx.compose.animation.core.snap() else tween(800, easing = Ink.Easing), label = "now-progress")
     Column(Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(20.dp)).background(InkTone.vermilion.inkTint())
-        .padding(horizontal = 18.dp, vertical = 14.dp)) {
+        .padding(start = 18.dp, end = 6.dp, top = 4.dp, bottom = 14.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             InkPulseDot(InkTone.vermilion, dotSize = 6.dp)
-            Text(" 正在进行", style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = InkTone.vermilion)
+            Text(" 正在进行", style = InkText.caption.copy(fontWeight = FontWeight.SemiBold), color = InkTone.vermilion)
             Spacer(Modifier.weight(1f))
-            Text("${PlanTime.format(plan.startTime)} — ${PlanTime.format(plan.endTime)}", style = InkText.meta, color = InkTone.faint)
-        }
-        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.Bottom) {
-            Column(Modifier.weight(1f)) {
-                Text(plan.name, style = MaterialTheme.typography.titleMedium, color = InkTone.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("%02d:%02d".format(remaining / 60, remaining % 60), style = V2Tokens.numeralHero.themed().copy(fontSize = 48.sp, lineHeight = 54.sp), color = InkTone.text)
-            }
-            TextButton(onClick = onPause, modifier = Modifier.semantics { contentDescription = "提前结束计划" }) {
+            TextButton(onClick = onPause, modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "提前结束计划" }) {
                 Text("结束", color = InkTone.vermilion, style = MaterialTheme.typography.labelLarge)
             }
         }
-        Box(Modifier.fillMaxWidth().padding(top = 6.dp).height(2.dp).background(InkTone.hairline)) {
+        Row(Modifier.padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(plan.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, color = InkTone.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("${PlanTime.format(plan.startTime)} — ${PlanTime.format(plan.endTime)}", style = InkText.meta, color = InkTone.soft,
+                modifier = Modifier.padding(start = 8.dp), maxLines = 1)
+        }
+        Text("%02d:%02d".format(remaining / 60, remaining % 60), style = V2Tokens.numeralHero.themed().copy(fontSize = 48.sp, lineHeight = 54.sp), color = InkTone.text)
+        Box(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp).height(2.dp).background(InkTone.hairline)) {
             Box(Modifier.fillMaxWidth(grow).height(2.dp).background(InkTone.vermilion))
         }
     }
@@ -695,31 +741,40 @@ private fun entryHue(entry: TimelineEntry, type: String?): InkHue.Hue = when {
 
 /** 时间卡：类别色淡底 + 左侧色条；已结束的一项退成淡纸色。 */
 @Composable
-private fun TimelineRow(entry: TimelineEntry, hue: InkHue.Hue, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun TimelineRow(entry: TimelineEntry, hue: InkHue.Hue, kind: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    // v4.3（审查 U7a/b 方案 B）：无左色条；进行中 = 时刻前呼吸点；状态在最右；元信息「类型 粗 + 来源 软」
     val running = entry.isRunningNow
     val ended = entry.state == TimelineState.ENDED || entry.state == TimelineState.PAUSED
     val color = hue.color()
+    val press = com.planlock.design.rememberInkPress()
     Row(
-        modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(16.dp))
+        modifier.fillMaxWidth().padding(vertical = 4.dp).then(Modifier.inkPressScale(press)).clip(RoundedCornerShape(16.dp))
             .background(if (ended) InkTone.sunk.copy(alpha = .6f) else hue.tint())
-            .clickable(onClick = onClick)
+            .then(Modifier.inkPressClick(press, onClick = onClick))
             .height(androidx.compose.foundation.layout.IntrinsicSize.Min),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.width(4.dp).fillMaxHeight().background(if (ended) InkTone.hairline else color))
-        Column(Modifier.padding(start = 12.dp, end = 10.dp, top = 13.dp, bottom = 13.dp).widthIn(min = 42.dp)) {
-            Text(if (entry.sourceLabel == "全天日程") "全天" else "%02d:%02d".format(Locale.US, (entry.startMin / 60) % 24, entry.startMin % 60),
-                style = InkText.meta.copy(fontWeight = FontWeight.Bold), color = if (ended) InkTone.faint else color)
-            if (entry.sourceLabel != "全天日程") Text("%02d:%02d".format(Locale.US, (entry.endMin / 60) % 24, entry.endMin % 60),
-                style = InkText.meta.copy(fontSize = 10.sp), color = InkTone.faint)
+        Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 13.dp, bottom = 13.dp).widthIn(min = 42.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (running) { InkPulseDot(color, dotSize = 7.dp); Spacer(Modifier.width(6.dp)) }
+                Text(if (entry.isAllDay) "全天" else "%02d:%02d".format(Locale.US, (entry.startMin / 60) % 24, entry.startMin % 60),
+                    style = InkText.caption.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold), color = if (ended) InkTone.soft else color)
+            }
+            if (!entry.isAllDay) Text("%02d:%02d".format(Locale.US, (entry.endMin / 60) % 24, entry.endMin % 60),
+                style = InkText.caption.copy(fontSize = 11.sp), color = InkTone.soft)
         }
-        Column(Modifier.weight(1f).padding(vertical = 11.dp)) {
-            Text(entry.title, style = MaterialTheme.typography.titleMedium, color = if (ended) InkTone.faint else InkTone.text,
+        Column(Modifier.weight(1f).padding(vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(entry.title, style = MaterialTheme.typography.titleMedium, color = if (ended) InkTone.soft else InkTone.text,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(todayRowStatus(entry),
-                style = InkText.meta.copy(fontSize = 11.sp), color = if (ended) InkTone.faint else color, maxLines = 1)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(kind, style = InkText.caption.copy(fontWeight = FontWeight.SemiBold), color = if (ended) InkTone.soft else color, maxLines = 1)
+                if (entry.kind == TimelineKind.PLAN && kind != "计划") Text("计划", style = InkText.caption, color = InkTone.soft, maxLines = 1)
+            }
         }
-        if (running) Box(Modifier.padding(end = 14.dp)) { InkPulseDot(color, dotSize = 6.dp) }
+        val state = todayRowStateLabel(entry)
+        if (state != null) Text(state, modifier = Modifier.padding(start = 6.dp, end = 14.dp),
+            style = InkText.caption.copy(fontWeight = if (running) FontWeight.SemiBold else FontWeight.Normal),
+            color = if (running) color else InkTone.soft, maxLines = 1)
         else Spacer(Modifier.width(14.dp))
     }
 }
@@ -733,7 +788,7 @@ internal fun PlanSnapshotEntity.toCardData(state: PlanVisualState? = null) = Pla
     type = type,
     timeText = "${PlanTime.format(startTime)} 至 ${PlanTime.format(endTime)}",
     repeatText = repeatLabel(repeatRule),
-    state = state ?: if (status == 1) PlanVisualState.UPCOMING else PlanVisualState.PAUSED,
+    state = state ?: visualState(Calendar.getInstance()),
 )
 
 internal fun repeatLabel(raw: String?): String = when {

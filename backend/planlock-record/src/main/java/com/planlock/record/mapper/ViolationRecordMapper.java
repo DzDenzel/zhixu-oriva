@@ -16,6 +16,11 @@ import java.util.List;
 @Mapper
 public interface ViolationRecordMapper {
 
+    @Select("SELECT v.* FROM violation_records v JOIN plans p ON v.plan_id = p.id "
+            + "WHERE p.user_id = #{userId} AND v.id > #{afterId} ORDER BY v.id LIMIT #{limit}")
+    List<ViolationRecord> findHistoryAfter(@Param("userId") Long userId,
+                                         @Param("afterId") long afterId, @Param("limit") int limit);
+
     @Insert("INSERT INTO violation_records(plan_id, device_id, record_at, app_name, package_name, "
             + "started_at, ended_at, duration_ms, source_level, client_id) "
             + "VALUES(#{planId}, #{deviceId}, #{recordAt}, #{appName}, #{packageName}, "

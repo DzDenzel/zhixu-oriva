@@ -26,9 +26,9 @@ class LoginAttemptGuardTest {
         guard.complete(newer)
         assertFalse(guard.submitting.value)
     }
-    @Test fun workspaceOwnerSurvivesLogoutAndOtherAccountAuthentication() {
-        assertEquals(42L, AuthState(signedOut = true, dataOwner = 42).localDataUserId)
-        assertEquals(42L, AuthState(AuthSession("account-b", 99, 9, signedIn = true), dataOwner = 42).localDataUserId)
+    @Test fun currentScopeUsesGuestAfterLogoutAndNewAccountAfterAuthentication() {
+        assertNull(AuthState(signedOut = true, dataOwner = 42).localDataUserId)
+        assertEquals(99L, AuthState(AuthSession("account-b", 99, 9, signedIn = true), dataOwner = 42).localDataUserId)
         assertEquals(7L, AuthState(AuthSession("guest", 7, 8)).localDataUserId)
     }
     @Test fun cancelExitAndNewAttemptInvalidateLateLoginResponse() {

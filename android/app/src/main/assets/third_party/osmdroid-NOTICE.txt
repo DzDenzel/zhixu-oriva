@@ -1,0 +1,8 @@
+osmdroid 6.1.20
+Source: https://github.com/osmdroid/osmdroid
+License: Apache License 2.0 (see osmdroid-LICENSE.txt)
+
+Default map data: Copyright OpenStreetMap contributors
+https://www.openstreetmap.org/copyright
+Tile service: https://tile.openstreetmap.org/
+Tile usage policy: https://operations.osmfoundation.org/policies/tiles/

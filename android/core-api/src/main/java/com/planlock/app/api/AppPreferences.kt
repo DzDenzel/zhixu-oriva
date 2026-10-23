@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.SharedPreferencesMigration
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -28,6 +29,7 @@ object PlanLockPreferenceKeys {
     val permissionGuideDismissedAt = longPreferencesKey("perm_guide_dismissed_at")
     val notificationPermissionRequested = booleanPreferencesKey("notification_permission_requested")
     val locationPermissionRequested = booleanPreferencesKey("location_permission_requested")
+    val punctualPlanStart = booleanPreferencesKey("punctual_plan_start")
 }
 
 // 全进程共用一份实例，主题迁移和身份更新不会相互覆盖。
@@ -68,12 +70,30 @@ object TokenStore {
     private val guestKey = longPreferencesKey("guest_user_id")
     private val signedInKey = booleanPreferencesKey("signed_in")
     private val signedOutKey = booleanPreferencesKey("auth_signed_out")
+    private val everSignedInKey = booleanPreferencesKey("auth_ever_signed_in")
     private val dataOwnerKey = longPreferencesKey("auth_data_owner")
     private val dataOwnerInstanceKey = stringPreferencesKey("auth_data_owner_instance")
+    // Room 7 rows have no instance column. Freeze their provenance before any new login.
+    val legacyOwnerInstanceKey = stringPreferencesKey("auth_legacy_owner_instance_v8")
+    private val legacyOwnerUserKey = longPreferencesKey("auth_legacy_owner_user_v8")
+    private val legacyOwnerCapturedKey = booleanPreferencesKey("auth_legacy_owner_captured_v8")
+
+    private fun captureLegacyOwner(p: MutablePreferences) {
+        if (p[legacyOwnerCapturedKey] == true) return
+        p[legacyOwnerInstanceKey] = p[dataOwnerInstanceKey] ?: ConnectionConfig.legacyInstanceId
+        (p[dataOwnerKey] ?: p[userKey])?.let { p[legacyOwnerUserKey] = it }
+        p[legacyOwnerCapturedKey] = true
+    }
+
+    fun legacyOwnerScope(p: Preferences): String? = p[legacyOwnerUserKey]?.let { owner ->
+        p[legacyOwnerInstanceKey]?.let { instance -> "$instance\n$owner" }
+    }
 
     suspend fun restore(store: DataStore<Preferences>): AuthValidity = lock.withLock {
         ConnectionStore.restore(store)
-        val p = store.data.first()
+        val savedPreferences = store.data.first()
+        val p = if (savedPreferences[legacyOwnerCapturedKey] == true) savedPreferences
+            else store.edit { captureLegacyOwner(it) }
         val saved = AuthSession(p[tokenKey], p[userKey], p[deviceKey], p[guestKey], p[signedInKey] ?: false)
         synchronized(stateLock) {
             val previous = state.value
@@ -87,7 +107,8 @@ object TokenStore {
             mutableState.value = AuthState(restored, validity, p[signedOutKey] ?: false,
                 p[dataOwnerKey] ?: saved.userId,
                 instanceId = ConnectionStore.state.value.instanceId,
-                dataOwnerInstance = p[dataOwnerInstanceKey] ?: saved.userId?.let { ConnectionConfig.default.instanceId })
+                dataOwnerInstance = p[dataOwnerInstanceKey] ?: saved.userId?.let { ConnectionConfig.legacyInstanceId },
+                hasSignedInBefore = p[everSignedInKey] ?: saved.signedIn)
             validity
         }
     }
@@ -98,32 +119,30 @@ object TokenStore {
         check(expectedConnection == ConnectionStore.state.value && expectedConnection.config != null) { "连接已改变，请重新登录" }
         val instance = checkNotNull(expectedConnection.instanceId)
         val committed = store.edit { p ->
-            val oldInstance = p[dataOwnerInstanceKey] ?: p[userKey]?.let { ConnectionConfig.default.instanceId }
-            check(oldInstance == null || oldInstance == instance) { "本机数据属于原实例，请连接原实例恢复同步" }
-            val retainedOwner = p[dataOwnerKey] ?: p[userKey]
-            val owner = if (value.signedIn && value.guestUserId != null && retainedOwner == value.guestUserId) {
-                value.userId // Existing backend-confirmed guest merge, within this instance only.
-            } else retainedOwner ?: value.userId
+            captureLegacyOwner(p)
             p[tokenKey] = checkNotNull(value.token)
             p[userKey] = checkNotNull(value.userId)
             p[deviceKey] = checkNotNull(value.deviceId)
             value.guestUserId?.let { p[guestKey] = it } ?: p.remove(guestKey)
             p[signedInKey] = value.signedIn
             p[signedOutKey] = false
-            owner?.let { p[dataOwnerKey] = it }
-            p[dataOwnerInstanceKey] = oldInstance ?: instance
+            p[dataOwnerKey] = checkNotNull(value.userId)
+            p[dataOwnerInstanceKey] = instance
+            if (value.signedIn) p[everSignedInKey] = true
         }
         // 成功落盘后一次性发布，避免请求看到半份身份或虚假的登录成功。
         synchronized(stateLock) {
             mutableState.value = AuthState(value,
                 if (jwtExpiredLocally(value.token, System.currentTimeMillis() / 1000)) AuthValidity.EXPIRED_LOCAL else AuthValidity.UNKNOWN,
-                dataOwner = committed[dataOwnerKey], instanceId = instance, dataOwnerInstance = committed[dataOwnerInstanceKey])
+                dataOwner = committed[dataOwnerKey], instanceId = instance, dataOwnerInstance = committed[dataOwnerInstanceKey],
+                hasSignedInBefore = committed[everSignedInKey] ?: false)
         }
     }
 
     /** Remove credentials only; keep local data and its account boundary through cold starts. */
     suspend fun signOut(store: DataStore<Preferences>) = lock.withLock {
         val committed = store.edit { p ->
+            captureLegacyOwner(p)
             val owner = p[dataOwnerKey] ?: p[userKey].takeIf { p[signedInKey] == true }
             owner?.let { p[dataOwnerKey] = it }
             state.value.dataOwnerInstance?.let { p[dataOwnerInstanceKey] = it }
@@ -133,7 +152,8 @@ object TokenStore {
         synchronized(stateLock) {
             mutableState.value = AuthState(AuthSession(guestUserId = committed[guestKey]),
                 signedOut = true, dataOwner = committed[dataOwnerKey], instanceId = ConnectionStore.state.value.instanceId,
-                dataOwnerInstance = committed[dataOwnerInstanceKey] ?: state.value.dataOwnerInstance)
+                dataOwnerInstance = committed[dataOwnerInstanceKey] ?: state.value.dataOwnerInstance,
+                hasSignedInBefore = committed[everSignedInKey] ?: state.value.hasSignedInBefore)
         }
     }
 
@@ -143,6 +163,7 @@ object TokenStore {
         val previous = ConnectionStore.state.value
         val switched = previous.instanceId != config?.instanceId
         val committed = store.edit { p ->
+            captureLegacyOwner(p)
             if (switched) {
                 val owner = p[dataOwnerKey] ?: p[userKey]
                 val mustLogin = p[signedOutKey] == true || p[signedInKey] == true
@@ -158,7 +179,8 @@ object TokenStore {
         }
         synchronized(stateLock) {
             if (switched) mutableState.value = AuthState(signedOut = committed[signedOutKey] ?: false, dataOwner = committed[dataOwnerKey],
-                instanceId = config?.instanceId, dataOwnerInstance = committed[dataOwnerInstanceKey])
+                instanceId = config?.instanceId, dataOwnerInstance = committed[dataOwnerInstanceKey],
+                hasSignedInBefore = committed[everSignedInKey] ?: state.value.hasSignedInBefore)
             ConnectionStore.publish(config)
         }
     }

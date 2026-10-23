@@ -286,7 +286,9 @@ private fun Modifier.bauhausBackdrop(p: InkPalette): Modifier = drawWithCache {
     onDrawBehind {
         drawRect(p.ground)
         drawCircle(red.copy(alpha = .14f), w * .44f, Offset(w * .96f, h * .09f))
-        drawRect(blue.copy(alpha = .13f), Offset(-w * .04f, h * .56f), Size(w * .44f, h * .065f))
+        // v4.3（审查 U7c）：原为 13% 透明度的宽蓝块，在奶白底上读成一块灰色矩形压在列表后面；
+        // 改成贴左缘的一道窄而饱和的蓝条，像构成里的一笔色块，而不是渲染残留。
+        drawRect(blue.copy(alpha = .55f), Offset(0f, h * .56f), Size(minOf(w * .025f, 10f * unit), h * .11f))
         drawPath(tri, yellow.copy(alpha = .22f))
         drawArc(black.copy(alpha = .12f), 270f, 90f, false, Offset(-w * .32f, h * .80f), Size(w * .64f, w * .64f), style = Stroke(3f * unit))
         drawLine(black.copy(alpha = .09f), Offset(w * .08f, 0f), Offset(w * .08f, h), 1.5f * unit)
@@ -395,7 +397,7 @@ private fun ThemePreview(style: ThemeStyle, dark: Boolean) {
     CompositionLocalProvider(LocalInkPalette provides p, LocalDarkTheme provides p.isDark) {
         Box(Modifier.fillMaxWidth().aspectRatio(1.25f).themeBackdrop(style).padding(12.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("早上好", color = p.text, fontFamily = p.display, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text("早上好", color = p.text, fontFamily = p.display, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(p.raised.copy(alpha = .92f)),
                     verticalAlignment = Alignment.CenterVertically,
@@ -403,8 +405,8 @@ private fun ThemePreview(style: ThemeStyle, dark: Boolean) {
                     Box(Modifier.width(3.dp).height(30.dp).background(p.accent))
                     Spacer(Modifier.width(8.dp))
                     Column {
-                        Text("06:00", color = p.accent, fontFamily = p.meta, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        Text("晨读", color = p.text, fontFamily = p.display, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("06:00", color = p.accent, fontFamily = p.meta, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                        Text("晨读", color = p.text, fontFamily = p.display, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {

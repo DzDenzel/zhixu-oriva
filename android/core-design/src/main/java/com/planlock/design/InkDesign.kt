@@ -146,15 +146,27 @@ object InkTone {
     /** 当前主题的标题 / 数字字体与元信息字体。 */
     val display: FontFamily @Composable get() = LocalInkPalette.current.display
     val metaFont: FontFamily @Composable get() = LocalInkPalette.current.meta
+    /** 正文字体（墨序 / 构成 = 无衬线；荧屏 = 等宽）。 */
+    val bodyFont: FontFamily @Composable get() = LocalInkPalette.current.body ?: FontFamily.Default
 }
 
 /** 文字样式随主题换字体（墨序 = 宋体系衬线 + 等宽；构成 = 无衬线；荧屏 = 全等宽）。 */
 object InkText {
-    val eyebrow: TextStyle @Composable get() = TextStyle(fontFamily = InkTone.metaFont, fontSize = 11.sp, lineHeight = 14.sp,
-        letterSpacing = 1.6.sp, fontWeight = FontWeight.Medium)
+    /**
+     * 小标签（「开始」「结束」等）。v4.4：改用正文字体、去掉 1.6sp 字距——等宽字体没有中文字形，真机上会换成别的字体
+     * 并被字距撑开，和下面的数值像两套字（负责人 2026-10-19「开始时间和结束时间字体不对等」）。
+     */
+    val eyebrow: TextStyle @Composable get() = TextStyle(fontFamily = InkTone.bodyFont, fontSize = 12.sp, lineHeight = 16.sp,
+        letterSpacing = .2.sp)
     val meta: TextStyle @Composable get() = TextStyle(fontFamily = InkTone.metaFont, fontSize = 12.sp, lineHeight = 16.sp, letterSpacing = .4.sp)
+    /**
+     * 卡片上的中文小字（v4.3，审查 U7b）：用正文字体而不是等宽字——等宽字体里的中文与空格被撑开，
+     * 「约 168 小时」读成一串散字。数字取等宽数位（tnum），时刻仍对齐。时刻列继续用 [meta]。
+     */
+    val caption: TextStyle @Composable get() = TextStyle(fontFamily = InkTone.bodyFont, fontSize = 12.sp, lineHeight = 16.sp,
+        fontFeatureSettings = "tnum")
     val masthead: TextStyle @Composable get() = TextStyle(fontFamily = InkTone.display, fontSize = 30.sp, lineHeight = 38.sp,
-        fontWeight = FontWeight.Bold, letterSpacing = .5.sp)
+        fontWeight = FontWeight.SemiBold, letterSpacing = .5.sp)
     val numeral: TextStyle @Composable get() = TextStyle(fontFamily = InkTone.display, fontSize = 30.sp, lineHeight = 34.sp,
         fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
 }
@@ -167,10 +179,56 @@ fun TextStyle.themed(): TextStyle = when (fontFamily) {
     else -> this
 }
 
-/** 首次出现时「落笔」：淡入 + 上移，按序号错峰；系统关闭动画时直接呈现。 */
+/**
+ * 进程级入场时钟（v4.6，启动动效修正）：同一个 [key] 的入场动画以第一次出现的时刻为起点，按时间算进度。
+ * 冷启动时今日页先以「首帧」画在开屏下面、开屏结束后换成完整页面——两棵界面树各自 `remember` 的动画会各播一遍，
+ * 中间还因落笔淡入从 0 开始而「闪一下」。改为共用这个时钟后，换树时动画接着走，不重播、不闪。
+ */
+object InkIntro {
+    private val starts = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    fun startNanos(key: String): Long = starts.getOrPut(key) { System.nanoTime() }
+    /** Anchor a cold entry to the splash fade, independent of how long content takes to mount. */
+    fun schedule(key: String, delayMs: Long) {
+        starts.putIfAbsent(key, System.nanoTime() + delayMs * 1_000_000L)
+    }
+}
+
+/** [key] 入场时钟上 `delayMs` 后开始、历时 `durationMs` 的进度（0..1，已带墨序缓动）；读值放在绘制阶段，不逐帧重组。 */
 @Composable
-fun Modifier.inkReveal(index: Int = 0, distance: Dp = 18.dp): Modifier {
+fun rememberIntroProgress(key: String, delayMs: Int, durationMs: Int): androidx.compose.runtime.State<Float> {
+    val start = remember(key) { InkIntro.startNanos(key) }
+    fun at(now: Long): Float {
+        val t = ((now - start) / 1_000_000f - delayMs) / durationMs
+        return Ink.Easing.transform(t.coerceIn(0f, 1f))
+    }
+    val state = remember(key) { androidx.compose.runtime.mutableFloatStateOf(at(System.nanoTime())) }
+    LaunchedEffect(key) {
+        while (state.floatValue < 1f) {
+            androidx.compose.runtime.withFrameNanos { }
+            state.floatValue = at(System.nanoTime())
+        }
+    }
+    return state
+}
+
+/** 今日页起笔相对时钟的提前量；冷启动由开屏按真实淡出时刻预先锚定，不依赖首页组合耗时。 */
+const val TODAY_INTRO_LEAD_MS = 360
+
+/**
+ * 首次出现时「落笔」：淡入 + 上移，按序号错峰；系统关闭动画时直接呈现。
+ * 给了 [introKey] 时按进程级入场时钟走（见 [InkIntro]），换界面树也不重播。
+ */
+@Composable
+fun Modifier.inkReveal(index: Int = 0, distance: Dp = 18.dp, introKey: String? = null, introLeadMs: Int = 0): Modifier {
     if (LocalReducedMotion.current) return this
+    if (introKey != null) {
+        val shown = rememberIntroProgress(introKey, introLeadMs + index.coerceIn(0, 10) * Ink.revealStepMs, Ink.revealMs)
+        return graphicsLayer {
+            val p = shown.value
+            alpha = p
+            translationY = (1f - p) * distance.toPx()
+        }
+    }
     var played by rememberSaveable { mutableStateOf(false) }
     val progress = remember { Animatable(if (played) 1f else 0f) }
     LaunchedEffect(Unit) {
@@ -198,7 +256,7 @@ fun InkMasthead(
 ) {
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            if (eyebrow.isNotBlank()) Text(eyebrow, style = InkText.meta, color = InkTone.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (eyebrow.isNotBlank()) Text(eyebrow, style = InkText.caption, color = InkTone.soft, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(title, style = InkText.masthead, color = InkTone.text)
             subtitle?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = InkTone.soft, modifier = Modifier.padding(top = 2.dp)) }
         }
@@ -224,7 +282,7 @@ fun InkRoundAction(icon: androidx.compose.ui.graphics.vector.ImageVector, descri
 fun QuietHint(text: String, modifier: Modifier = Modifier, action: String? = null, onAction: (() -> Unit)? = null) {
     Column(modifier.fillMaxWidth().padding(vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(text, style = MaterialTheme.typography.bodyLarge, color = InkTone.faint)
+        Text(text, style = MaterialTheme.typography.bodyLarge, color = InkTone.soft)
         if (action != null && onAction != null) {
             androidx.compose.material3.TextButton(onClick = onAction) {
                 Text(action, style = MaterialTheme.typography.labelLarge, color = InkTone.vermilion)
@@ -254,7 +312,7 @@ fun InkSeal(glyph: String = "序", sealSize: Dp = 44.dp, modifier: Modifier = Mo
             .semantics { contentDescription = "知序" },
         contentAlignment = Alignment.Center,
     ) {
-        Text(glyph, color = InkTone.onAccent, fontFamily = InkTone.display, fontWeight = FontWeight.Black,
+        Text(glyph, color = InkTone.onAccent, fontFamily = InkTone.display, fontWeight = FontWeight.Bold,
             fontSize = (sealSize.value * .5f).sp, lineHeight = (sealSize.value * .56f).sp)
     }
 }
@@ -309,11 +367,15 @@ fun SundialDial(
     ringWidth: Dp = 14.dp,
     /** BUG-102：当天有全天日程时，内圈画一道该日程类别色的细环（不占 24 小时弧段）。 */
     allDayRing: Color? = null,
+    /** v4.6：给了就按进程级入场时钟画「转圈」（见 [InkIntro]），冷启动换树时不重播。 */
+    introKey: String? = null,
+    introLeadMs: Int = 0,
     center: @Composable BoxScope.() -> Unit = {},
 ) {
     val reduced = LocalReducedMotion.current
-    val sweep = remember { Animatable(if (reduced) 1f else 0f) }
-    LaunchedEffect(reduced) { if (!reduced) sweep.animateTo(1f, tween(1100, easing = Ink.Easing)) else sweep.snapTo(1f) }
+    val introSweep = if (introKey != null && !reduced) rememberIntroProgress(introKey, introLeadMs, 1100) else null
+    val sweep = remember { Animatable(if (reduced || introKey != null) 1f else 0f) }
+    LaunchedEffect(reduced) { if (!reduced && introKey == null) sweep.animateTo(1f, tween(1100, easing = Ink.Easing)) else sweep.snapTo(1f) }
     val breathe = if (reduced) 0f else rememberInfiniteTransition(label = "dial").animateFloat(
         0f, 1f, infiniteRepeatable(tween(2200, easing = LinearEasing), RepeatMode.Restart), label = "dial-breathe"
     ).value
@@ -343,7 +405,7 @@ fun SundialDial(
             val faceR = outer - 2.dp.toPx()
             val r = outer - w / 2f - 18.dp.toPx()
             val c = Offset(size.width / 2f, size.height / 2f)
-            val p = sweep.value
+            val p = introSweep?.value ?: sweep.value
             val ringBox = Offset(c.x - r, c.y - r)
             val ringSize = Size(r * 2, r * 2)
 
@@ -571,7 +633,7 @@ fun <T> InkSegmented(options: List<Pair<T, String>>, selected: T, onSelect: (T) 
                         .semantics { contentDescription = label + if (isSelected) "，已选中" else "" },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(label, color = color, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text(label, color = color, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -676,6 +738,8 @@ object InkHue {
     val sleep = Hue(Color(0xFF6E58A0), Color(0xFFB9A6E6))     // 睡眠 · 藤紫
     val rose = Hue(Color(0xFFB44A6A), Color(0xFFF0A0B8))      // 桃
     val amber = Hue(Color(0xFFA9701E), Color(0xFFE8BC6A))     // 琥珀（日程）
+    val hobby = Hue(Color(0xFFA34D28), Color(0xFFFFA77F))     // 兴趣 · 赭橙
+    val other = Hue(Color(0xFF59606B), Color(0xFFB2BDCA))     // 其他 · 石灰
     val seal = Hue(Ink.vermilion, Ink.vermilionNight)          // 朱（进行中）
     private val extras = listOf(rose, amber, work, study, sleep, sport)
 
@@ -684,6 +748,11 @@ object InkHue {
         "工作" -> work
         "运动" -> sport
         "睡眠" -> sleep
+        "休息" -> sleep
+        "阅读" -> amber
+        "生活" -> rose
+        "兴趣" -> hobby
+        "其他" -> other
         null, "" -> study
         else -> extras[(type.trim().hashCode() and 0x7fffffff) % extras.size]
     }
@@ -701,6 +770,8 @@ fun InkHue.Hue.color(): Color {
             this === InkHue.sleep -> return c.sleep
             this === InkHue.rose -> return c.rose
             this === InkHue.amber -> return c.amber
+            this === InkHue.hobby -> return c.hobby
+            this === InkHue.other -> return c.other
         }
     }
     return if (palette.isDark) dark else light

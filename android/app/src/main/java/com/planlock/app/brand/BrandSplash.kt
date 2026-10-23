@@ -45,7 +45,7 @@ import androidx.compose.ui.unit.sp
 import com.planlock.app.R
 import com.planlock.design.LocalDarkTheme
 import com.planlock.design.LocalReducedMotion
-import com.planlock.design.V2Tokens
+import com.planlock.design.InkTone
 
 /** The only image-source seam. Motion and timing do not know the resource format. */
 @Composable
@@ -72,6 +72,10 @@ internal fun BrandSplash(systemSplashGone: Boolean, onFinished: () -> Unit) {
             // LaunchedEffect starts after composition; wait for the platform exit,
             // but never make completion depend on another rendered frame.
             android.util.Log.i("OrivaSplash", "playback-start")
+            com.planlock.design.InkIntro.schedule(
+                "today",
+                SplashMotionTokens.exitStartMs - com.planlock.design.TODAY_INTRO_LEAD_MS,
+            )
             playSplash { elapsed = it }
         }
         android.util.Log.i("OrivaSplash", "playback-finished reduced=$reduced elapsedMs=${(System.nanoTime() - started) / 1_000_000L}")
@@ -80,7 +84,6 @@ internal fun BrandSplash(systemSplashGone: Boolean, onFinished: () -> Unit) {
     // Reduce-motion exits immediately; no invisible overlay intercepts the first tap.
     if (frame.finished) return
     BackHandler { finish() }
-    val palette = if (dark) V2Tokens.dark else V2Tokens.light
     // Splash-specific ink from approved study A; do not change global brand tokens.
     val ink = Color(if (dark) 0xFFD7E1D8 else 0xFF38503F)
     val context = LocalContext.current
@@ -97,7 +100,9 @@ internal fun BrandSplash(systemSplashGone: Boolean, onFinished: () -> Unit) {
     Box(
         Modifier.fillMaxSize().clipToBounds()
             .graphicsLayer { alpha = frame.overlayAlpha }
-            .background(palette.surface)
+            // Match the platform splash for the selected theme (including fixed
+            // dark themes such as Atlas), before the backdrop starts to reveal.
+            .background(InkTone.ground)
             .semantics { contentDescription = "知序品牌开屏" }
             .pointerInput(Unit) {
                 awaitPointerEventScope {

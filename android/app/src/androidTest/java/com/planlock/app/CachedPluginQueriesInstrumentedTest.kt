@@ -40,7 +40,7 @@ class CachedPluginQueriesInstrumentedTest {
             assertEquals(Json.parseToJsonElement(Json.encodeToString(report)), result.getValue("report"))
             assertEquals("Read-only queries must not initiate refresh", before, sync.coordinator.state.value.attempts)
         } finally {
-            com.planlock.app.record.PlanLockDatabase.get(context).planSnapshotDao().delete(plan.id)
+            com.planlock.app.record.PlanLockDatabase.get(context).planSnapshotDao().delete("local\nlocal", plan.id)
             sync.cache.save(TokenStore.userId, cached)
         }
     }

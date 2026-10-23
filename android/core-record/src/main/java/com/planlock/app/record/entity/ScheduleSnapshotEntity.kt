@@ -4,10 +4,10 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 /** 日程本地快照。与计划独立，不被执行引擎读取。 */
-@Entity(tableName = "schedule_snapshot")
+@Entity(tableName = "schedule_snapshot", primaryKeys = ["scope", "id"])
 @kotlinx.serialization.Serializable
 data class ScheduleSnapshotEntity(
-    @PrimaryKey val id: Long,
+    val id: Long,
     val userId: Long,
     val title: String,
     val startDate: String,
@@ -24,4 +24,7 @@ data class ScheduleSnapshotEntity(
     val tzId: String?,
     val status: Int,
     val version: Long,
+    @androidx.room.ColumnInfo(defaultValue = "''") val scope: String = "local\nlocal",
+    val locationLat: Double? = null,
+    val locationLon: Double? = null,
 )

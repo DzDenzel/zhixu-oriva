@@ -5,6 +5,43 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SyncCoordinatorTest {
+    @Test fun backgroundWorkDoesNotSpinAndManualJoinMayShowProgress() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val coordinator = SyncCoordinator(this) { gate.await() }
+        val cold = coordinator.coldStart()
+        yield()
+        assertFalse(coordinator.state.value.running)
+        assertSame(cold, coordinator.refresh())
+        assertTrue(coordinator.state.value.running)
+        gate.complete(Unit)
+        cold?.join()
+        assertFalse(coordinator.state.value.running)
+    }
+    @Test fun wholeRoundTimeoutIncludesWaitingAndCanRetry() = runBlocking {
+        var calls = 0
+        val coordinator = SyncCoordinator(this, timeoutMillis = 50) {
+            if (++calls == 1) awaitCancellation()
+        }
+        coordinator.refresh().join()
+        assertFalse(coordinator.state.value.running)
+        assertNotNull(coordinator.state.value.error)
+        coordinator.refresh().join()
+        assertEquals(2, calls)
+        assertNull(coordinator.state.value.error)
+    }
+    @Test fun cancellationAlwaysReleasesBusyStateAndAllowsAnotherRound() = runBlocking {
+        var calls = 0
+        val entered = CompletableDeferred<Unit>()
+        val coordinator = SyncCoordinator(this) {
+            if (++calls == 1) { entered.complete(Unit); awaitCancellation() }
+        }
+        val job = coordinator.refresh()
+        entered.await(); job.cancelAndJoin()
+        assertFalse(coordinator.state.value.running)
+        coordinator.refresh().join()
+        assertEquals(2, calls)
+        assertNull(coordinator.state.value.error)
+    }
     @Test fun clearedConnectionFeedbackCannotBeRestoredByOldInFlightWork() = runBlocking {
         for (requiresLogin in listOf(false, true)) {
             val releasedSession = CompletableDeferred<Unit>()

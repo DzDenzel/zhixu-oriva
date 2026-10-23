@@ -182,15 +182,15 @@ internal val LocalSecondaryControlColors = staticCompositionLocalOf {
 
 private val serif = Ink.display
 private val PlanTypography = Typography(
-    displayLarge = TextStyle(fontFamily = serif, fontSize = 52.sp, lineHeight = 58.sp, fontWeight = FontWeight.Bold),
-    displayMedium = TextStyle(fontFamily = serif, fontSize = 42.sp, lineHeight = 48.sp, fontWeight = FontWeight.Bold),
-    displaySmall = TextStyle(fontFamily = serif, fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.Bold),
-    headlineLarge = TextStyle(fontFamily = serif, fontSize = 30.sp, lineHeight = 38.sp, fontWeight = FontWeight.Bold),
+    displayLarge = TextStyle(fontFamily = serif, fontSize = 52.sp, lineHeight = 58.sp, fontWeight = FontWeight.SemiBold),
+    displayMedium = TextStyle(fontFamily = serif, fontSize = 42.sp, lineHeight = 48.sp, fontWeight = FontWeight.SemiBold),
+    displaySmall = TextStyle(fontFamily = serif, fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.SemiBold),
+    headlineLarge = TextStyle(fontFamily = serif, fontSize = 30.sp, lineHeight = 38.sp, fontWeight = FontWeight.SemiBold),
     headlineMedium = V2Tokens.headlineMedium,
-    headlineSmall = TextStyle(fontFamily = serif, fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Bold),
+    headlineSmall = TextStyle(fontFamily = serif, fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold),
     titleLarge = V2Tokens.titleLarge,
     titleMedium = V2Tokens.titleMedium,
-    titleSmall = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
+    titleSmall = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
     bodyLarge = V2Tokens.bodyLarge,
     bodyMedium = V2Tokens.bodyMedium,
     bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 18.sp),

@@ -30,8 +30,8 @@ class AccountPresentationTest {
         assertEquals("登录", out.loginLabel)
         assertTrue(out.description.contains("保留"))
         val other = accountPresentation(signed.copy(dataOwner = 99))
-        assertTrue(other.description.contains("暂停"))
-        assertEquals("重新登录", other.loginLabel)
+        assertFalse(other.description.contains("暂停"))
+        assertEquals("", other.loginLabel)
         assertEquals("本机游客模式", accountPresentation(AuthState()).title)
     }
 }

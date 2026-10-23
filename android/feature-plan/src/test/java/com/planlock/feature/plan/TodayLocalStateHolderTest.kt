@@ -25,6 +25,26 @@ import org.junit.Test
 class TodayLocalStateHolderTest {
     private val key = TodayLocalKey(42, "2026-10-04")
 
+    @Test fun `hidden today refresh cannot publish another account under the retained key`() = runBlocking {
+        val changes = MutableStateFlow(0L)
+        var rows = localData("A").plans.map { it.copy(scope = "instance-a\n42") }
+        val process = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val holder = TodayLocalStateHolder(reader { rows }, process, localChanges = changes)
+            val accountKey = key.copy(scope = "instance-a\n42")
+            holder.prefetch(accountKey)
+            withTimeout(1_000) { holder.state.first { it.phase == TodayLocalPhase.READY } }
+            rows = localData("B-private").plans.map { it.copy(scope = "instance-b\n42") }
+            changes.value++
+            val refreshed = withTimeout(1_000) {
+                holder.state.first { it.phase == TodayLocalPhase.READY && (it.read?.error != null || it.read?.data?.plans?.single()?.name == "B-private") }
+            }
+            assertEquals(accountKey, refreshed.key)
+            assertEquals("A", refreshed.read?.data?.plans?.single()?.name)
+            assertNotNull(refreshed.read?.error)
+        } finally { process.cancel() }
+    }
+
     @Test
     fun `offline local write updates retained today data without a network revision`() = runBlocking {
         val changes = MutableStateFlow(0L)
