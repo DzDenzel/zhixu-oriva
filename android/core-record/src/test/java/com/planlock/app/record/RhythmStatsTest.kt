@@ -2,7 +2,6 @@ package com.planlock.app.record
 
 import com.planlock.app.api.dto.*
 import com.planlock.app.record.entity.PlanSnapshotEntity
-import java.io.File
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -13,7 +12,7 @@ class RhythmStatsTest {
     private val today = requireNotNull(OccurrenceDate.parseIso("2026-10-04"))
 
     @Test fun sharedGoldenFixtureMatchesEveryField() {
-        val fixture = json.parseToJsonElement(fixtureFile().readText(Charsets.UTF_8)).jsonObject
+        val fixture = json.parseToJsonElement(fixtureText()).jsonObject
         fixture.getValue("cases").jsonArray.forEach { item ->
             val test = item.jsonObject
             val plans = json.decodeFromJsonElement<List<PlanSnapshotEntity>>(test.getValue("plans"))
@@ -70,6 +69,18 @@ class RhythmStatsTest {
         assertEquals(shorter.completionRate7d, longer.completionRate7d)
         assertEquals(shorter.days, longer.days.takeLast(30))
     }
-    private fun fixtureFile(): File = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
-        .map { File(it, "test-fixtures/rhythm-golden.json") }.first { it.isFile }
+    @Test fun missingFixtureReportsItsTestResourcePath() {
+        val failure = assertThrows(IllegalStateException::class.java) {
+            fixtureText("missing-rhythm-golden.json")
+        }
+        assertTrue(failure.message.orEmpty().contains("android/core-record/src/test/resources/missing-rhythm-golden.json"))
+    }
+
+    private fun fixtureText(name: String = "rhythm-golden.json"): String {
+        val stream = checkNotNull(javaClass.getResourceAsStream("/$name")) {
+            "Missing test fixture: android/core-record/src/test/resources/$name; " +
+                "ensure the complete source and test resources are available."
+        }
+        return stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+    }
 }

@@ -1,0 +1,1374 @@
+{
+  "today": "2026-10-04",
+  "cases": [
+    {
+      "name": "cross-month-disabled-status3-replay-multi-device",
+      "plans": [
+        {
+          "id": 1,
+          "userId": 1,
+          "name": "月初阅读",
+          "type": "自定义",
+          "startTime": "09:00:00",
+          "endTime": "10:00:00",
+          "repeatRule": "{\"type\":\"monthly\",\"day\":1}",
+          "color": null,
+          "icon": null,
+          "remindAdvanceMin": null,
+          "remindMethods": null,
+          "status": 1,
+          "version": 1,
+          "statusLog": null
+        },
+        {
+          "id": 2,
+          "userId": 1,
+          "name": "周末运动",
+          "type": "运动",
+          "startTime": "09:00:00",
+          "endTime": "10:00:00",
+          "repeatRule": "{\"type\":\"weekly\",\"weekdays\":[6,7]}",
+          "color": null,
+          "icon": null,
+          "remindAdvanceMin": null,
+          "remindMethods": null,
+          "status": 1,
+          "version": 1,
+          "statusLog": "[{\"date\":\"2026-09-13\",\"status\":0},{\"date\":\"2026-09-26\",\"status\":1}]"
+        }
+      ],
+      "executions": [
+        {
+          "id": 1,
+          "planId": 1,
+          "deviceId": 1,
+          "planDate": "2026-09-01",
+          "status": 1,
+          "startedAt": "2026-09-01T09:00:00",
+          "endedAt": "2026-09-01T09:20:00",
+          "clientId": "prev"
+        },
+        {
+          "id": 2,
+          "planId": 1,
+          "deviceId": 1,
+          "planDate": "2026-10-01",
+          "status": 1,
+          "startedAt": "2026-10-01T09:00:00",
+          "endedAt": "2026-10-01T09:30:00",
+          "clientId": "oct1"
+        },
+        {
+          "id": 3,
+          "planId": 1,
+          "deviceId": 1,
+          "planDate": "2026-10-01",
+          "status": 1,
+          "startedAt": "2026-10-01T09:00:00",
+          "endedAt": "2026-10-01T09:30:00",
+          "clientId": "oct1"
+        },
+        {
+          "id": 4,
+          "planId": 2,
+          "deviceId": 1,
+          "planDate": "2026-10-03",
+          "status": 2,
+          "startedAt": "2026-10-03T09:00:00",
+          "endedAt": "2026-10-03T09:10:00",
+          "clientId": "early"
+        },
+        {
+          "id": 5,
+          "planId": 2,
+          "deviceId": 1,
+          "planDate": "2026-10-04",
+          "status": 1,
+          "startedAt": "2026-10-04T09:00:00",
+          "endedAt": "2026-10-04T10:00:00",
+          "clientId": "device1"
+        },
+        {
+          "id": 6,
+          "planId": 2,
+          "deviceId": 2,
+          "planDate": "2026-10-04",
+          "status": 1,
+          "startedAt": "2026-10-04T09:00:00",
+          "endedAt": "2026-10-04T09:15:00",
+          "clientId": "device2"
+        },
+        {
+          "id": 7,
+          "planId": 2,
+          "deviceId": 1,
+          "planDate": "2026-09-27",
+          "status": 3,
+          "startedAt": "2026-09-27T09:00:00",
+          "endedAt": "2026-09-27T10:39:00",
+          "clientId": "excluded"
+        },
+        {
+          "id": 8,
+          "planId": 2,
+          "deviceId": 1,
+          "planDate": "2026-10-04",
+          "status": 0,
+          "startedAt": "2026-10-04T09:00:00",
+          "endedAt": null,
+          "clientId": "start"
+        }
+      ],
+      "behavior": [
+        {
+          "id": 1,
+          "clientId": "b1",
+          "appName": "A",
+          "packageName": "a",
+          "startedAt": "2026-09-28T00:00:00",
+          "endedAt": "2026-09-28T00:05:00",
+          "durationMs": 300000
+        },
+        {
+          "id": 2,
+          "clientId": "b1",
+          "appName": "A",
+          "packageName": "a",
+          "startedAt": "2026-09-28T00:00:00",
+          "endedAt": "2026-09-28T00:05:00",
+          "durationMs": 300000
+        },
+        {
+          "id": 3,
+          "clientId": "b3",
+          "appName": "B",
+          "packageName": "b",
+          "startedAt": "2026-10-04T10:00:00",
+          "endedAt": "2026-10-04T10:10:00",
+          "durationMs": 240000
+        },
+        {
+          "id": 4,
+          "clientId": "b4",
+          "appName": "C",
+          "packageName": "c",
+          "startedAt": "2026-10-04T10:00:00",
+          "endedAt": "2026-10-04T10:10:00",
+          "durationMs": 180000
+        },
+        {
+          "id": 5,
+          "clientId": "b5",
+          "appName": "D",
+          "packageName": "d",
+          "startedAt": "2026-10-04T10:00:00",
+          "endedAt": "2026-10-04T10:10:00",
+          "durationMs": 120000
+        }
+      ],
+      "expected": {
+        "headline": "近7天完成3次，比上一周期多3次；连续达成1天。",
+        "streakDays": 1,
+        "completionRate7d": {
+          "completed": 3,
+          "total": 4
+        },
+        "completionRatePrev7d": {
+          "completed": 0,
+          "total": 1
+        },
+        "focusMinutes30d": 115,
+        "focusMinutesPrev30d": 20,
+        "earlyEnds30d": 1,
+        "earlyEndsPrev30d": 0,
+        "days": [
+          {
+            "date": "2026-08-04",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-05",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-06",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-07",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-08",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-09",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-10",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-11",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-12",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-13",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-14",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-15",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-16",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-17",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-18",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-19",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-20",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-21",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-22",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-23",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-24",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-25",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-26",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-27",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-28",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-29",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-30",
+            "planned": 1,
+            "completed": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-31",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-01",
+            "planned": 1,
+            "completed": 1,
+            "missed": 0,
+            "focusMinutes": 20,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-02",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-03",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-04",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-05",
+            "planned": 1,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-06",
+            "planned": 1,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-07",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-08",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-09",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-10",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-11",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-12",
+            "planned": 1,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-13",
+            "planned": 1,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-14",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-15",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-16",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-17",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-18",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-19",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-20",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-21",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-22",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-23",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-24",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-25",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-26",
+            "planned": 1,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 1,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-27",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-28",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-29",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-30",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-01",
+            "planned": 1,
+            "completed": 1,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 30,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-02",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-03",
+            "planned": 1,
+            "completed": 0,
+            "earlyEnded": 1,
+            "missed": 0,
+            "focusMinutes": 10,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-04",
+            "planned": 2,
+            "completed": 2,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 75,
+            "isToday": true
+          }
+        ],
+        "plans": [
+          {
+            "planId": 2,
+            "name": "周末运动",
+            "type": "运动",
+            "completionRate30d": {
+              "completed": 2,
+              "total": 8
+            },
+            "completed": 2,
+            "total": 8
+          },
+          {
+            "planId": 1,
+            "name": "月初阅读",
+            "type": "自定义",
+            "completionRate30d": {
+              "completed": 1,
+              "total": 1
+            },
+            "completed": 1,
+            "total": 1
+          }
+        ],
+        "distraction": {
+          "minutes7d": 14,
+          "topSources": [
+            {
+              "appName": "A",
+              "minutes": 5
+            },
+            {
+              "appName": "B",
+              "minutes": 4
+            },
+            {
+              "appName": "C",
+              "minutes": 3
+            }
+          ]
+        },
+        "source": "Synced"
+      }
+    },
+    {
+      "name": "empty",
+      "plans": [],
+      "executions": [],
+      "behavior": [],
+      "expected": {
+        "headline": "还没有执行记录，开始一个计划后这里会出现你的节奏。",
+        "streakDays": 0,
+        "completionRate7d": {
+          "completed": 0,
+          "total": 0
+        },
+        "completionRatePrev7d": {
+          "completed": 0,
+          "total": 0
+        },
+        "focusMinutes30d": 0,
+        "focusMinutesPrev30d": 0,
+        "earlyEnds30d": 0,
+        "earlyEndsPrev30d": 0,
+        "days": [
+          {
+            "date": "2026-08-04",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-05",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-06",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-07",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-08",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-09",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-10",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-11",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-12",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-13",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-14",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-15",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-16",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-17",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-18",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-19",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-20",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-21",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-22",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-23",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-24",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-25",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-26",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-27",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-28",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-29",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-30",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-08-31",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-01",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-02",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-03",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-04",
+            "planned": 0,
+            "completed": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false,
+            "earlyEnded": 0
+          },
+          {
+            "date": "2026-09-05",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-06",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-07",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-08",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-09",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-10",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-11",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-12",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-13",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-14",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-15",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-16",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-17",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-18",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-19",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-20",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-21",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-22",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-23",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-24",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-25",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-26",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-27",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-28",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-29",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-09-30",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-01",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-02",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-03",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": false
+          },
+          {
+            "date": "2026-10-04",
+            "planned": 0,
+            "completed": 0,
+            "earlyEnded": 0,
+            "missed": 0,
+            "focusMinutes": 0,
+            "isToday": true
+          }
+        ],
+        "plans": [],
+        "distraction": null,
+        "source": "Synced"
+      }
+    }
+  ]
+}

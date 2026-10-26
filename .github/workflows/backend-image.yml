@@ -34,6 +34,10 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+      - name: Verify shared test fixtures
+        run: |
+          python3 android/tools/release/check_test_fixtures.py
+          python3 -m unittest discover -s android/tools/release -p 'test_test_fixtures.py' -v
       - name: Backend regression
         env:
           F37_ENABLED: 'true'

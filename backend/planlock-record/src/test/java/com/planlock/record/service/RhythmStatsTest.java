@@ -1,12 +1,12 @@
 package com.planlock.record.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.planlock.record.dto.RhythmSummary;
 import com.planlock.record.dto.RhythmInputs;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.io.IOException;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -16,15 +16,29 @@ class RhythmStatsTest {
     private final ObjectMapper json = new ObjectMapper().findAndRegisterModules();
 
     @Test void sharedGoldenFixtureMatchesEveryField() throws Exception {
-        Path root = Path.of(System.getProperty("user.dir")).toAbsolutePath();
-        while (!Files.exists(root.resolve("test-fixtures/rhythm-golden.json"))) root = root.getParent();
-        var fixture = json.readTree(root.resolve("test-fixtures/rhythm-golden.json").toFile());
+        var fixture = readFixture("rhythm-golden.json");
         for (var test : fixture.path("cases")) {
             var plans = json.readerForListOf(RhythmInputs.Plan.class).<List<RhythmInputs.Plan>>readValue(test.path("plans"));
             var executions = json.readerForListOf(RhythmInputs.Execution.class).<List<RhythmInputs.Execution>>readValue(test.path("executions"));
             var behavior = json.readerForListOf(RhythmInputs.Behavior.class).<List<RhythmInputs.Behavior>>readValue(test.path("behavior"));
             var actual = RhythmStats.aggregate(plans, executions, behavior, LocalDate.of(2026, 10, 4), 62, "Synced", json);
             assertThat(json.readTree(json.writeValueAsString(actual))).as(test.path("name").asText()).isEqualTo(test.path("expected"));
+        }
+    }
+
+    @Test void missingFixtureReportsItsTestResourcePath() {
+        assertThatThrownBy(() -> readFixture("missing-rhythm-golden.json"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("backend/planlock-record/src/test/resources/missing-rhythm-golden.json");
+    }
+
+    private JsonNode readFixture(String name) throws IOException {
+        try (var stream = RhythmStatsTest.class.getResourceAsStream("/" + name)) {
+            if (stream == null) {
+                throw new IllegalStateException("Missing test fixture: backend/planlock-record/src/test/resources/"
+                        + name + "; ensure the complete source and test resources are available.");
+            }
+            return json.readTree(stream);
         }
     }
 
