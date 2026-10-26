@@ -13,7 +13,7 @@ if (!(Test-Path -LiteralPath $script:EnvFile)) {
     }
     $configuration = @(
         'COMPOSE_PROJECT_NAME=oriva',
-        'ORIVA_IMAGE=ghcr.io/dzdenzel/zhixu-oriva-backend:2.1.0',
+        'ORIVA_IMAGE=ghcr.io/dzdenzel/zhixu-oriva-backend:2.1.1',
         'ORIVA_BIND_ADDRESS=0.0.0.0', 'ORIVA_PORT=8080', 'ORIVA_TIMEZONE=UTC',
         "MYSQL_ROOT_PASSWORD=$(New-OrivaSecret)", "PLANLOCK_DB_PASSWORD=$(New-OrivaSecret)",
         "PLANLOCK_REDIS_PASSWORD=$(New-OrivaSecret)", "PLANLOCK_JWT_SECRET=$(New-OrivaSecret)",

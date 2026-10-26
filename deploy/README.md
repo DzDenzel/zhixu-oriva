@@ -52,7 +52,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ShowSetup
 
 | 项目 | 用途 |
 |---|---|
-| ORIVA_IMAGE | 指定已发布版本或 `ghcr.io/…@sha256:…`；默认 `ghcr.io/dzdenzel/zhixu-oriva-backend:2.1.0` |
+| ORIVA_IMAGE | 指定已发布版本或 `ghcr.io/…@sha256:…`；默认 `ghcr.io/dzdenzel/zhixu-oriva-backend:2.1.1` |
 | ORIVA_PORT | 主机端口，默认 8080；与其他服务冲突时换为 18080 等空闲端口 |
 | ORIVA_BIND_ADDRESS | 默认 `0.0.0.0`，允许家中其他设备访问；启用 HTTPS 后仅绑定回环 |
 | ORIVA_DOMAIN | 可选 HTTPS 域名，默认空；填写后安装脚本自动加入 Caddy 编排 |
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\restore.ps1 -BackupDirectory ..\oriva
 
 ## 升级与回退
 
-先备份，再修改 `.env` 中的 `ORIVA_IMAGE` 为已发布的版本或 digest，然后重跑安装命令。Flyway 验证迁移历史并只执行新的迁移，失败时后端不会就绪；不要运行 `clean` / `repair` 或删除迁移历史来跳过错误。MySQL DDL 不保证整批迁移原子回滚，失败后应保留现场和日志，必要时把**升级前备份恢复到新项目**；脚本不会声称自动回滚能消除所有部分 DDL。
+先备份，再把原部署目录 `.env` 中的 `ORIVA_IMAGE` 改为 `ghcr.io/dzdenzel/zhixu-oriva-backend:2.1.1`（或发布页公布的 digest），然后重跑安装命令。安装脚本沿用已有 `.env`，不会自动切换镜像版本。Flyway 验证迁移历史并只执行新的迁移，失败时后端不会就绪；不要运行 `clean` / `repair` 或删除迁移历史来跳过错误。MySQL DDL 不保证整批迁移原子回滚，失败后应保留现场和日志，必要时把**升级前备份恢复到新项目**；脚本不会声称自动回滚能消除所有部分 DDL。
 
 回退先在新项目恢复升级前备份并固定原镜像，核对数据后再切流；不要直接让旧程序连接已经升级的库。`.env` 随备份固定旧密钥和镜像，原数据库、卷均保留。不得执行 `docker compose down -v` 来“修复”启动问题。
 
@@ -133,7 +133,7 @@ docker compose --env-file .env -f docker-compose.yml logs --tail 100 backend
 
 镜像工作流发布 linux/amd64，并附 `backend-image-manifest`（源码提交、镜像标签 / digest、迁移文件及摘要），可按 digest 固定版本。arm64 尚未构建验证，不能据此宣称全部 NAS 支持。
 
-健康接口 `/api/v1/health` 不需要登录，只报告状态、版本、迁移版本、实例 ID 和初始化状态，不含秘密。镜像通过 `VERSION` 构建参数报告版本，未指定时为 `development`；源码直跑默认为 `2.1.0`。
+健康接口 `/api/v1/health` 不需要登录，只报告状态、版本、迁移版本、实例 ID 和初始化状态，不含秘密。镜像通过 `VERSION` 构建参数报告版本，未指定时为 `development`；源码直跑默认为 `2.1.1`。
 
 部署模式禁用公开注册，以及验证码签发、验证码登录和验证码找回；请使用所有者账号密码登录。密码登录与密保答案共用失败预算：同一账号或同一来源地址在 15 分钟窗口内累计失败 5 次，后续尝试暂时拒绝；正确认证清零当前账号与来源的计数。已存在账号按用户 ID 计数，大小写等账号别名不能重置预算。Redis 不可用时拒绝认证，不降级放行。未显式配置受信代理时，来源只使用服务器连接地址；受信代理规则见上面的公网 HTTPS 说明。窗口从首次失败开始计算，拒绝请求不延长窗口。
 

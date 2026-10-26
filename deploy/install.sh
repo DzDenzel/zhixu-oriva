@@ -15,7 +15,7 @@ if [ ! -e "$ENV_FILE" ]; then
         secret() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
         (set -C; cat > "$ENV_FILE" <<EOF
 COMPOSE_PROJECT_NAME=oriva
-ORIVA_IMAGE=ghcr.io/dzdenzel/zhixu-oriva-backend:2.1.0
+ORIVA_IMAGE=ghcr.io/dzdenzel/zhixu-oriva-backend:2.1.1
 ORIVA_BIND_ADDRESS=0.0.0.0
 ORIVA_PORT=8080
 ORIVA_TIMEZONE=UTC
