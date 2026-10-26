@@ -38,7 +38,15 @@
 **日程与计划**
 - 日程、计划、提醒；全天日程与定时安排分开展示
 - 日晷式今日视图：一眼看清一天里什么时候做什么
+- 计划开始前弹出提醒，开始与完成时发送通知
+- 八种计划类型，也可以自定义类型
+- 重复计划提前结束时，可以选择「只结束今天」或「结束整个计划」
+- 日程地点：系统定位与地图选点，可搜索附近地点
 - 执行记录与报告，支持导出 JSON、CSV、ICS
+
+**统计**
+- 「我的节奏」：按周、按月查看完成情况，可往前翻看
+- 包含本机尚未上传到后端的执行记录
 
 **多设备同步**（v2.1 新增）
 - 连接你自己部署的后端，多台设备同步日程与计划
@@ -61,9 +69,9 @@
 
 在 [Releases](https://github.com/DzDenzel/zhixu-oriva/releases/latest) 下载 `zhixu-oriva-<版本>.apk` 并安装。安装前建议按[校验发布文件](#校验发布文件)核对哈希与签名。
 
-已安装 v2.0.0 的用户直接覆盖安装即可，数据和登录状态都会保留，**请勿先卸载**。
+已安装 v2.0 或 v2.1 的用户直接覆盖安装即可，数据、登录状态和主题都会保留，**请勿先卸载**。
 
-只在一台手机上使用的话，可以选择「仅本地使用」，不需要后端。
+首次打开时选择「仅本地使用」即可在一台手机上使用，不需要后端；之后随时可以在设置里连接自己的后端。
 
 ### 2. 部署后端（可选，多设备同步需要）
 
@@ -87,7 +95,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 2. 初始化页会生成连接二维码。在 App 的「设置 → 后端连接」导入二维码图片或粘贴连接配置。
 3. 用所有者账号登录。其他设备导入同一份配置，登录同一账号，即可开始同步。
 
-公网 HTTPS、升级、备份恢复和网络排障见 [部署说明](deploy/README.md)。
+公网 HTTPS、升级、备份恢复和网络排障见 [部署说明](deploy/README.md)。升级后端时数据库会自动迁移，升级前建议先备份。
 
 ## 架构
 
@@ -132,6 +140,7 @@ cd android
 ```
 
 - debug 构建默认使用本地模拟数据接口；连接真实后端时加 `-PPLANLOCK_USE_MOCK=false`。
+- 地图与地点搜索使用[天地图](https://www.tianditu.gov.cn/)，需要在 `android/local.properties` 中配置自己申请的 Key：`TIANDITU_KEY=你的Key`（该文件不入库）。未配置时地图回退为 OpenStreetMap 瓦片，地点搜索使用系统 Geocoder。
 - release 构建始终使用真实接口，输出未签名 APK：`./gradlew :app:assembleRelease -PPLANLOCK_USE_MOCK=false`，再用 `zipalign` 和 `apksigner` 以你自己的密钥签名。自行签名的 APK 证书与官方版本不同，不能覆盖安装官方版本。
 - 最低支持 Android 7.0（API 24）。
 
@@ -153,7 +162,7 @@ cd android
 ```sh
 cd backend
 mvn clean verify
-java -jar planlock-app/target/planlock-app-2.1.0.jar
+java -jar planlock-app/target/planlock-app-2.1.1.jar
 ```
 
 默认监听 8080 端口。Flyway 会在空库上自动建表；已有数据库接入前请先备份并核对迁移历史，不要对存量库直接导入建表脚本。
@@ -178,8 +187,11 @@ npm run verify
 ## 安全与隐私
 
 - **数据归属**：本项目不运营托管服务；你的日程、计划与执行记录只存储在你的设备和你部署的后端上。
-- **App 访问的外部服务**：除你配置的后端与插件目录外，天气功能会向 [Open-Meteo](https://open-meteo.com/) 发送你搜索的城市名（`geocoding-api.open-meteo.com`）或所选城市的经纬度与时区（`api.open-meteo.com`），用于查询城市与当前天气。地点搜索与反查优先使用 Android 系统 Geocoder（服务提供方由设备决定），发送查询地名或选点坐标；地名搜索不可用时使用 Open-Meteo 城市搜索。地图默认向 [OpenStreetMap](https://www.openstreetmap.org/copyright) 瓦片服务（`tile.openstreetmap.org`）发送当前视野的缩放级别和瓦片编号，以加载底图；服务方也可见网络地址和应用 User-Agent。这些查询不携带知序账号凭据、日程标题或日程备注。系统定位需要定位授权；手动天气地点保持有效，直到选择使用当前位置。
-- **地图配置与署名**：`MapTileSettings` 可配置 HTTPS XYZ 瓦片地址与对应署名，坐标使用 WGS84；默认服务遵守 [OpenStreetMap 瓦片使用政策](https://operations.osmfoundation.org/policies/tiles/)，保留可见署名，使用独立应用 User-Agent、至少七天缓存，不提供区域预取或离线下载。地图组件为 [osmdroid 6.1.20](https://github.com/osmdroid/osmdroid)（Apache-2.0）；仓库已归档，升级或替换风险见真机能力实现记录。
+- **App 访问的外部服务**：除你配置的后端与插件目录外：
+  - **地图与地点（官方版本）**：使用[天地图](https://www.tianditu.gov.cn/)（`tianditu.gov.cn`）。加载底图与注记时发送当前视野的缩放级别和瓦片编号；搜索地点时发送你输入的关键词和搜索中心坐标；地图选点时发送所选坐标以反查地名。请求附带应用的天地图 Key，服务方也可见网络地址。自行编译且未配置 Key 时，底图改用 [OpenStreetMap](https://www.openstreetmap.org/copyright) 瓦片服务（`tile.openstreetmap.org`），地点搜索与反查使用 Android 系统 Geocoder（服务提供方由设备决定）。
+  - **天气**：向 [Open-Meteo](https://open-meteo.com/) 发送你搜索的城市名（`geocoding-api.open-meteo.com`）或所选城市的经纬度与时区（`api.open-meteo.com`）。
+  - 以上请求都不携带知序账号凭据、日程标题或日程备注。系统定位需要定位授权；手动设置的天气地点保持有效，直到你选择使用当前位置。
+- **地图组件与署名**：地图组件为 [osmdroid 6.1.20](https://github.com/osmdroid/osmdroid)（Apache-2.0），坐标使用 WGS84，地图上保留图源署名。使用 OpenStreetMap 图源时遵守其[瓦片使用政策](https://operations.osmfoundation.org/policies/tiles/)：独立应用 User-Agent、至少七天缓存，不提供区域预取或离线下载。
 - **传输**：公网地址强制 HTTPS。局域网 HTTP 仅对连接配置中显式允许、且解析结果全部为私网地址的端点生效，不放宽系统全局的明文传输策略。
 - **部署默认值**：密钥在安装时随机生成且仅当前用户可读；数据库与 Redis 不暴露端口；部署模式关闭公开注册与验证码登录。
 - **连接配置**：二维码与连接 JSON 只包含公开字段（实例名称、地址等），不含密码或令牌。
@@ -193,24 +205,25 @@ npm run verify
 
 ```sh
 sha256sum -c SHA256SUMS
-apksigner verify --print-certs zhixu-oriva-2.1.0.apk
+apksigner verify --print-certs zhixu-oriva-2.1.1.apk
 ```
 
-Windows 可用 `Get-FileHash .\zhixu-oriva-2.1.0.apk -Algorithm SHA256`。将 `Signer #1 certificate SHA-256 digest` 与 Release 说明中公布的证书指纹比对，一致即为官方构建。
+Windows 可用 `Get-FileHash .\zhixu-oriva-2.1.1.apk -Algorithm SHA256`。将 `Signer #1 certificate SHA-256 digest` 与 Release 说明中公布的证书指纹比对，一致即为官方构建。
 
 ## 已知限制
 
 - 公网 HTTPS 自动证书尚未使用真实域名验证。
 - 后端镜像目前只验证了 linux/amd64；arm64 与具体 NAS 型号尚未验证。
 - AI 对话模式尚未开放，当前为本地指令助理；附件目前只有选择入口，暂不支持读取和总结。
-- 统计页暂不包含尚未上传到后端的本机执行记录。
 - Android 12L 及以下，冷启动时的系统启动窗口不跟随所选主题（应用内主题不受影响）。
 
 ## 路线图
 
 | 版本 | 内容 |
 |---|---|
-| **v2.1**（当前） | 自建后端部署套件、多设备同步与冲突确认、六套主题 |
+| v2.1 | 自建后端部署套件、多设备同步与冲突确认、六套主题 |
+| **v2.1.1**（当前） | v2.1 收尾修复：首次启动选择、账号数据隔离、计划提醒与通知、地图选点、计划类型、统计「我的节奏」 |
+| v2.1.2 | 知行对你的了解、计划进行中的状态栏胶囊、arm64 镜像 |
 | v2.2 | 云平台一键部署（优先免费层，收费项事先说明） |
 | v2.3 | App 内部署向导 |
 | 之后 | 日常记录、iOS、Web 端、开源插件站 |
