@@ -89,7 +89,7 @@ class PlanCalendarFallback(context: Context) {
             }
         }
 
-    /** Call only after an on-time REMINDER, or START when no advance reminder exists. */
+    /** Call after an on-time REMINDER or START; repeated suppression of the same occurrence is idempotent. */
     suspend fun suppressOccurrence(planId: Long, occurrenceStartAt: Long, scope: String = TokenStore.state.value.dataScope): Unit =
         withContext(Dispatchers.IO) {
             lock.withLock {

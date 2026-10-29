@@ -96,6 +96,11 @@ import com.planlock.feature.plan.TodayScreen
 import com.planlock.feature.plan.TodayLocalKey
 import com.planlock.feature.plan.TodayLocalPhase
 import com.planlock.feature.plan.TodayLocalStateHolder
+import com.planlock.feature.plan.PlanActionGate
+import com.planlock.feature.plan.PendingPlanAction
+import com.planlock.feature.plan.PlanActionDialogHost
+import com.planlock.feature.plan.ProtectedPlanAction
+import com.planlock.feature.plan.requestOrRunPlanAction
 import com.planlock.feature.settings.SettingsScreen
 import com.planlock.feature.settings.SettingsDetailScreen
 import com.planlock.feature.settings.SettingsDomain
@@ -277,6 +282,14 @@ private fun AppContent(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val sync = remember { AppSync.get(context) }
+    val notificationStore = remember { RecordStore(context) }
+    val notificationGate = remember {
+        PlanActionGate(notificationStore, com.planlock.app.api.ApiClient.create(),
+            com.planlock.app.security.BackupPasswordStore(context.planLockPreferences), context.planLockPreferences, sync = sync)
+    }
+    val notificationScope = rememberCoroutineScope()
+    var notificationAction by remember { mutableStateOf<PendingPlanAction?>(null) }
+    PlanActionDialogHost(notificationGate, notificationAction) { notificationAction = null }
     val commitLogged = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     SideEffect {
         if (commitLogged.compareAndSet(false, true)) {
@@ -340,10 +353,19 @@ private fun AppContent(
             val planId = incoming.getLongExtra("notification_plan_id", Long.MIN_VALUE)
             if (incoming.getBooleanExtra("acknowledge_alarm", false)) PlanAlerts.acknowledge(context, TokenStore.state.value.dataScope, planId)
             if (planId != Long.MIN_VALUE) navController.navigate("detail/$planId")
+            if (incoming.getBooleanExtra("end_plan", false) && planId != Long.MIN_VALUE) {
+                val plan = withContext(Dispatchers.IO) { notificationStore.plan(planId) }
+                if (plan != null && notificationGate.needsEndChoice(plan, ProtectedPlanAction.PAUSE)) {
+                    requestOrRunPlanAction(notificationGate, plan, ProtectedPlanAction.PAUSE,
+                        onPrompt = { notificationAction = it },
+                        onCompleted = { warning -> notificationScope.launch { snackbar.showSnackbar(warning ?: "已结束本次计划") } })
+                }
+            }
         }
         if (incoming?.getBooleanExtra("reminder_settings", false) == true) navController.navigate("settings/permissions")
         incoming?.removeExtra("reminder_settings")
         incoming?.removeExtra("acknowledge_alarm")
+        incoming?.removeExtra("end_plan")
         incoming?.removeExtra("notification_plan_id")
         incoming?.removeExtra("notification_scope")
     }

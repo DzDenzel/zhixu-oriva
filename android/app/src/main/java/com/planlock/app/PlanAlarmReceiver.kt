@@ -55,7 +55,7 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                     if (expected?.triggerAt == due && now >= due) {
                         val fallback = PlanCalendarFallback(context)
                         if (now - due <= 5_000L && fallback.isEnabled() &&
-                            (kind == PlanAlarmKind.REMINDER || kind == PlanAlarmKind.START && plan.remindAdvanceMin == null))
+                            (kind == PlanAlarmKind.REMINDER || kind == PlanAlarmKind.START))
                             fallback.suppressOccurrence(plan.id, expected.startAt, owner)
                         when (kind) {
                             PlanAlarmKind.REMINDER -> if (PlanAlarmLateness.mayRemind(due, now, expected.startAt, expected.endAt))

@@ -69,7 +69,12 @@ object PlanLiveUpdates {
             .setRequestPromotedOngoing(Build.VERSION.SDK_INT >= 36 && manager.canPostPromotedNotifications())
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setSilent(!mayAlert)
             .addExtras(Bundle().apply { putString(PHASE, stage); putString("oriva_occurrence", occurrence) })
-        if (running) builder.addAction(0, "结束", open)
+        if (running) {
+            val endIntent = PlanAlerts.detail(context, plan.scope, plan.id).putExtra("end_plan", true)
+            endIntent.data = endIntent.data?.buildUpon()?.appendQueryParameter("action", "end")?.build()
+            builder.addAction(0, "结束", PendingIntent.getActivity(context, plan.id.hashCode(), endIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+        }
         if (!running) builder.setTimeoutAfter((targetAt - System.currentTimeMillis() + 5_000).coerceAtLeast(1))
         var notification = builder.build()
         var characteristics: Boolean? = null

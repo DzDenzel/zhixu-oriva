@@ -119,12 +119,12 @@ object PlanAlerts {
         p.edit().putInt("snoozes:${key(scope,id)}", count + 1).commit()
         val at = System.currentTimeMillis() + 5 * 60_000L
         if (at >= endAt) return
-        val pending = requireNotNull(snoozePending(context, scope, id, endAt, PendingIntent.FLAG_UPDATE_CURRENT))
+        val pending = requireNotNull(snoozePending(context, scope, id, endAt, PendingIntent.FLAG_UPDATE_CURRENT, at))
         context.getSystemService(AlarmManager::class.java).setAlarmClock(AlarmManager.AlarmClockInfo(at, null), pending)
     }
-    private fun snoozePending(context: Context, scope: String, id: Long, endAt: Long, flags: Int): PendingIntent? = PendingIntent.getBroadcast(context, id.hashCode(),
+    private fun snoozePending(context: Context, scope: String, id: Long, endAt: Long, flags: Int, triggerAt: Long = 0L): PendingIntent? = PendingIntent.getBroadcast(context, id.hashCode(),
         Intent(context, PlanSnoozeReceiver::class.java).setData(Uri.parse("oriva://snooze/${Uri.encode(scope)}/$id"))
-            .putExtra("scope", scope).putExtra("plan_id", id).putExtra("end_at", endAt), flags or PendingIntent.FLAG_IMMUTABLE)
+            .putExtra("scope", scope).putExtra("plan_id", id).putExtra("end_at", endAt).putExtra("trigger_at", triggerAt), flags or PendingIntent.FLAG_IMMUTABLE)
 }
 class PlanAlertActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -143,8 +143,16 @@ class PlanSnoozeReceiver : BroadcastReceiver() {
                 if (intent.getStringExtra("scope") != TokenStore.state.value.dataScope) return@launch
                 val plan = RecordStore(context).plan(intent.getLongExtra("plan_id", Long.MIN_VALUE)) ?: return@launch
                 val end = intent.getLongExtra("end_at", 0)
-                val occurrence = PlanAlarmTime.next(plan, PlanAlarmKind.END, System.currentTimeMillis())
-                if (occurrence?.endAt == end && System.currentTimeMillis() >= occurrence.startAt) PlanAlerts.start(context, plan, end, repeated = true)
+                val now = System.currentTimeMillis()
+                val due = intent.getLongExtra("trigger_at", 0)
+                val delivery = com.planlock.app.record.PlanAlarmDeliveryLog(context).record(PlanAlarmKind.START, plan.id, plan.name, due, now)
+                val deferred = com.planlock.app.record.PlanAlarmLateness.isDeferred(due, now)
+                val occurrence = PlanAlarmTime.next(plan, PlanAlarmKind.END, now)
+                if (deferred) PlanNotifications.deferred(context, plan, delivery.lateMs)
+                if (occurrence?.endAt == end && now >= occurrence.startAt) {
+                    androidx.core.content.ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java))
+                    if (!deferred) PlanAlerts.start(context, plan, end, repeated = true)
+                }
             } finally { result.finish() }
         }
     }
