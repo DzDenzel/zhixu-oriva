@@ -9,6 +9,9 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.sync.withLock
 
 /** Single process entry point for UI/service intents; never retains an Activity. */
@@ -30,6 +33,9 @@ class AppSync private constructor(context: Context) {
         } }
         finally { android.util.Log.i("OrivaSync", "coordinated-sync-end") }
     }
+    val backendConnectionState = combine(ConnectionStore.state, coordinator.state) { connection, sync ->
+        backendConnectionState(connection.config != null, sync)
+    }.stateIn(scope, SharingStarted.Eagerly, backendConnectionState(ConnectionStore.state.value.config != null, coordinator.state.value))
     private val authLock = kotlinx.coroutines.sync.Mutex()
     private val registrationGate = DeviceRegistrationGate()
     private val sessionLock = kotlinx.coroutines.sync.Mutex()

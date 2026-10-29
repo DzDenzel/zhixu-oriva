@@ -85,6 +85,7 @@ fun AssistantScreen(onOpenPage: (AssistantDestination) -> Unit = {}, onBack: () 
     }
     var mode by rememberSaveable { mutableStateOf(AssistantMode.LOCAL) }
     val connection by ConnectionStore.state.collectAsState()
+    val backendConnection by sync.backendConnectionState.collectAsState()
     // AI 组件随 v3.0 内核提供；在那之前 AI 模式一律如实回落到本地规则（PRD §5.2 A5）。
     val aiReady = false
     fun post(reply: AssistantReply, question: String? = null, attachments: List<AssistantAttachment> = emptyList()) {
@@ -224,8 +225,11 @@ fun AssistantScreen(onOpenPage: (AssistantDestination) -> Unit = {}, onBack: () 
                     if (target == mode) return@AssistantMasthead
                     mode = target
                     if (target == AssistantMode.AI && !aiReady) post(AssistantReply(
-                        if (connection.config == null) "AI 模式需要先连接你自己的个人后端。连接之前，我先用本地规则回答，查询不联网。"
-                        else "已连接你的个人后端，但 AI 组件还没有启用。启用之前，我先用本地规则回答。"
+                        when (backendConnection) {
+                            com.planlock.app.sync.BackendConnectionState.LOCAL_ONLY -> "仅本地使用。AI 模式需要先连接你自己的个人后端。连接之前，我先用本地规则回答，查询不联网。"
+                            com.planlock.app.sync.BackendConnectionState.UNREACHABLE -> "暂时连不上你的个人后端。我先用本地规则回答，查询不联网。"
+                            com.planlock.app.sync.BackendConnectionState.CONNECTED -> "已连接你的个人后端，但 AI 组件还没有启用。启用之前，我先用本地规则回答。"
+                        }
                     ))
                     if (target == AssistantMode.LOCAL) post(AssistantReply("已切回本地模式：本地规则作答，查询不联网。"))
                 }

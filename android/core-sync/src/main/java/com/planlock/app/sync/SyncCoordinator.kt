@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 enum class SyncPhase { IDLE, BACKGROUND, USER, FAILED, LOGIN_REQUIRED }
-data class SyncState(val running: Boolean = false, val revision: Long = 0, val attempts: Long = 0, val error: String? = null, val loginRequired: Boolean = false, val backgroundRunning: Boolean = false) {
+data class SyncState(val running: Boolean = false, val revision: Long = 0, val attempts: Long = 0, val error: String? = null, val loginRequired: Boolean = false, val backgroundRunning: Boolean = false, val lastRoundSucceeded: Boolean = false) {
     val phase: SyncPhase get() = when {
         running -> SyncPhase.USER
         backgroundRunning -> SyncPhase.BACKGROUND
@@ -39,7 +39,7 @@ class SyncCoordinator(
     /** Explicit local-only mode dismisses obsolete feedback without requesting a transfer. */
     fun clearError() = synchronized(monitor) {
         feedbackGeneration++
-        mutableState.value = mutableState.value.copy(error = null, loginRequired = false)
+        mutableState.value = mutableState.value.copy(error = null, loginRequired = false, lastRoundSucceeded = false)
     }
     fun foregrounded(): Job = refresh(userInitiated = false)
     fun cancel() = synchronized(monitor) { active?.cancel() }
@@ -68,6 +68,7 @@ class SyncCoordinator(
                         running = false, backgroundRunning = false, revision = current.revision + 1,
                         error = if (feedbackIsCurrent) failure else current.error,
                         loginRequired = if (feedbackIsCurrent) loginRequired else current.loginRequired,
+                        lastRoundSucceeded = if (feedbackIsCurrent) failure == null && !loginRequired else current.lastRoundSucceeded,
                     )
                     active = null
                 }
