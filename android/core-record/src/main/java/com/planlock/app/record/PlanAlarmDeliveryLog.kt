@@ -35,5 +35,5 @@ object PlanAlarmLateness {
     fun mayRemind(scheduledAt: Long, deliveredAt: Long, startAt: Long, endAt: Long): Boolean =
         deliveredAt < endAt && (!isDeferred(scheduledAt, deliveredAt) || deliveredAt < startAt)
     fun mayStart(deliveredAt: Long, startAt: Long, endAt: Long): Boolean = deliveredAt >= startAt && deliveredAt < endAt
-    fun delayedMinutes(lateMs: Long): Long = ((lateMs + 59_999L) / 60_000L).coerceAtLeast(1)
+    fun delayedMinutes(lateMs: Long): Long = (lateMs / 60_000L).coerceAtLeast(1)
 }

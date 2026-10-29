@@ -282,14 +282,14 @@ private fun AppContent(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val sync = remember { AppSync.get(context) }
-    val notificationStore = remember { RecordStore(context) }
-    val notificationGate = remember {
+    val notificationStore by remember { lazy { RecordStore(context) } }
+    val notificationGate by remember { lazy {
         PlanActionGate(notificationStore, com.planlock.app.api.ApiClient.create(),
             com.planlock.app.security.BackupPasswordStore(context.planLockPreferences), context.planLockPreferences, sync = sync)
-    }
+    } }
     val notificationScope = rememberCoroutineScope()
     var notificationAction by remember { mutableStateOf<PendingPlanAction?>(null) }
-    PlanActionDialogHost(notificationGate, notificationAction) { notificationAction = null }
+    if (notificationAction != null) PlanActionDialogHost(notificationGate, notificationAction) { notificationAction = null }
     val commitLogged = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     SideEffect {
         if (commitLogged.compareAndSet(false, true)) {

@@ -2,21 +2,17 @@ package com.planlock.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
-import com.planlock.app.record.entity.PlanSnapshotEntity
 
 class PlanNotificationCopyTest {
-    private val plan = PlanSnapshotEntity(-1, 0, "晨读", "custom:reading", "08:20", "08:22", null, null, null, 1, null, 1, 0)
 
-    @Test fun reminderUsesPlanTitleTimeAndResolvedTypeName() {
-        val copy = PlanNotificationCopy.reminder(plan, "练琴")
-        assertEquals("「晨读」1 分钟后开始", copy.title)
-        assertEquals("08:20 – 08:22 · 练琴", copy.body)
+    @Test fun waitingTitleUsesTheActualRemainingTime() {
+        assertEquals("「晨读」1 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 60_000))
+        assertEquals("「晨读」15 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 900_000))
     }
 
-    @Test fun overnightReminderMakesNextDayExplicit() {
-        val copy = PlanNotificationCopy.reminder(plan.copy(startTime = "23:30", endTime = "01:00", remindAdvanceMin = 15), "学习")
-        assertEquals("「晨读」15 分钟后开始", copy.title)
-        assertEquals("23:30 – 次日 01:00 · 学习", copy.body)
+    @Test fun waitingTitleRoundsUpUntilTheNextMinute() {
+        assertEquals("「晨读」2 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 60_001))
+        assertEquals("「晨读」1 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 1))
     }
 
     @Test fun completionDoesNotRepeatItsTitleInTheBody() {

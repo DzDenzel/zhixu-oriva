@@ -238,8 +238,9 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         val plan = plan(planId) ?: return null
         val clock = java.util.Calendar.getInstance().apply { timeInMillis = nowMillis }
         val minutes = clock.get(java.util.Calendar.HOUR_OF_DAY) * 60 + clock.get(java.util.Calendar.MINUTE)
-        if (!PlanOccurrence.isActive(plan, minutes, OccurrenceDate.from(clock))) return null
-        val date = RecordEventFactory().executionStarted(plan, nowMillis).planDate
+        val day = OccurrenceDate.from(clock)
+        if (!PlanOccurrence.isActive(plan, minutes, day)) return null
+        val date = PlanOccurrence.occurrenceDate(plan, minutes, day)
         seedLegacyHistory()
         return plan.takeUnless {
             historyDao.all(dataScope()).any { it.type == "execution" && it.localOrigin && it.planId == plan.id &&

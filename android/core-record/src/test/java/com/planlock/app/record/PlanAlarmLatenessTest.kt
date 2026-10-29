@@ -22,8 +22,9 @@ class PlanAlarmLatenessTest {
         assertTrue(PlanAlarmLateness.mayStart(199_999, 100_000, 200_000))
         assertFalse(PlanAlarmLateness.mayStart(200_000, 100_000, 200_000))
     }
-    @Test fun deferralDisplayRoundsUp() {
-        assertEquals(2, PlanAlarmLateness.delayedMinutes(60_001).toInt())
+    @Test fun deferralDisplayUsesElapsedWholeMinutes() {
+        assertEquals(1, PlanAlarmLateness.delayedMinutes(60_001).toInt())
+        assertEquals(2, PlanAlarmLateness.delayedMinutes(120_001).toInt())
         assertEquals(3, PlanAlarmLateness.delayedMinutes(180_000).toInt())
     }
 }
