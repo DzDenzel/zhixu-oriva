@@ -50,7 +50,7 @@ object PlanAlerts {
         Intent(context, PlanAlertActionReceiver::class.java).setData(Uri.parse("oriva://alert-action/${Uri.encode(scope)}/$id/$endAt/$snooze"))
             .putExtra("scope", scope).putExtra("plan_id", id).putExtra("end_at", endAt).putExtra("snooze", snooze)
 
-    suspend fun start(context: Context, plan: PlanSnapshotEntity, endAt: Long, repeated: Boolean = false) {
+    suspend fun start(context: Context, plan: PlanSnapshotEntity, endAt: Long, requiresOwnPolicyBypass: Boolean, repeated: Boolean = false) {
         if (plan.scope != TokenStore.state.value.dataScope) return
         val manager = context.getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
@@ -66,19 +66,27 @@ object PlanAlerts {
         val acknowledge = PendingIntent.getActivity(context, plan.id.hashCode(), detail(context, plan.scope, plan.id)
             .putExtra("acknowledge_alarm", true), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val snooze = PendingIntent.getBroadcast(context, plan.id.hashCode(), action(context, plan.scope, plan.id, endAt, true), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val state = context.planLockPreferences.data.first()
+        val filter = manager.currentInterruptionFilter
+        val owned = state[PlanLockPreferenceKeys.dndPlanId] == plan.id &&
+            state[PlanLockPreferenceKeys.dndPreviousFilter] == NotificationManager.INTERRUPTION_FILTER_ALL &&
+            filter == NotificationManager.INTERRUPTION_FILTER_ALARMS
+        // On API37 the SILENT instance flag suppresses full-screen presentation too.
+        // Only user-owned DND requests silence; normal and plan-owned alarms remain interruptive.
+        val userDnd = filter != NotificationManager.INTERRUPTION_FILTER_ALL && !owned
         val notification = NotificationCompat.Builder(context, PlanReminderChannel.START_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm).setContentTitle("「${plan.name}」开始了")
             .setContentText("计划照常进行 · 请选择提醒操作").setCategory(NotificationCompat.CATEGORY_ALARM)
             .setPriority(NotificationCompat.PRIORITY_MAX).setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true).setSilent(true).setContentIntent(open).setFullScreenIntent(open, true)
+            .setOngoing(true).setSilent(userDnd).setContentIntent(open).setFullScreenIntent(open, true)
             .addAction(0, "5 分钟后再提醒", snooze).addAction(0, "我知道了", acknowledge).build()
+        val selfPlayback = requiresOwnPolicyBypass || owned
+        if (!selfPlayback && !userDnd) notification.flags = notification.flags or android.app.Notification.FLAG_INSISTENT
         PlanLiveUpdates.cancelWaiting(context, plan)
         manager.notify("oriva-start:${plan.scope}", plan.id.hashCode(), notification)
-        val state = context.planLockPreferences.data.first()
-        val owned = state[PlanLockPreferenceKeys.dndPlanId] == plan.id && state[PlanLockPreferenceKeys.dndPreviousFilter] == NotificationManager.INTERRUPTION_FILTER_ALL && manager.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALARMS
         val channel = if (Build.VERSION.SDK_INT >= 26) manager.getNotificationChannel(PlanReminderChannel.START_ID) else null
         val allowed = manager.areNotificationsEnabled() && (Build.VERSION.SDK_INT < 26 || channel?.importance != NotificationManager.IMPORTANCE_NONE)
-        if (allowed) ring(context, token, owned, channel)
+        if (allowed && selfPlayback) ring(context, token, owned, channel)
         android.util.Log.i("OrivaAlerts", "START plan=${plan.id} end_at=$endAt full_screen=true can_use_fsi=${Build.VERSION.SDK_INT < 34 || manager.canUseFullScreenIntent()} at=${System.currentTimeMillis()}")
     }
     @Synchronized private fun ring(context: Context, token: String, owned: Boolean, channel: android.app.NotificationChannel?) {
@@ -141,7 +149,8 @@ class PlanSnoozeReceiver : BroadcastReceiver() {
             try {
                 TokenStore.restore(context.planLockPreferences)
                 if (intent.getStringExtra("scope") != TokenStore.state.value.dataScope) return@launch
-                val plan = RecordStore(context).plan(intent.getLongExtra("plan_id", Long.MIN_VALUE)) ?: return@launch
+                val store = RecordStore(context)
+                val plan = store.plan(intent.getLongExtra("plan_id", Long.MIN_VALUE)) ?: return@launch
                 val end = intent.getLongExtra("end_at", 0)
                 val now = System.currentTimeMillis()
                 val due = intent.getLongExtra("trigger_at", 0)
@@ -151,7 +160,10 @@ class PlanSnoozeReceiver : BroadcastReceiver() {
                 if (deferred) PlanNotifications.deferred(context, plan, delivery.lateMs)
                 if (occurrence?.endAt == end && now >= occurrence.startAt) {
                     androidx.core.content.ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java))
-                    if (!deferred) PlanAlerts.start(context, plan, end, repeated = true)
+                    if (!deferred) {
+                        val strategy = store.strategy(plan.id)
+                        PlanAlerts.start(context, plan, end, strategy?.notifySilence == true || strategy?.autoDnd == true, repeated = true)
+                    }
                 }
             } finally { result.finish() }
         }

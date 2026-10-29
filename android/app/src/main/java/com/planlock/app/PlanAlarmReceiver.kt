@@ -65,7 +65,10 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                                 if (PlanAlarmLateness.mayStart(now, expected.startAt, expected.endAt)) {
                                     runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
                                         .onFailure { android.util.Log.w("OrivaAlarms", "Execution service start deferred", it) }
-                                    if (!deferred) PlanAlerts.start(context, plan, expected.endAt)
+                                    if (!deferred) {
+                                        val strategy = store.strategy(plan.id)
+                                        PlanAlerts.start(context, plan, expected.endAt, strategy?.notifySilence == true || strategy?.autoDnd == true)
+                                    }
                                 }
                                 if (deferred) PlanNotifications.deferred(context, plan, delivery.lateMs)
                             }
