@@ -1,13 +1,13 @@
 package com.planlock.app
 
 import android.Manifest
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -35,6 +35,7 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                 TokenStore.restore(context.planLockPreferences)
                 val scheduler = PlanAlarmScheduler(context)
                 if (intent.action != null) {
+                    com.planlock.app.security.PlanReminderChannel.ensure(context)
                     scheduler.invalidate()
                     scheduler.reconcile()
                     return@withTimeout
@@ -46,16 +47,30 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                     val plan = store.plan(intent.getLongExtra("plan_id", Long.MIN_VALUE)) ?: return@withLocalMutation
                     val kind = runCatching { PlanAlarmKind.valueOf(intent.getStringExtra("kind").orEmpty()) }.getOrNull() ?: return@withLocalMutation
                     val due = intent.getLongExtra("trigger_at", 0)
-                    val expected = PlanAlarmTime.next(plan, kind, due - 1)
                     val now = System.currentTimeMillis()
-                    if (expected?.triggerAt == due && now >= due) when (kind) {
-                        PlanAlarmKind.REMINDER -> if (now < expected.endAt) PlanNotifications.reminder(context, plan)
-                        PlanAlarmKind.START -> if (now < expected.endAt) {
-                            // Exact alarm delivery is an allowed background foreground-service entry point.
-                            runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
-                                .onFailure { android.util.Log.w("OrivaAlarms", "Execution service start deferred", it) }
+                    val delivery = PlanAlarmDeliveryLog(context).record(kind, plan.id, plan.name, due, now)
+                    val deferred = PlanAlarmLateness.isDeferred(due, now)
+                    android.util.Log.i("OrivaAlarms", "delivery kind=$kind plan_id=${plan.id} trigger_at=$due delivered_at=$now late_ms=${delivery.lateMs}")
+                    val expected = PlanAlarmTime.next(plan, kind, due - 1)
+                    if (expected?.triggerAt == due && now >= due) {
+                        val fallback = PlanCalendarFallback(context)
+                        if (now - due <= 5_000L && fallback.isEnabled() &&
+                            (kind == PlanAlarmKind.REMINDER || kind == PlanAlarmKind.START && plan.remindAdvanceMin == null))
+                            fallback.suppressOccurrence(plan.id, expected.startAt, owner)
+                        when (kind) {
+                            PlanAlarmKind.REMINDER -> if (PlanAlarmLateness.mayRemind(due, now, expected.startAt, expected.endAt))
+                                PlanLiveUpdates.waiting(context, plan, expected.startAt, expected.endAt)
+                            PlanAlarmKind.START -> {
+                                PlanLiveUpdates.cancelWaiting(context, plan)
+                                if (PlanAlarmLateness.mayStart(now, expected.startAt, expected.endAt)) {
+                                    runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
+                                        .onFailure { android.util.Log.w("OrivaAlarms", "Execution service start deferred", it) }
+                                    if (!deferred) PlanAlerts.start(context, plan, expected.endAt)
+                                }
+                                if (deferred) PlanNotifications.deferred(context, plan, delivery.lateMs)
+                            }
+                            PlanAlarmKind.END -> PlanCompletion.finish(context, store, plan, now)
                         }
-                        PlanAlarmKind.END -> PlanCompletion.finish(context, store, plan, now)
                     }
                     scheduler.reconcile(store)
                 }
@@ -74,45 +89,44 @@ object PlanCompletion {
         val end = PlanAlarmTime.next(plan, PlanAlarmKind.END, began - 1)?.endAt
         val completed = plan.status == 1 && end != null && now >= end
         if (!store.finishOccurrence(plan.id, now)) return false
+        if (com.planlock.app.engine.ExecutionEngine.activePlanId() == plan.id) com.planlock.app.engine.ExecutionEngine.stop()
+        PlanAlerts.cancel(context, plan.scope, plan.id)
+        PlanLiveUpdates.cancelWaiting(context, plan)
+        val quiet = PlanCompletionGate.beforeNotification(context, store, plan, now)
         if (completed) {
             if (AppVisibility.foreground) ExecutionFeedback.emit(plan.id, FeedbackKind.COMPLETED)
-            else PlanNotifications.completed(context, plan, (requireNotNull(end) - began).coerceAtLeast(0))
-            executionHaptic(context)
+            PlanNotifications.completed(context, plan, (requireNotNull(end) - began).coerceAtLeast(0), quiet)
+            if (quiet == PlanQuietOutcome.RELEASED) executionHaptic(context)
         }
         return true
     }
 }
 
 object PlanNotifications {
-    private const val CHANNEL = "oriva_plan_events"
-    suspend fun reminder(context: Context, plan: PlanSnapshotEntity) {
-        val typeName = RecordStore(context).forScope(plan.scope).planTypeLabel(plan.type)
-        val copy = PlanNotificationCopy.reminder(plan, typeName)
-        PlanReminderChannel.ensure(context)
-        show(context, plan, copy.title, copy.body, reminder = true)
-    }
-    fun completed(context: Context, plan: PlanSnapshotEntity, durationMillis: Long) {
+    fun completed(context: Context, plan: PlanSnapshotEntity, durationMillis: Long, quiet: PlanQuietOutcome) {
         val copy = PlanNotificationCopy.completed(plan.name, durationMillis)
-        show(context, plan, copy.title, copy.body)
+        show(context, plan, copy.title, copy.body, quiet == PlanQuietOutcome.RELEASED)
+        android.util.Log.i("OrivaAlerts", "END notify plan_id=${plan.id} quiet=$quiet at=${System.currentTimeMillis()}")
     }
-
-    private fun show(context: Context, plan: PlanSnapshotEntity, title: String, text: String, reminder: Boolean = false) {
+    fun deferred(context: Context, plan: PlanSnapshotEntity, lateMs: Long) {
+        val text = "「${plan.name}」的提醒被系统推迟了 ${PlanAlarmLateness.delayedMinutes(lateMs)} 分钟"
+        show(context, plan, text, "可检查后台运行与日历兜底设置", audible = true, settings = true)
+    }
+    private fun show(context: Context, plan: PlanSnapshotEntity, title: String, text: String, audible: Boolean, settings: Boolean = false) {
         if (plan.scope != TokenStore.state.value.dataScope) return
         if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        PlanReminderChannel.ensure(context)
         val manager = context.getSystemService(NotificationManager::class.java)
-        if (!reminder && Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(CHANNEL, "计划提醒与完成", NotificationManager.IMPORTANCE_HIGH))
-        val open = Intent(context, MainActivity::class.java).putExtra("notification_plan_id", plan.id).putExtra("notification_scope", plan.scope)
-            .setData(android.net.Uri.Builder().scheme("oriva").authority("plan").appendPath(plan.scope).appendPath(plan.id.toString()).build())
-        val tap = PendingIntent.getActivity(context, plan.id.hashCode(), open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification = NotificationCompat.Builder(context, if (reminder) PlanReminderChannel.ID else CHANNEL).setSmallIcon(android.R.drawable.ic_dialog_info)
+        val tap = PendingIntent.getActivity(context, plan.id.hashCode(), PlanAlerts.detail(context, plan.scope, plan.id), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val mode = context.getSystemService(AudioManager::class.java).ringerMode
+        val canAlert = audible && PlanAlertSoundPolicy.vibrate(mode, manager.currentInterruptionFilter, false)
+        val builder = NotificationCompat.Builder(context, PlanReminderChannel.COMPLETION_ID).setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title).setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .apply { if (reminder) {
-                setPriority(NotificationCompat.PRIORITY_MAX)
-                setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-                setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            } }
-            .setCategory(NotificationCompat.CATEGORY_REMINDER).setAutoCancel(true).setContentIntent(tap).build()
-        if (plan.scope == TokenStore.state.value.dataScope) manager.notify("oriva-plan:${plan.scope}", plan.id.hashCode(), notification)
+            .setCategory(NotificationCompat.CATEGORY_EVENT).setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT).setAutoCancel(true).setContentIntent(tap).setSilent(!canAlert)
+        if (settings) builder.addAction(0, "去设置", PendingIntent.getActivity(context, plan.id.hashCode(),
+            Intent(context, MainActivity::class.java).setData(android.net.Uri.parse("oriva://reminder-settings"))
+                .putExtra("reminder_settings", true), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+        manager.notify("oriva-${if (settings) "deferred" else "completed"}:${plan.scope}", plan.id.hashCode(), builder.build())
     }
 }
-

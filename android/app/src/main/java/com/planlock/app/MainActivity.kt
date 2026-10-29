@@ -338,8 +338,12 @@ private fun AppContent(
         val incoming = activity?.intent
         if (incoming?.getStringExtra("notification_scope") == TokenStore.state.value.dataScope) {
             val planId = incoming.getLongExtra("notification_plan_id", Long.MIN_VALUE)
+            if (incoming.getBooleanExtra("acknowledge_alarm", false)) PlanAlerts.acknowledge(context, TokenStore.state.value.dataScope, planId)
             if (planId != Long.MIN_VALUE) navController.navigate("detail/$planId")
         }
+        if (incoming?.getBooleanExtra("reminder_settings", false) == true) navController.navigate("settings/permissions")
+        incoming?.removeExtra("reminder_settings")
+        incoming?.removeExtra("acknowledge_alarm")
         incoming?.removeExtra("notification_plan_id")
         incoming?.removeExtra("notification_scope")
     }

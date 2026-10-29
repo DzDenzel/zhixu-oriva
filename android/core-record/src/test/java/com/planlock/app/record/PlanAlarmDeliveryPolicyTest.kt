@@ -4,17 +4,16 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PlanAlarmDeliveryPolicyTest {
-    @Test fun enabledUsesClockForStartAndReminderOnly() {
-        assertEquals(PlanAlarmDeliveryMode.ALARM_CLOCK, planAlarmDeliveryMode(PlanAlarmKind.START, true, true))
-        assertEquals(PlanAlarmDeliveryMode.ALARM_CLOCK, planAlarmDeliveryMode(PlanAlarmKind.REMINDER, true, true))
-        assertEquals(PlanAlarmDeliveryMode.EXACT, planAlarmDeliveryMode(PlanAlarmKind.END, true, true))
+    @Test fun enabledUsesClockForEveryMoment() {
+        PlanAlarmKind.entries.forEach { assertEquals(PlanAlarmDeliveryMode.ALARM_CLOCK, planAlarmDeliveryMode(it, true, true)) }
     }
     @Test fun disabledRestoresOrdinaryExactForEveryKind() {
         PlanAlarmKind.entries.forEach { assertEquals(PlanAlarmDeliveryMode.EXACT, planAlarmDeliveryMode(it, false, true)) }
     }
-    @Test fun permissionRevocationAlwaysDegradesWithoutClock() {
-        for (enabled in listOf(true, false)) PlanAlarmKind.entries.forEach {
-            assertEquals(PlanAlarmDeliveryMode.INEXACT, planAlarmDeliveryMode(it, enabled, false))
+    @Test fun alarmClockDoesNotRequireSpecialExactAccess() {
+        PlanAlarmKind.entries.forEach {
+            assertEquals(PlanAlarmDeliveryMode.ALARM_CLOCK, planAlarmDeliveryMode(it, true, false))
+            assertEquals(PlanAlarmDeliveryMode.INEXACT, planAlarmDeliveryMode(it, false, false))
         }
     }
 }

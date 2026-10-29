@@ -14,6 +14,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <!-- ADR-006 L1/L2 须识别未知厂商的无桌面入口系统组件，有限 queries 无法穷举。
          全包事实仅用于本机执行判定，不上传；此条权限用途须随严格模式交付复核。 -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
@@ -46,6 +51,12 @@
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
+        <receiver android:name=".PlanAlertActionReceiver" android:exported="false" />
+        <receiver android:name=".PlanSnoozeReceiver" android:exported="false" />
+        <receiver android:name=".PlanLiveDismissReceiver" android:exported="false" />
+        <activity android:name=".PlanAlertActivity" android:exported="false"
+            android:showWhenLocked="true" android:turnScreenOn="true"
+            android:excludeFromRecents="true" android:launchMode="singleTask" />
 
         <activity
             android:name=".MainActivity"

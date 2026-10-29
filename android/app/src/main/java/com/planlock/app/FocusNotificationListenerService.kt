@@ -25,6 +25,7 @@ class FocusNotificationListenerService : NotificationListenerService() {
     override fun onDestroy() { NotificationSilenceController.destroy(this); super.onDestroy() }
     override fun onListenerHintsChanged(hints: Int) {
         Log.i("OrivaSilence", "host-hints=$hints")
+        NotificationSilenceController.observeHints(this, hints)
     }
     internal fun applyRequired(required: Boolean) {
         if (requested == required) return
@@ -38,20 +39,31 @@ internal object NotificationSilenceController {
     private var app: Context? = null
     private var listener: FocusNotificationListenerService? = null
     private var required = false
+    private val receipts = PlanHintReceipt()
     private val recovery = ListenerRebindGate()
 
     @Synchronized fun initialize(context: Context) { app = context.applicationContext }
     @Synchronized fun attach(service: FocusNotificationListenerService) {
         listener = service
+        receipts.connect()
         service.applyRequired(required)
         Log.i("OrivaSilence", "connected required=$required")
     }
     // After onListenerDisconnected only requestRebind is safe; never send hints via a stale token.
     @Synchronized fun detach(service: FocusNotificationListenerService) {
-        if (listener === service) { listener = null; Log.i("OrivaSilence", "disconnected") }
+        if (listener === service) { listener = null; receipts.disconnect(); Log.i("OrivaSilence", "disconnected") }
     }
     @Synchronized fun destroy(service: FocusNotificationListenerService) {
-        if (listener === service) { service.applyRequired(false); listener = null }
+        if (listener === service) { service.applyRequired(false); listener = null; receipts.disconnect() }
+    }
+    @Synchronized fun isRequired(): Boolean = required
+    @Synchronized fun observeHints(service: FocusNotificationListenerService, value: Int) {
+        if (listener === service) receipts.observe(value)
+    }
+    @Synchronized fun prepareReleaseReceipt(): PlanHintReceipt.Ticket? = receipts.beginRelease()
+    @Synchronized fun releaseReceiptConfirmed(ticket: PlanHintReceipt.Ticket): Boolean = receipts.confirmed(ticket)
+    @Synchronized fun currentHostHints(): Int? = listener?.let {
+        runCatching { it.currentListenerHints }.getOrNull()
     }
     @Synchronized fun setRequired(value: Boolean) {
         val beginning = value && !required

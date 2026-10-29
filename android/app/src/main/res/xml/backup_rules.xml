@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <exclude domain="file" path="datastore/planlock.preferences_pb" />
+    <exclude domain="sharedpref" path="plan_alarm_delivery.xml" />
+    <exclude domain="sharedpref" path="plan_alert_actions.xml" />
+    <exclude domain="sharedpref" path="plan_live_dismissals.xml" />
+    <exclude domain="sharedpref" path="plan_calendar_fallback.xml" />
 </full-backup-content>

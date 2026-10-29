@@ -128,6 +128,7 @@ class ExecutionService : Service() {
 
     override fun onDestroy() {
         android.util.Log.i("OrivaExecution", "service-destroyed")
+        PlanAlerts.stopRing()
         handler.removeCallbacks(tick)
         if (running === this) running = null
         runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
@@ -154,6 +155,7 @@ class ExecutionService : Service() {
                 fallbackIntervals.close(System.currentTimeMillis())?.let { previousStore.enqueueViolation(recordFactory.behavior(it)) }
             }
             ExecutionEngine.stop()
+            lastActivePlan?.let { PlanAlerts.cancel(this, it.scope, it.id) }
             NotificationSilenceController.setRequired(false)
             lastActivePlan = null
             restoredExecutions = false
@@ -199,6 +201,10 @@ class ExecutionService : Service() {
             }
 
             if (active != null) {
+                com.planlock.app.record.PlanAlarmTime.next(active, com.planlock.app.record.PlanAlarmKind.END, evaluatedAt)?.let {
+                    PlanLiveUpdates.running(this, active, it.endAt)
+                }
+                if (previousPlan != null && previousPlan.id != active.id) PlanAlerts.cancel(this, previousPlan.scope, previousPlan.id)
                 feedbackPlanId = active.id
                 val strategy = recordStore.strategy(active.id)
                 NotificationSilenceController.setRequired(strategy?.notifySilence == true)
@@ -222,6 +228,7 @@ class ExecutionService : Service() {
                     emitDndPermissionMissing(active.id)
                 }
             } else {
+                lastActivePlan?.let { PlanAlerts.cancel(this, it.scope, it.id) }
                 fallbackIntervals.close(System.currentTimeMillis())?.let {
                     recordStore.enqueueViolation(recordFactory.behavior(it))
                 }

@@ -53,7 +53,7 @@ class PunctualPlanAlarmInstrumentedTest {
         val selectedClock = requireNotNull(clock)
         val now = System.currentTimeMillis()
         val plan = RecordStore(context).plans().first { plan ->
-            listOf(PlanAlarmKind.START, PlanAlarmKind.REMINDER).any {
+            PlanAlarmKind.entries.any {
                 PlanAlarmTime.next(plan, it, now)?.triggerAt == selectedClock.triggerTime
             }
         }
@@ -107,8 +107,8 @@ class PunctualPlanAlarmInstrumentedTest {
                 PlanTimingPreferences.setEnabled(context.planLockPreferences, true)
                 scheduler.reconcile(store)
                 assertEquals(3, registry.all.size)
-                assertEquals(2, registry.all.values.count { it.toString().endsWith(":ALARM_CLOCK") })
-                assertEquals(1, registry.all.values.count { it.toString().endsWith(":EXACT") })
+                assertEquals(3, registry.all.values.count { it.toString().endsWith(":ALARM_CLOCK") })
+                assertEquals(0, registry.all.values.count { it.toString().endsWith(":EXACT") })
                 val show = requireNotNull(manager.nextAlarmClock).showIntent
                 assertEquals(context.packageName, show.creatorPackage)
                 assertEquals(start.timeInMillis - 15 * 60_000, requireNotNull(manager.nextAlarmClock).triggerTime)
@@ -131,7 +131,7 @@ class PunctualPlanAlarmInstrumentedTest {
                 assertFalse(manager.nextAlarmClock?.showIntent?.creatorPackage == context.packageName)
                 try { restoredShow.send(); fail("Deleted plan retained its showIntent") } catch (_: android.app.PendingIntent.CanceledException) { }
                 context.filesDir.resolve("punctual-toggle-proof.json").writeText(
-                    """{"realAlarmManager":true,"clockStartAndReminder":true,"ordinaryEnd":true,"offRemovesClock":true,"onRestoresClock":true,"deleteClearsShowIntent":true}""", Charsets.UTF_8)
+                    """{"realAlarmManager":true,"clockAllThreeMoments":true,"offRemovesClock":true,"onRestoresClock":true,"deleteClearsShowIntent":true}""", Charsets.UTF_8)
             } finally {
                 scheduler.invalidate()
                 context.planLockPreferences.edit { if (original == null) it.remove(PlanLockPreferenceKeys.punctualPlanStart) else it[PlanLockPreferenceKeys.punctualPlanStart] = original }

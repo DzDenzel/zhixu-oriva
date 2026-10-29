@@ -27,6 +27,7 @@ kotlin {
 
 dependencies {
     implementation(project(":core-plugin"))
+    implementation(project(":core-api"))
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)

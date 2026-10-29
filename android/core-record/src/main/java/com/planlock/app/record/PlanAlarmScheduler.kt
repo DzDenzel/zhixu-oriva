@@ -22,6 +22,8 @@ class PlanAlarmScheduler(context: Context) {
         val scope = store.currentScope()
         val plans = store.plans()
         val punctualStart = PlanTimingPreferences.enabled(app.planLockPreferences).first()
+        val fallback = PlanCalendarFallback(app)
+        if (fallback.needsReconcile()) fallback.reconcile(scope, plans, now)
         synchronized(lock) {
             if (scope != TokenStore.state.value.dataScope) return
             val desired = plans.flatMap { plan -> PlanAlarmKind.entries.mapNotNull { kind ->
@@ -55,6 +57,14 @@ class PlanAlarmScheduler(context: Context) {
             val currentIds = plans.filter { it.status == 1 && !PlanOccurrence.isEnded(it, minutes, OccurrenceDate.from(calendar)) }.map { it.id.hashCode() }.toSet()
             manager.activeNotifications.filter { it.tag?.startsWith("oriva-plan:") == true &&
                 (it.tag != "oriva-plan:$scope" || it.id !in currentIds) }
+                .forEach { manager.cancel(it.tag, it.id) }
+            // A waiting card is valid only for the exact future occurrence it was created for.
+            val waitingTargets = plans.mapNotNull { plan ->
+                PlanAlarmTime.next(plan, PlanAlarmKind.START, now)?.let { plan.id.hashCode() to it.triggerAt }
+            }.toMap()
+            manager.activeNotifications.filter { it.tag?.startsWith("oriva-wait:") == true &&
+                (it.tag != "oriva-wait:${Uri.encode(scope)}:${plans.firstOrNull { p -> p.id.hashCode() == it.id }?.id}" ||
+                    waitingTargets[it.id] != it.notification.`when`) }
                 .forEach { manager.cancel(it.tag, it.id) }
         }
     }

@@ -230,15 +230,25 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         rows.filter { it.status == 0 && rows.none { end -> end.clientId == it.clientId?.removeSuffix("-start")+"-end" && end.status in listOf(1,2,3) } }
             .maxByOrNull { it.startedAt.orEmpty() }?.let { ExecutionRecordRequest(id,it.planDate.orEmpty(),0,it.startedAt,clientId=requireNotNull(it.clientId)) }
     }
-    suspend fun beginOccurrence(planId: Long, nowMillis: Long): Boolean = scopedTransaction {
-        val plan = plan(planId) ?: return@scopedTransaction false
-        val clock = java.util.Calendar.getInstance().apply { timeInMillis=nowMillis }
-        val minutes = clock.get(java.util.Calendar.HOUR_OF_DAY)*60+clock.get(java.util.Calendar.MINUTE)
-        if (!PlanOccurrence.isActive(plan,minutes,OccurrenceDate.from(clock))) return@scopedTransaction false
-        val start = RecordEventFactory().executionStarted(plan,nowMillis).copy(clientId="exec-${UUID.randomUUID()}-start")
+    /** Read-only eligibility used when releasing quiet effects in favour of another active plan. */
+    suspend fun canBeginOccurrence(planId: Long, nowMillis: Long): Boolean = scopedTransaction {
+        eligibleOccurrence(planId, nowMillis) != null
+    }
+    private suspend fun eligibleOccurrence(planId: Long, nowMillis: Long): PlanSnapshotEntity? {
+        val plan = plan(planId) ?: return null
+        val clock = java.util.Calendar.getInstance().apply { timeInMillis = nowMillis }
+        val minutes = clock.get(java.util.Calendar.HOUR_OF_DAY) * 60 + clock.get(java.util.Calendar.MINUTE)
+        if (!PlanOccurrence.isActive(plan, minutes, OccurrenceDate.from(clock))) return null
+        val date = RecordEventFactory().executionStarted(plan, nowMillis).planDate
         seedLegacyHistory()
-        val rows = historyDao.all(dataScope()).filter { it.type=="execution" && it.localOrigin && it.planId==plan.id }
-        if (rows.any { it.planDate==start.planDate && it.status in listOf(1,2) }) return@scopedTransaction false
+        return plan.takeUnless {
+            historyDao.all(dataScope()).any { it.type == "execution" && it.localOrigin && it.planId == plan.id &&
+                it.planDate == date && it.status in listOf(1, 2) }
+        }
+    }
+    suspend fun beginOccurrence(planId: Long, nowMillis: Long): Boolean = scopedTransaction {
+        val plan = eligibleOccurrence(planId, nowMillis) ?: return@scopedTransaction false
+        val start = RecordEventFactory().executionStarted(plan,nowMillis).copy(clientId="exec-${UUID.randomUUID()}-start")
         activeExecution(planId)?.let {
             if(it.planDate==start.planDate) return@scopedTransaction true
             finishOccurrence(planId,nowMillis)

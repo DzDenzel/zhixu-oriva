@@ -21,21 +21,21 @@ class NotificationChannelBoundaryInstrumentedTest {
         check(context.packageName == "com.planlock.qapack3a")
         TokenStore.restore(context.planLockPreferences)
         val manager = context.getSystemService(NotificationManager::class.java)
-        val before = requireNotNull(manager.getNotificationChannel("oriva_plan_events"))
+        val before = requireNotNull(manager.getNotificationChannel(com.planlock.app.security.PlanReminderChannel.COMPLETION_ID))
         val blocked = InstrumentationRegistry.getArguments().getString("expectedBlocked") == "true"
         assertEquals("Native UI channel state is the prerequisite", blocked, before.importance == NotificationManager.IMPORTANCE_NONE)
         val id = -2_100_000_000_133L
         val scope = TokenStore.state.value.dataScope
         val plan = PlanSnapshotEntity(id, 0, "CHANNEL-QA", "学习", "06:00", "06:02", null, null, null, 1, null, 1, 0).copy(scope = scope)
-        val tag = "oriva-plan:$scope"
+        val tag = "oriva-completed:$scope"
         try {
             manager.cancel(tag, id.hashCode())
-            PlanNotifications.completed(context, plan, 120_000)
+            PlanNotifications.completed(context, plan, 120_000, PlanQuietOutcome.RELEASED)
             val deadline = SystemClock.elapsedRealtime() + 2_000
             while (!blocked && manager.activeNotifications.none { it.tag == tag && it.id == id.hashCode() } && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(100)
             if (blocked) SystemClock.sleep(600)
             val posted = manager.activeNotifications.any { it.tag == tag && it.id == id.hashCode() }
-            val after = requireNotNull(manager.getNotificationChannel("oriva_plan_events")).importance
+            val after = requireNotNull(manager.getNotificationChannel(com.planlock.app.security.PlanReminderChannel.COMPLETION_ID)).importance
             context.filesDir.resolve("channel-boundary-proof.json").writeText(JSONObject()
                 .put("blocked", blocked).put("posted", posted).put("beforeImportance", before.importance)
                 .put("afterImportance", after).put("changedUserPreference", false).toString(), Charsets.UTF_8)

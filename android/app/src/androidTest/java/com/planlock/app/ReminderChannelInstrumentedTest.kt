@@ -27,22 +27,22 @@ class ReminderChannelInstrumentedTest {
         TokenStore.restore(context.planLockPreferences)
         val plan = PlanSnapshotEntity(-137, 0, "渠道独立性", "学习", "06:00", "06:02", null, null, null, 1, null, 1, 0)
             .copy(scope = TokenStore.state.value.dataScope)
-        val tag = "oriva-plan:${plan.scope}"
+        val tag = "oriva-wait:${android.net.Uri.encode(plan.scope)}:${plan.id}"
         try {
-            PlanNotifications.reminder(context, plan)
+            PlanLiveUpdates.waiting(context, plan, System.currentTimeMillis() + 60_000, System.currentTimeMillis() + 180_000)
             val channel = manager.getNotificationChannel(PlanReminderChannel.ID)
             assertEquals(NotificationManager.IMPORTANCE_HIGH, channel.importance)
             assertTrue(channel.shouldVibrate())
             assertEquals(Notification.VISIBILITY_PUBLIC, channel.lockscreenVisibility)
             val reminder = manager.activeNotifications.single { it.tag == tag && it.id == plan.id.hashCode() }.notification
             assertEquals(PlanReminderChannel.ID, reminder.channelId)
-            assertEquals(Notification.PRIORITY_MAX, reminder.priority)
+            assertEquals(Notification.CATEGORY_PROGRESS, reminder.category)
             assertTrue(PlanReminderChannel.canAlert(context))
             val settings = PlanReminderChannel.settingsIntent(context)
             assertEquals(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS, settings.action)
             assertEquals(PlanReminderChannel.ID, settings.getStringExtra(Settings.EXTRA_CHANNEL_ID))
-            PlanNotifications.completed(context, plan, 120_000)
-            assertEquals("oriva_plan_events", manager.activeNotifications.single { it.tag == tag && it.id == plan.id.hashCode() }.notification.channelId)
+            PlanNotifications.completed(context, plan, 120_000, PlanQuietOutcome.RELEASED)
+            assertEquals(PlanReminderChannel.COMPLETION_ID, manager.activeNotifications.single { it.tag == "oriva-completed:${plan.scope}" && it.id == plan.id.hashCode() }.notification.channelId)
             assertEquals(oldImportance, manager.getNotificationChannel("oriva_plan_events").importance)
             // Lowering is permitted by Android when the user has not changed the channel.
             manager.createNotificationChannel(NotificationChannel(PlanReminderChannel.ID, "计划提前提醒", NotificationManager.IMPORTANCE_LOW))
