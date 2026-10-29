@@ -113,6 +113,10 @@ object PlanAlerts {
     @Synchronized fun stopRing() { ringtone?.let { it.stop(); it.release() }; ringtone = null; vibrator?.cancel(); vibrator = null; ringingKey = null }
     fun cancel(context: Context, scope: String, id: Long) {
         PlanAlertActivity.close(scope, id)
+        stopPresentation(context, scope, id)
+    }
+    /** Stop immediately without hiding the Activity needed for system unlock. */
+    internal fun stopPresentation(context: Context, scope: String, id: Long) {
         if (ringingKey == key(scope, id)) stopRing()
         context.getSystemService(NotificationManager::class.java).cancel("oriva-start:$scope", id.hashCode())
         snoozePending(context, scope, id, 0L, PendingIntent.FLAG_NO_CREATE)?.let { context.getSystemService(AlarmManager::class.java).cancel(it); it.cancel() }

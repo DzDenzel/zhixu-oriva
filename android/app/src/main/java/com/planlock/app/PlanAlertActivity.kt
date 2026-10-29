@@ -20,10 +20,19 @@ import kotlinx.coroutines.withContext
 /** Product behaviour only; Compose styling remains owned by the UI branch. */
 class PlanAlertActivity : ComponentActivity() {
     private var themeMode = ThemeMode.SYSTEM
+    private var pendingDetail = false
+    private var legacyUnlockReceiver: android.content.BroadcastReceiver? = null
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         if (android.os.Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(true); setTurnScreenOn(true) }
         else @Suppress("DEPRECATION") window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+        if (android.os.Build.VERSION.SDK_INT < 26) {
+            legacyUnlockReceiver = object : android.content.BroadcastReceiver() {
+                override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+                    if (pendingDetail && intent.action == android.content.Intent.ACTION_USER_PRESENT) openDetail()
+                }
+            }.also { registerReceiver(it, android.content.IntentFilter(android.content.Intent.ACTION_USER_PRESENT)) }
+        }
         render()
         lifecycleScope.launch {
             themeMode = withContext(Dispatchers.IO) { ThemePreference(this@PlanAlertActivity).mode.first() }
@@ -64,14 +73,60 @@ class PlanAlertActivity : ComponentActivity() {
                 setTextColor(palette.text.toArgb())
                 backgroundTintList = android.content.res.ColorStateList.valueOf(palette.raised.toArgb())
                 setOnClickListener {
-                    PlanAlerts.acknowledge(this@PlanAlertActivity, owner, id)
-                    startActivity(PlanAlerts.detail(this@PlanAlertActivity, owner, id))
-                    finish()
+                    PlanAlerts.stopPresentation(this@PlanAlertActivity, owner, id)
+                    pendingDetail = true
+                    val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+                    if (!keyguard.isKeyguardLocked) openDetail()
+                    else if (android.os.Build.VERSION.SDK_INT >= 26) {
+                        keyguard.requestDismissKeyguard(this@PlanAlertActivity, object : android.app.KeyguardManager.KeyguardDismissCallback() {
+                            override fun onDismissSucceeded() = openDetail()
+                            override fun onDismissCancelled() = finish()
+                            override fun onDismissError() = finish()
+                        })
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val credential = keyguard.createConfirmDeviceCredentialIntent(null, null)
+                        if (credential != null) {
+                            @Suppress("DEPRECATION")
+                            startActivityForResult(credential, 1001)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+                        }
+                    }
                 }
             })
         })
         android.util.Log.i("OrivaAlerts", "FULL_SCREEN displayed plan=$id at=${System.currentTimeMillis()}")
     }
+    private fun openDetail() {
+        if (!pendingDetail || isFinishing || isDestroyed) return
+        pendingDetail = false
+        val owner = intent.getStringExtra("scope") ?: return finish()
+        startActivity(PlanAlerts.detail(this, owner, intent.getLongExtra("plan_id", Long.MIN_VALUE)))
+        finish()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && pendingDetail && android.os.Build.VERSION.SDK_INT < 26 &&
+            !getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked) openDetail()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 1001 && pendingDetail) {
+            if (resultCode == RESULT_OK) openDetail() else finish()
+        }
+    }
+
+    override fun onDestroy() {
+        legacyUnlockReceiver?.let { unregisterReceiver(it) }
+        legacyUnlockReceiver = null
+        super.onDestroy()
+    }
+
     companion object {
         private var current = java.lang.ref.WeakReference<PlanAlertActivity>(null)
         fun close(scope: String, id: Long) {
