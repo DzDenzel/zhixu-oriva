@@ -34,6 +34,13 @@ internal object PlanNotificationCopy {
     fun deferred(name: String, lateMs: Long) =
         PlanNotificationText("「$name」的提醒被系统推迟了 ${com.planlock.app.api.reminderDelayLabel(lateMs)}", "手机的后台策略推迟了提醒")
 
+    /** CHANGE-063：再提醒会越过开始时刻时不推迟，告诉用户还有几分钟（向上取整，至少 1 分钟）。 */
+    fun startsSoon(remainingMillis: Long): String =
+        "再过 ${((remainingMillis + 59_999) / 60_000).coerceAtLeast(1)} 分钟计划就开始了，到时直接提醒你"
+
+    /** 全屏页顶部一行（提前提醒阶段）：「15 分钟后开始」。 */
+    fun startsInLabel(remainingMillis: Long): String = "${((remainingMillis + 59_999) / 60_000).coerceAtLeast(1)} 分钟后开始"
+
     /** U-R1 one-line hint, only when the plan itself silences the phone. */
     fun quietHint(autoDnd: Boolean, notifySilence: Boolean): String? = when {
         autoDnd && notifySilence -> "进行中会开启免打扰，并静默其他应用的通知"

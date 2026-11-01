@@ -58,8 +58,11 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                             (kind == PlanAlarmKind.REMINDER || kind == PlanAlarmKind.START))
                             fallback.suppressOccurrence(plan.id, expected.startAt, owner)
                         when (kind) {
-                            PlanAlarmKind.REMINDER -> if (PlanAlarmLateness.mayRemind(due, now, expected.startAt, expected.endAt))
+                            PlanAlarmKind.REMINDER -> if (PlanAlarmLateness.mayRemind(due, now, expected.startAt, expected.endAt)) {
+                                // CHANGE-063：等待胶囊常驻（静音），闹钟式浮窗负责响铃，点按后只剩胶囊
                                 PlanLiveUpdates.waiting(context, plan, expected.startAt, expected.endAt, planNotificationDetail(store, plan))
+                                PlanAlerts.remind(context, plan, expected.startAt)
+                            }
                             PlanAlarmKind.START -> {
                                 PlanLiveUpdates.cancelWaiting(context, plan)
                                 if (PlanAlarmLateness.mayStart(now, expected.startAt, expected.endAt)) {

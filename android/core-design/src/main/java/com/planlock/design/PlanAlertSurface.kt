@@ -31,14 +31,16 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** REQ-044 U-R1 到点全屏页的展示数据；业务（响铃、再提醒计数、解锁）由调用方负责。 */
+/** REQ-044 U-R1 / CHANGE-063 闹钟式全屏页的展示数据；业务（响铃、再提醒、收起）由调用方负责。 */
 data class PlanAlertModel(
+    /** 顶部一行：提前提醒阶段「15 分钟后开始」，开始阶段「计划开始了」。 */
+    val label: String,
     val planName: String,
     /** 「07:00–07:45 · 阅读」 */
     val detail: String,
     /** 计划自己会开启免打扰 / 通知静默时的一行说明，否则 null。 */
     val quietHint: String?,
-    /** 第 3 次再提醒之后为 false，页面只留「我知道了」。 */
+    /** 只有提前提醒阶段可「5 分钟后再提醒」；计划已开始时只有「我知道了」。 */
     val canSnooze: Boolean,
 )
 
@@ -67,10 +69,10 @@ fun PlanAlertSurface(
 }
 
 @Composable
-private fun StartedLabel() {
+private fun PhaseLabel(label: String) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(Modifier.size(8.dp).background(InkTone.accent, CircleShape))
-        Text("计划开始了", style = InkText.meta, color = InkTone.accent)
+        Text(label, style = InkText.meta, color = InkTone.accent)
     }
 }
 
@@ -108,7 +110,7 @@ private fun SnoozeButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
 @Composable
 private fun CallLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowledge: () -> Unit) {
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-        StartedLabel()
+        PhaseLabel(model.label)
         Spacer(Modifier.weight(1f))
         Text(
             model.planName, style = MaterialTheme.typography.displaySmall, color = InkTone.text, textAlign = TextAlign.Center,
@@ -130,7 +132,7 @@ private fun CallLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowledg
 private fun ClockLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowledge: () -> Unit) {
     val start = model.detail.substringBefore('–').substringBefore(" · ").takeIf { it.length == 5 && it[2] == ':' }
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-        StartedLabel()
+        PhaseLabel(model.label)
         Spacer(Modifier.weight(1f))
         if (start != null) Text(start, style = MaterialTheme.typography.displayLarge.copy(fontSize = 72.sp), color = InkTone.text)
         Text(
@@ -149,14 +151,14 @@ private fun ClockLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowled
     }
 }
 
-private val previewModel = PlanAlertModel("专注阅读", "07:00–07:45 · 阅读", "进行中会开启免打扰", canSnooze = true)
+private val previewModel = PlanAlertModel("15 分钟后开始", "专注阅读", "07:00–07:45 · 阅读", "进行中会开启免打扰", canSnooze = true)
 
 @Preview(name = "U-R1 甲 来电式 · 墨序浅色", widthDp = 360, heightDp = 780)
 @Composable private fun PreviewCallLight() = PlanLockTheme(ThemeMode.LIGHT) { PlanAlertSurface(previewModel, {}, {}) }
 
-@Preview(name = "U-R1 甲 来电式 · 深色 · 第 3 次后", widthDp = 360, heightDp = 780)
+@Preview(name = "U-R1 甲 来电式 · 深色 · 到点开始", widthDp = 360, heightDp = 780)
 @Composable private fun PreviewCallDark() = PlanLockTheme(ThemeMode.DARK) {
-    PlanAlertSurface(previewModel.copy(canSnooze = false, quietHint = null), {}, {})
+    PlanAlertSurface(previewModel.copy(label = "计划开始了", canSnooze = false, quietHint = null), {}, {})
 }
 
 @Preview(name = "U-R1 乙 闹钟式 · 墨序浅色", widthDp = 360, heightDp = 780)

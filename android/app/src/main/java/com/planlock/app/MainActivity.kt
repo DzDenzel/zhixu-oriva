@@ -351,7 +351,6 @@ private fun AppContent(
         val incoming = activity?.intent
         if (incoming?.getStringExtra("notification_scope") == TokenStore.state.value.dataScope) {
             val planId = incoming.getLongExtra("notification_plan_id", Long.MIN_VALUE)
-            if (incoming.getBooleanExtra("acknowledge_alarm", false)) PlanAlerts.acknowledge(context, TokenStore.state.value.dataScope, planId)
             if (planId != Long.MIN_VALUE) navController.navigate("detail/$planId")
             if (incoming.getBooleanExtra("end_plan", false) && planId != Long.MIN_VALUE) {
                 val plan = withContext(Dispatchers.IO) { notificationStore.plan(planId) }
@@ -364,7 +363,6 @@ private fun AppContent(
         }
         if (incoming?.getBooleanExtra("reminder_settings", false) == true) navController.navigate("settings/reminders")
         incoming?.removeExtra("reminder_settings")
-        incoming?.removeExtra("acknowledge_alarm")
         incoming?.removeExtra("end_plan")
         incoming?.removeExtra("notification_plan_id")
         incoming?.removeExtra("notification_scope")

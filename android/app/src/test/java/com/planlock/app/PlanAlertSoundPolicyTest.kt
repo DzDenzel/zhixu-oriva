@@ -25,9 +25,19 @@ class PlanAlertSoundPolicyTest {
         assertTrue(PlanAlertSoundPolicy.sound(2, 4, true))
         assertTrue(PlanAlertSoundPolicy.sound(2, 1, false))
     }
-    @Test fun snoozeHasThreeDurableSlots() {
-        (0..2).forEach { assertTrue(PlanAlertSoundPolicy.maySnooze(it)) }
-        assertFalse(PlanAlertSoundPolicy.maySnooze(3))
-        assertFalse(PlanAlertSoundPolicy.maySnooze(4))
+    @Test fun snoozeRingsAgainOnlyWhileBeforeStart() {
+        val start = 1_000_000_000L
+        // 15 分钟前提醒 → 5 分钟后再提醒仍在开始前：再响一次
+        assertEquals(start - 10 * 60_000L, PlanReminderSnooze.next(start - 15 * 60_000L, start))
+        // 5 分钟后恰好到开始或已过开始：不推迟，交给开始闹钟
+        assertNull(PlanReminderSnooze.next(start - 5 * 60_000L, start))
+        assertNull(PlanReminderSnooze.next(start - 3 * 60_000L, start))
+        // 开始前 5 分 1 秒仍可推迟一次
+        assertEquals(start - 1_000L, PlanReminderSnooze.next(start - 5 * 60_000L - 1_000L, start))
+    }
+    @Test fun blockedSnoozeTellsWholeMinutesLeft() {
+        assertEquals("再过 3 分钟计划就开始了，到时直接提醒你", PlanNotificationCopy.startsSoon(2 * 60_000L + 1))
+        assertEquals("再过 1 分钟计划就开始了，到时直接提醒你", PlanNotificationCopy.startsSoon(5_000L))
+        assertEquals("15 分钟后开始", PlanNotificationCopy.startsInLabel(15 * 60_000L))
     }
 }

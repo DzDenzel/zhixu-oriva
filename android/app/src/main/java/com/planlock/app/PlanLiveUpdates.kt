@@ -9,7 +9,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -57,8 +56,7 @@ object PlanLiveUpdates {
             .setData(Uri.Builder().scheme("oriva").authority("plan-live-dismiss").appendPath(occurrence).build())
             .putExtra("scope", plan.scope).putExtra("plan_id", plan.id).putExtra("end_at", endAt).putExtra("occurrence", occurrence),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val mayAlert = !running && PlanAlertSoundPolicy.vibrate(context.getSystemService(AudioManager::class.java).ringerMode,
-            manager.currentInterruptionFilter, planOwnedDnd = false)
+        // CHANGE-063：胶囊永远静音，声音由闹钟式浮窗（PlanAlerts）负责，避免双响
         val channel = if (running) FOREGROUND_CHANNEL else WAIT_CHANNEL
         val publicVersion = NotificationCompat.Builder(context, channel).setSmallIcon(R.drawable.ic_stat_oriva)
             .setContentTitle(if (running) PlanNotificationCopy.publicRunning else PlanNotificationCopy.publicWaiting)
@@ -71,7 +69,7 @@ object PlanLiveUpdates {
             .setContentIntent(open).setDeleteIntent(deleted).setWhen(targetAt).setShowWhen(true)
             .setUsesChronometer(true).setChronometerCountDown(true).setColorized(false)
             .setRequestPromotedOngoing(Build.VERSION.SDK_INT >= 36 && manager.canPostPromotedNotifications())
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(publicVersion).setSilent(!mayAlert)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(publicVersion).setSilent(true)
             .addExtras(Bundle().apply { putString(PHASE, stage); putString("oriva_occurrence", occurrence) })
         if (running) {
             val endIntent = PlanAlerts.detail(context, plan.scope, plan.id).putExtra("end_plan", true)

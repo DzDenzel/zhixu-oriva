@@ -18,22 +18,16 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** REQ-044 U-R1：行为（停铃、再提醒、解锁后进详情）由 PlanAlerts 负责；画面为 core-design 的 PlanAlertSurface。 */
+/**
+ * REQ-044 U-R1 / CHANGE-063：锁屏时的闹钟式全屏页。提前提醒阶段有「5 分钟后再提醒」，开始阶段只有「我知道了」；
+ * 任一按钮只停铃并收起（回到锁屏 / 桌面，状态栏保留胶囊），不解锁、不打开应用。画面为 core-design 的 PlanAlertSurface。
+ */
 class PlanAlertActivity : ComponentActivity() {
     private var themeMode = ThemeMode.SYSTEM
-    private var pendingDetail = false
-    private var legacyUnlockReceiver: android.content.BroadcastReceiver? = null
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         if (android.os.Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(true); setTurnScreenOn(true) }
         else @Suppress("DEPRECATION") window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
-        if (android.os.Build.VERSION.SDK_INT < 26) {
-            legacyUnlockReceiver = object : android.content.BroadcastReceiver() {
-                override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
-                    if (pendingDetail && intent.action == android.content.Intent.ACTION_USER_PRESENT) openDetail()
-                }
-            }.also { registerReceiver(it, android.content.IntentFilter(android.content.Intent.ACTION_USER_PRESENT)) }
-        }
         render()
         lifecycleScope.launch {
             themeMode = withContext(Dispatchers.IO) { ThemePreference(this@PlanAlertActivity).mode.first() }
@@ -41,12 +35,15 @@ class PlanAlertActivity : ComponentActivity() {
         }
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); render() }
+    private val phase get() = runCatching { PlanAlertPhase.valueOf(intent.getStringExtra("phase").orEmpty()) }.getOrDefault(PlanAlertPhase.START)
     private fun render() {
         val owner = intent.getStringExtra("scope") ?: return finish()
         if (owner != TokenStore.state.value.dataScope) return finish()
         val id = intent.getLongExtra("plan_id", Long.MIN_VALUE)
-        val end = intent.getLongExtra("end_at", 0)
-        if (id == Long.MIN_VALUE || end <= System.currentTimeMillis()) return finish()
+        val startAt = intent.getLongExtra("start_at", 0)
+        val until = intent.getLongExtra("until", 0)
+        val now = System.currentTimeMillis()
+        if (id == Long.MIN_VALUE || until <= now) return finish()
         current = java.lang.ref.WeakReference(this)
         val systemDark = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK == android.content.res.Configuration.UI_MODE_NIGHT_YES
         val dark = ThemeStyleStore.current.isDark(themeMode, systemDark)
@@ -57,78 +54,35 @@ class PlanAlertActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = !dark
         }
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        val reminder = phase == PlanAlertPhase.REMINDER
         val model = PlanAlertModel(
+            label = if (reminder) PlanNotificationCopy.startsInLabel(startAt - now) else "计划开始了",
             planName = intent.getStringExtra("plan_name").orEmpty(),
             detail = intent.getStringExtra("plan_detail").orEmpty(),
             quietHint = intent.getStringExtra("quiet_hint"),
-            canSnooze = intent.getIntExtra("snoozes_left", 3) > 0,
+            canSnooze = reminder,
         )
         val mode = themeMode
         setContent {
             PlanLockTheme(mode) {
                 PlanAlertSurface(model,
-                    onSnooze = { PlanAlerts.snooze(this@PlanAlertActivity, owner, id, end); finish() },
-                    onAcknowledge = { acknowledge(owner, id) })
+                    onSnooze = {
+                        PlanAlerts.snooze(this@PlanAlertActivity, owner, id, startAt)
+                            ?.let { android.widget.Toast.makeText(applicationContext, it, android.widget.Toast.LENGTH_LONG).show() }
+                        finish()
+                    },
+                    onAcknowledge = { PlanAlerts.acknowledge(this@PlanAlertActivity, owner, id); finish() })
             }
         }
-        android.util.Log.i("OrivaAlerts", "FULL_SCREEN displayed plan=$id at=${System.currentTimeMillis()}")
-    }
-    private fun acknowledge(owner: String, id: Long) {
-        PlanAlerts.stopPresentation(this, owner, id)
-        pendingDetail = true
-        val keyguard = getSystemService(android.app.KeyguardManager::class.java)
-        if (!keyguard.isKeyguardLocked) openDetail()
-        else if (android.os.Build.VERSION.SDK_INT >= 26) {
-            keyguard.requestDismissKeyguard(this, object : android.app.KeyguardManager.KeyguardDismissCallback() {
-                override fun onDismissSucceeded() = openDetail()
-                override fun onDismissCancelled() = finish()
-                override fun onDismissError() = finish()
-            })
-        } else {
-            @Suppress("DEPRECATION")
-            val credential = keyguard.createConfirmDeviceCredentialIntent(null, null)
-            if (credential != null) {
-                @Suppress("DEPRECATION")
-                startActivityForResult(credential, 1001)
-            } else {
-                @Suppress("DEPRECATION")
-                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
-            }
-        }
-    }
-    private fun openDetail() {
-        if (!pendingDetail || isFinishing || isDestroyed) return
-        pendingDetail = false
-        val owner = intent.getStringExtra("scope") ?: return finish()
-        startActivity(PlanAlerts.detail(this, owner, intent.getLongExtra("plan_id", Long.MIN_VALUE)))
-        finish()
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && pendingDetail && android.os.Build.VERSION.SDK_INT < 26 &&
-            !getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked) openDetail()
-    }
-
-    @Suppress("DEPRECATION")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 1001 && pendingDetail) {
-            if (resultCode == RESULT_OK) openDetail() else finish()
-        }
-    }
-
-    override fun onDestroy() {
-        legacyUnlockReceiver?.let { unregisterReceiver(it) }
-        legacyUnlockReceiver = null
-        super.onDestroy()
+        android.util.Log.i("OrivaAlerts", "FULL_SCREEN displayed phase=${phase.name} plan=$id at=${System.currentTimeMillis()}")
     }
 
     companion object {
         private var current = java.lang.ref.WeakReference<PlanAlertActivity>(null)
-        fun close(scope: String, id: Long) {
-            current.get()?.takeIf { it.intent.getStringExtra("scope") == scope && it.intent.getLongExtra("plan_id", Long.MIN_VALUE) == id }
-                ?.let { activity -> activity.runOnUiThread { activity.finish() } }
+        fun close(scope: String, id: Long, phase: PlanAlertPhase) {
+            current.get()?.takeIf {
+                it.intent.getStringExtra("scope") == scope && it.intent.getLongExtra("plan_id", Long.MIN_VALUE) == id && it.phase == phase
+            }?.let { activity -> activity.runOnUiThread { activity.finish() } }
         }
     }
 }
