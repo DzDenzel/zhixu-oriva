@@ -59,7 +59,7 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                             fallback.suppressOccurrence(plan.id, expected.startAt, owner)
                         when (kind) {
                             PlanAlarmKind.REMINDER -> if (PlanAlarmLateness.mayRemind(due, now, expected.startAt, expected.endAt))
-                                PlanLiveUpdates.waiting(context, plan, expected.startAt, expected.endAt)
+                                PlanLiveUpdates.waiting(context, plan, expected.startAt, expected.endAt, planNotificationDetail(store, plan))
                             PlanAlarmKind.START -> {
                                 PlanLiveUpdates.cancelWaiting(context, plan)
                                 if (PlanAlarmLateness.mayStart(now, expected.startAt, expected.endAt)) {
@@ -98,7 +98,7 @@ object PlanCompletion {
         val quiet = PlanCompletionGate.beforeNotification(context, store, plan, now)
         if (completed) {
             if (AppVisibility.foreground) ExecutionFeedback.emit(plan.id, FeedbackKind.COMPLETED)
-            PlanNotifications.completed(context, plan, (requireNotNull(end) - began).coerceAtLeast(0), quiet)
+            PlanNotifications.completed(context, plan, (requireNotNull(end) - began).coerceAtLeast(0), quiet, planNotificationDetail(store, plan))
             if (quiet == PlanQuietOutcome.RELEASED) executionHaptic(context)
         }
         return true
@@ -106,16 +106,16 @@ object PlanCompletion {
 }
 
 object PlanNotifications {
-    fun completed(context: Context, plan: PlanSnapshotEntity, durationMillis: Long, quiet: PlanQuietOutcome) {
-        val copy = PlanNotificationCopy.completed(plan.name, durationMillis)
-        show(context, plan, copy.title, copy.body, quiet == PlanQuietOutcome.RELEASED)
+    fun completed(context: Context, plan: PlanSnapshotEntity, durationMillis: Long, quiet: PlanQuietOutcome, detail: String) {
+        val copy = PlanNotificationCopy.completed(plan.name, durationMillis, detail)
+        show(context, plan, copy, PlanNotificationCopy.publicCompleted, quiet == PlanQuietOutcome.RELEASED)
         android.util.Log.i("OrivaAlerts", "END notify plan_id=${plan.id} quiet=$quiet at=${System.currentTimeMillis()}")
     }
     fun deferred(context: Context, plan: PlanSnapshotEntity, lateMs: Long) {
-        val text = "「${plan.name}」的提醒被系统推迟了 ${PlanAlarmLateness.delayedMinutes(lateMs)} 分钟"
-        show(context, plan, text, "可检查后台运行与日历兜底设置", audible = true, settings = true)
+        show(context, plan, PlanNotificationCopy.deferred(plan.name, lateMs),
+            PlanNotificationCopy.publicDeferred, audible = true, settings = true)
     }
-    private fun show(context: Context, plan: PlanSnapshotEntity, title: String, text: String, audible: Boolean, settings: Boolean = false) {
+    private fun show(context: Context, plan: PlanSnapshotEntity, copy: PlanNotificationText, publicTitle: String, audible: Boolean, settings: Boolean = false) {
         if (plan.scope != TokenStore.state.value.dataScope) return
         if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         PlanReminderChannel.ensure(context)
@@ -123,9 +123,11 @@ object PlanNotifications {
         val tap = PendingIntent.getActivity(context, plan.id.hashCode(), PlanAlerts.detail(context, plan.scope, plan.id), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val mode = context.getSystemService(AudioManager::class.java).ringerMode
         val canAlert = audible && PlanAlertSoundPolicy.vibrate(mode, manager.currentInterruptionFilter, false)
-        val builder = NotificationCompat.Builder(context, PlanReminderChannel.COMPLETION_ID).setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(title).setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setCategory(NotificationCompat.CATEGORY_EVENT).setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        val publicVersion = NotificationCompat.Builder(context, PlanReminderChannel.COMPLETION_ID).setSmallIcon(R.drawable.ic_stat_oriva)
+            .setContentTitle(publicTitle).build()
+        val builder = NotificationCompat.Builder(context, PlanReminderChannel.COMPLETION_ID).setSmallIcon(R.drawable.ic_stat_oriva)
+            .setContentTitle(copy.title).setContentText(copy.body).setStyle(NotificationCompat.BigTextStyle().bigText(copy.body))
+            .setCategory(NotificationCompat.CATEGORY_EVENT).setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(publicVersion)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT).setAutoCancel(true).setContentIntent(tap).setSilent(!canAlert)
         if (settings) builder.addAction(0, "去设置", PendingIntent.getActivity(context, plan.id.hashCode(),
             Intent(context, MainActivity::class.java).setData(android.net.Uri.parse("oriva://reminder-settings"))

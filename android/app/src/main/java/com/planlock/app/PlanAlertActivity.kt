@@ -1,15 +1,16 @@
 package com.planlock.app
 
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import android.content.Intent
 import android.os.Bundle
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
 import com.planlock.app.api.TokenStore
 import androidx.lifecycle.lifecycleScope
 import androidx.compose.ui.graphics.toArgb
 import com.planlock.design.InkPalettes
+import com.planlock.design.PlanAlertModel
+import com.planlock.design.PlanAlertSurface
+import com.planlock.design.PlanLockTheme
 import com.planlock.design.ThemeMode
 import com.planlock.design.ThemeStyleStore
 import kotlinx.coroutines.Dispatchers
@@ -17,7 +18,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Product behaviour only; Compose styling remains owned by the UI branch. */
+/** REQ-044 U-R1：行为（停铃、再提醒、解锁后进详情）由 PlanAlerts 负责；画面为 core-design 的 PlanAlertSurface。 */
 class PlanAlertActivity : ComponentActivity() {
     private var themeMode = ThemeMode.SYSTEM
     private var pendingDetail = false
@@ -55,49 +56,45 @@ class PlanAlertActivity : ComponentActivity() {
             isAppearanceLightStatusBars = !dark
             isAppearanceLightNavigationBars = !dark
         }
-        setContentView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(palette.ground.toArgb())
-            val padding = (24 * resources.displayMetrics.density).toInt()
-            setPadding(padding, padding * 3, padding, padding)
-            addView(TextView(this@PlanAlertActivity).apply { text = "计划开始"; textSize = 30f; setTextColor(palette.text.toArgb()) })
-            addView(TextView(this@PlanAlertActivity).apply { text = intent.getStringExtra("plan_name").orEmpty(); textSize = 24f; setTextColor(palette.text.toArgb()) })
-            addView(Button(this@PlanAlertActivity).apply {
-                text = "5 分钟后再提醒"
-                setTextColor(palette.text.toArgb())
-                backgroundTintList = android.content.res.ColorStateList.valueOf(palette.raised.toArgb())
-                setOnClickListener { PlanAlerts.snooze(this@PlanAlertActivity, owner, id, end); finish() }
-            })
-            addView(Button(this@PlanAlertActivity).apply {
-                text = "我知道了"
-                setTextColor(palette.text.toArgb())
-                backgroundTintList = android.content.res.ColorStateList.valueOf(palette.raised.toArgb())
-                setOnClickListener {
-                    PlanAlerts.stopPresentation(this@PlanAlertActivity, owner, id)
-                    pendingDetail = true
-                    val keyguard = getSystemService(android.app.KeyguardManager::class.java)
-                    if (!keyguard.isKeyguardLocked) openDetail()
-                    else if (android.os.Build.VERSION.SDK_INT >= 26) {
-                        keyguard.requestDismissKeyguard(this@PlanAlertActivity, object : android.app.KeyguardManager.KeyguardDismissCallback() {
-                            override fun onDismissSucceeded() = openDetail()
-                            override fun onDismissCancelled() = finish()
-                            override fun onDismissError() = finish()
-                        })
-                    } else {
-                        @Suppress("DEPRECATION")
-                        val credential = keyguard.createConfirmDeviceCredentialIntent(null, null)
-                        if (credential != null) {
-                            @Suppress("DEPRECATION")
-                            startActivityForResult(credential, 1001)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
-                        }
-                    }
-                }
-            })
-        })
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        val model = PlanAlertModel(
+            planName = intent.getStringExtra("plan_name").orEmpty(),
+            detail = intent.getStringExtra("plan_detail").orEmpty(),
+            quietHint = intent.getStringExtra("quiet_hint"),
+            canSnooze = intent.getIntExtra("snoozes_left", 3) > 0,
+        )
+        val mode = themeMode
+        setContent {
+            PlanLockTheme(mode) {
+                PlanAlertSurface(model,
+                    onSnooze = { PlanAlerts.snooze(this@PlanAlertActivity, owner, id, end); finish() },
+                    onAcknowledge = { acknowledge(owner, id) })
+            }
+        }
         android.util.Log.i("OrivaAlerts", "FULL_SCREEN displayed plan=$id at=${System.currentTimeMillis()}")
+    }
+    private fun acknowledge(owner: String, id: Long) {
+        PlanAlerts.stopPresentation(this, owner, id)
+        pendingDetail = true
+        val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+        if (!keyguard.isKeyguardLocked) openDetail()
+        else if (android.os.Build.VERSION.SDK_INT >= 26) {
+            keyguard.requestDismissKeyguard(this, object : android.app.KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() = openDetail()
+                override fun onDismissCancelled() = finish()
+                override fun onDismissError() = finish()
+            })
+        } else {
+            @Suppress("DEPRECATION")
+            val credential = keyguard.createConfirmDeviceCredentialIntent(null, null)
+            if (credential != null) {
+                @Suppress("DEPRECATION")
+                startActivityForResult(credential, 1001)
+            } else {
+                @Suppress("DEPRECATION")
+                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+            }
+        }
     }
     private fun openDetail() {
         if (!pendingDetail || isFinishing || isDestroyed) return

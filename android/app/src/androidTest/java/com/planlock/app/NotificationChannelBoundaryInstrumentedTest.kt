@@ -30,7 +30,7 @@ class NotificationChannelBoundaryInstrumentedTest {
         val tag = "oriva-completed:$scope"
         try {
             manager.cancel(tag, id.hashCode())
-            PlanNotifications.completed(context, plan, 120_000, PlanQuietOutcome.RELEASED)
+            PlanNotifications.completed(context, plan, 120_000, PlanQuietOutcome.RELEASED, "07:00–07:30 · 阅读")
             val deadline = SystemClock.elapsedRealtime() + 2_000
             while (!blocked && manager.activeNotifications.none { it.tag == tag && it.id == id.hashCode() } && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(100)
             if (blocked) SystemClock.sleep(600)

@@ -107,7 +107,7 @@ class Req044ReminderInstrumentedTest {
                 assertEquals(expectedKeys, before.keys)
                 PlanAlarmKind.entries.forEach { assertNotNull("Real broadcast registration for $it", alarmPending(it)) }
                 val start = requireNotNull(PlanAlarmTime.next(plan, PlanAlarmKind.START, now))
-                PlanLiveUpdates.waiting(context, plan, start.triggerAt, start.endAt)
+                PlanLiveUpdates.waiting(context, plan, start.triggerAt, start.endAt, "07:00–07:30 · 阅读")
                 awaitState("Real waiting card was not posted") { card() != null }
                 val posted = requireNotNull(card()).notification
                 posted.contentIntent?.let(createdNotificationIntents::add)

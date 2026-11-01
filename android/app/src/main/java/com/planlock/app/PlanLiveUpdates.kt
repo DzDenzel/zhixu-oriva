@@ -26,16 +26,16 @@ object PlanLiveUpdates {
     private const val PHASE = "oriva_live_phase"
     private fun waitTag(owner: String, id: Long) = "oriva-wait:${Uri.encode(owner)}:$id"
     private fun dismissKey(owner: String, id: Long) = "dismissed:${Uri.encode(owner)}:$id"
-    fun waiting(context: Context, plan: PlanSnapshotEntity, startAt: Long, endAt: Long) =
-        post(context, plan, startAt, endAt, running = false)
-    fun running(context: Context, plan: PlanSnapshotEntity, endAt: Long) {
+    fun waiting(context: Context, plan: PlanSnapshotEntity, startAt: Long, endAt: Long, detail: String) =
+        post(context, plan, startAt, endAt, running = false, detail)
+    fun running(context: Context, plan: PlanSnapshotEntity, endAt: Long, detail: String) {
         cancelWaiting(context, plan)
-        post(context, plan, endAt, endAt, running = true)
+        post(context, plan, endAt, endAt, running = true, detail)
     }
     fun cancelWaiting(context: Context, plan: PlanSnapshotEntity) {
         context.getSystemService(NotificationManager::class.java).cancel(waitTag(plan.scope, plan.id), plan.id.hashCode())
     }
-    @Synchronized private fun post(context: Context, plan: PlanSnapshotEntity, targetAt: Long, endAt: Long, running: Boolean) {
+    @Synchronized private fun post(context: Context, plan: PlanSnapshotEntity, targetAt: Long, endAt: Long, running: Boolean, detail: String) {
         if (plan.scope != TokenStore.state.value.dataScope || targetAt <= System.currentTimeMillis()) return
         if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         val occurrence = PlanLiveIdentity.occurrence(plan.scope, plan.id, endAt)
@@ -45,7 +45,7 @@ object PlanLiveUpdates {
         val stage = if (running) "RUNNING" else "WAITING"
         val tag = if (running) null else waitTag(plan.scope, plan.id)
         val id = if (running) FOREGROUND_ID else plan.id.hashCode()
-        val displayTitle = if (running) "${plan.name} · 进行中" else PlanNotificationCopy.waitingTitle(plan.name, targetAt - System.currentTimeMillis())
+        val displayTitle = if (running) PlanNotificationCopy.runningTitle(plan.name) else PlanNotificationCopy.waitingTitle(plan.name, targetAt - System.currentTimeMillis())
         if (manager.activeNotifications.any { it.tag == tag && it.id == id && it.notification.`when` == targetAt &&
                 it.notification.extras.getString(PHASE) == stage && it.notification.extras.getString("oriva_occurrence") == occurrence &&
                 it.notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() == displayTitle }) return
@@ -59,15 +59,19 @@ object PlanLiveUpdates {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val mayAlert = !running && PlanAlertSoundPolicy.vibrate(context.getSystemService(AudioManager::class.java).ringerMode,
             manager.currentInterruptionFilter, planOwnedDnd = false)
-        val builder = NotificationCompat.Builder(context, if (running) FOREGROUND_CHANNEL else WAIT_CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+        val channel = if (running) FOREGROUND_CHANNEL else WAIT_CHANNEL
+        val publicVersion = NotificationCompat.Builder(context, channel).setSmallIcon(R.drawable.ic_stat_oriva)
+            .setContentTitle(if (running) PlanNotificationCopy.publicRunning else PlanNotificationCopy.publicWaiting)
+            .setWhen(targetAt).setShowWhen(true).setUsesChronometer(true).setChronometerCountDown(true).build()
+        val builder = NotificationCompat.Builder(context, channel)
+            .setSmallIcon(R.drawable.ic_stat_oriva)
             .setContentTitle(displayTitle)
-            .setContentText(if (running) "剩余时间" else "开始倒计时")
+            .setContentText(detail)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS).setOngoing(true).setOnlyAlertOnce(true)
             .setContentIntent(open).setDeleteIntent(deleted).setWhen(targetAt).setShowWhen(true)
             .setUsesChronometer(true).setChronometerCountDown(true).setColorized(false)
             .setRequestPromotedOngoing(Build.VERSION.SDK_INT >= 36 && manager.canPostPromotedNotifications())
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setSilent(!mayAlert)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(publicVersion).setSilent(!mayAlert)
             .addExtras(Bundle().apply { putString(PHASE, stage); putString("oriva_occurrence", occurrence) })
         if (running) {
             val endIntent = PlanAlerts.detail(context, plan.scope, plan.id).putExtra("end_plan", true)

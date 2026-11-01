@@ -59,9 +59,15 @@ object PlanAlerts {
         val token = key(plan.scope, plan.id)
         if (!repeated && p.getLong("occurrence:$token", 0L) == endAt) return
         if (!repeated) p.edit().putLong("occurrence:$token", endAt).putInt("snoozes:$token", 0).commit()
+        val store = RecordStore(context)
+        val strategy = store.strategy(plan.id)
+        val detailLine = planNotificationDetail(store, plan)
+        val snoozesLeft = 3 - p.getInt("snoozes:$token", 0)
         val open = PendingIntent.getActivity(context, plan.id.hashCode(), Intent(context, PlanAlertActivity::class.java)
             .setData(Uri.parse("oriva://plan-alert/${Uri.encode(plan.scope)}/${plan.id}/$endAt"))
             .putExtra("scope", plan.scope).putExtra("plan_id", plan.id).putExtra("plan_name", plan.name).putExtra("end_at", endAt)
+            .putExtra("plan_detail", detailLine).putExtra("snoozes_left", snoozesLeft)
+            .putExtra("quiet_hint", PlanNotificationCopy.quietHint(strategy?.autoDnd == true, strategy?.notifySilence == true))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val acknowledge = PendingIntent.getActivity(context, plan.id.hashCode(), detail(context, plan.scope, plan.id)
             .putExtra("acknowledge_alarm", true), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -74,12 +80,16 @@ object PlanAlerts {
         // On API37 the SILENT instance flag suppresses full-screen presentation too.
         // Only user-owned DND requests silence; normal and plan-owned alarms remain interruptive.
         val userDnd = filter != NotificationManager.INTERRUPTION_FILTER_ALL && !owned
-        val notification = NotificationCompat.Builder(context, PlanReminderChannel.START_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm).setContentTitle("「${plan.name}」开始了")
-            .setContentText("计划照常进行 · 请选择提醒操作").setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setPriority(NotificationCompat.PRIORITY_MAX).setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        val publicVersion = NotificationCompat.Builder(context, PlanReminderChannel.START_ID).setSmallIcon(R.drawable.ic_stat_oriva)
+            .setContentTitle(PlanNotificationCopy.publicStarted).build()
+        val builder = NotificationCompat.Builder(context, PlanReminderChannel.START_ID)
+            .setSmallIcon(R.drawable.ic_stat_oriva).setContentTitle(PlanNotificationCopy.startTitle(plan.name))
+            .setContentText(detailLine).setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setPriority(NotificationCompat.PRIORITY_MAX).setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(publicVersion)
             .setOngoing(true).setSilent(userDnd).setContentIntent(open).setFullScreenIntent(open, true)
-            .addAction(0, "5 分钟后再提醒", snooze).addAction(0, "我知道了", acknowledge).build()
+        // U-R1: after the third snooze only 「我知道了」 remains (K5).
+        if (snoozesLeft > 0) builder.addAction(0, "5 分钟后再提醒", snooze)
+        val notification = builder.addAction(0, "我知道了", acknowledge).build()
         val selfPlayback = requiresOwnPolicyBypass || owned
         if (!selfPlayback && !userDnd) notification.flags = notification.flags or android.app.Notification.FLAG_INSISTENT
         PlanLiveUpdates.cancelWaiting(context, plan)

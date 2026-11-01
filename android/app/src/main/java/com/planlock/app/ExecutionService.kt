@@ -202,7 +202,7 @@ class ExecutionService : Service() {
 
             if (active != null) {
                 com.planlock.app.record.PlanAlarmTime.next(active, com.planlock.app.record.PlanAlarmKind.END, evaluatedAt)?.let {
-                    PlanLiveUpdates.running(this, active, it.endAt)
+                    PlanLiveUpdates.running(this, active, it.endAt, planNotificationDetail(recordStore, active))
                 }
                 if (previousPlan != null && previousPlan.id != active.id) PlanAlerts.cancel(this, previousPlan.scope, previousPlan.id)
                 feedbackPlanId = active.id
@@ -312,7 +312,7 @@ class ExecutionService : Service() {
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setSmallIcon(R.drawable.ic_stat_oriva)
             .setContentIntent(pi)
             .build()
         startForeground(1, notification)

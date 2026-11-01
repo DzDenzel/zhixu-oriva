@@ -29,7 +29,7 @@ class ReminderChannelInstrumentedTest {
             .copy(scope = TokenStore.state.value.dataScope)
         val tag = "oriva-wait:${android.net.Uri.encode(plan.scope)}:${plan.id}"
         try {
-            PlanLiveUpdates.waiting(context, plan, System.currentTimeMillis() + 60_000, System.currentTimeMillis() + 180_000)
+            PlanLiveUpdates.waiting(context, plan, System.currentTimeMillis() + 60_000, System.currentTimeMillis() + 180_000, "07:00–07:30 · 阅读")
             val channel = manager.getNotificationChannel(PlanReminderChannel.ID)
             assertEquals(NotificationManager.IMPORTANCE_HIGH, channel.importance)
             assertTrue(channel.shouldVibrate())
@@ -41,7 +41,7 @@ class ReminderChannelInstrumentedTest {
             val settings = PlanReminderChannel.settingsIntent(context)
             assertEquals(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS, settings.action)
             assertEquals(PlanReminderChannel.ID, settings.getStringExtra(Settings.EXTRA_CHANNEL_ID))
-            PlanNotifications.completed(context, plan, 120_000, PlanQuietOutcome.RELEASED)
+            PlanNotifications.completed(context, plan, 120_000, PlanQuietOutcome.RELEASED, "07:00–07:30 · 阅读")
             assertEquals(PlanReminderChannel.COMPLETION_ID, manager.activeNotifications.single { it.tag == "oriva-completed:${plan.scope}" && it.id == plan.id.hashCode() }.notification.channelId)
             assertEquals(oldImportance, manager.getNotificationChannel("oriva_plan_events").importance)
             // Lowering is permitted by Android when the user has not changed the channel.

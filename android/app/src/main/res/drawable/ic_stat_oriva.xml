@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知小图标：取自 ic_launcher_monochrome 的品牌印记，裁去自适应图标安全边距，单色白，由系统着色。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="74" android:viewportHeight="74">
+    <group android:translateX="-17" android:translateY="-17">
+        <path android:fillColor="#FFFFFFFF" android:pathData="M47,27 C18,32 18,76 47,81 C25,69 25,39 47,27 Z M61,27 C90,32 90,76 61,81 C83,69 83,39 61,27 Z M54,29 C43,29 43,45 49,51 C40,45 31,50 33,59 C35,67 46,66 51,61 C45,70 49,81 57,79 C67,77 65,65 59,58 C69,64 77,59 75,51 C73,43 63,45 60,39 C59,33 58,29 54,29 Z" />
+    </group>
+</vector>
