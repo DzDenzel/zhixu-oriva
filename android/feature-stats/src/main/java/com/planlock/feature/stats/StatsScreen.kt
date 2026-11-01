@@ -148,6 +148,9 @@ fun StatsScreen(onOpenPlan: (Long) -> Unit = {}) {
     val authState by com.planlock.app.api.TokenStore.state.collectAsState()
     val api = remember { ApiClient.create() }
     val store = remember { RecordStore(context) }
+    // REQ-042 第二块：了解只来自与知行的对话（CHANGE-061）；仓库按完整可见身份绑定，身份切换即换实例
+    val insightRepository = remember(authState.dataScope) { com.planlock.app.record.LocalInsightRepository(authState.dataScope) }
+    val insights by remember(insightRepository) { insightRepository.observe() }.collectAsState(emptyList())
     val scope = rememberCoroutineScope()
     val rhythmModel = remember(store, scope) { com.planlock.app.record.RhythmViewModel(store, scope) }
     val rhythmState by rhythmModel.state.collectAsState()
@@ -233,7 +236,9 @@ fun StatsScreen(onOpenPlan: (Long) -> Unit = {}) {
                         item(key = "chart") { RhythmChartCard(summary, today) }
                         if (summary.plans.isNotEmpty()) item(key = "plans") { RhythmPlansCard(summary.plans, rhythmState.customPlanTypes, onOpenPlan) }
                         summary.distraction?.takeIf { it.topSources.isNotEmpty() || it.minutes7d > 0 }?.let { d -> item(key = "distraction") { RhythmDistractionCard(d) } }
-                        // v2.1.2：「知行对你的了解」放这里——紧凑提醒式小条（REQ-042 1.2 G1），本版不显示
+                        if (visibleInsights(insights).isNotEmpty()) item(key = "insights") {
+                            InsightBlock(insights) { insight, feedback -> scope.launch { insightRepository.setFeedback(insight.id, feedback) } }
+                        }
                         item(key = "export") {
                             RhythmExportRow(exportState == ExportState.EXPORTING,
                                 onIcs = { icsLauncher.launch("planlock-plans.ics") },
