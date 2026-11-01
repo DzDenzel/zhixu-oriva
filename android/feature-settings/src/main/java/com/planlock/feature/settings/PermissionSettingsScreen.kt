@@ -65,7 +65,7 @@ import kotlinx.coroutines.CancellationException
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PermissionSettingsScreen(onBack: () -> Unit) {
+fun PermissionSettingsScreen(onBack: () -> Unit, onOpenReminderGuide: () -> Unit) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -91,6 +91,12 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
     LaunchedEffect(context) {
         com.planlock.app.api.PlanTimingPreferences.enabled(context.planLockPreferences).collect { punctualStart = it }
     }
+    // REQ-044 U-R6：全屏 / 实时通知 / 后台运行三项短状态，口径同提醒引导页（U-R5）。
+    var reminderItems by remember { mutableStateOf<Map<com.planlock.app.api.ReadinessKey, com.planlock.app.api.ReadinessState>>(emptyMap()) }
+    suspend fun readReminderItems() = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        com.planlock.app.security.probeReminderReadiness(context, calendarFallbackOn = false, lastDeferral = null)
+            .items.associate { it.key to it.state }
+    }
     fun updateTiming(enabled: Boolean) {
         scope.launch {
             timingSaving = true; timingError = null
@@ -113,6 +119,7 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch { reminderItems = readReminderItems() }
                 states = readStates()
                 reminderCanAlert = PlanReminderChannel.canAlert(context)
                 locationRequested = locationRequested || hasRequestedLocation()
@@ -241,8 +248,39 @@ fun PermissionSettingsScreen(onBack: () -> Unit) {
                     timingError?.let { Text(it, Modifier.padding(horizontal = 14.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.error) }
                 }
             }
+            item {
+                SettingsGroup {
+                    reminderRows.forEachIndexed { index, key ->
+                        if (index > 0) SettingsDivider()
+                        val state = reminderItems[key] ?: com.planlock.app.api.ReadinessState.UNKNOWN
+                        val mark = reminderMark(key)
+                        SettingsItem(
+                            title = readinessTitle(key), detail = readinessHint(key), glyph = mark.glyph, hue = mark.hue,
+                            onClick = onOpenReminderGuide,
+                            trailing = {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    SettingsStateTag(readinessStateLabel(state), state == com.planlock.app.api.ReadinessState.ON)
+                                    SettingsChevron()
+                                }
+                            },
+                        )
+                    }
+                    SettingsDivider()
+                    SettingsItem("提醒检查", "一屏看齐让提醒准时响起所需的设置", glyph = "检", hue = com.planlock.design.InkHue.amber,
+                        onClick = onOpenReminderGuide)
+                }
+            }
         }
     }
+}
+
+private val reminderRows = listOf(com.planlock.app.api.ReadinessKey.FULL_SCREEN, com.planlock.app.api.ReadinessKey.PROMOTED,
+    com.planlock.app.api.ReadinessKey.BACKGROUND)
+
+private fun reminderMark(key: com.planlock.app.api.ReadinessKey): SettingsMark = when (key) {
+    com.planlock.app.api.ReadinessKey.FULL_SCREEN -> SettingsMark("屏", com.planlock.design.InkHue.amber)
+    com.planlock.app.api.ReadinessKey.PROMOTED -> SettingsMark("囊", com.planlock.design.InkHue.amber)
+    else -> SettingsMark("后", com.planlock.design.InkHue.work)
 }
 
 private fun permissionMark(kind: PermissionKind): SettingsMark = when (kind) {

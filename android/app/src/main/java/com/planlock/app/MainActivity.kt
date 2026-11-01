@@ -362,7 +362,7 @@ private fun AppContent(
                 }
             }
         }
-        if (incoming?.getBooleanExtra("reminder_settings", false) == true) navController.navigate("settings/permissions")
+        if (incoming?.getBooleanExtra("reminder_settings", false) == true) navController.navigate("settings/reminders")
         incoming?.removeExtra("reminder_settings")
         incoming?.removeExtra("acknowledge_alarm")
         incoming?.removeExtra("end_plan")
@@ -500,7 +500,21 @@ private fun AppContent(
                     .getOrDefault(PluginSourceType.OFFICIAL)
                 PluginRepositoryScreen(source, onBack = { navController.popBackStack() })
             }
-            composable("settings/permissions") { PermissionSettingsScreen(onBack = { navController.popBackStack() }) }
+            composable("settings/permissions") {
+                PermissionSettingsScreen(onBack = { navController.popBackStack() },
+                    onOpenReminderGuide = { navController.navigate("settings/reminders") { launchSingleTop = true } })
+            }
+            composable("settings/reminders") {
+                val appContext = LocalContext.current.applicationContext
+                com.planlock.feature.settings.ReminderGuideScreen(
+                    load = { ReminderReadinessReader.read(appContext) },
+                    setCalendarFallback = { on ->
+                        val fallback = com.planlock.app.record.PlanCalendarFallback(appContext)
+                        if (on) fallback.enable() else { fallback.disable(); true }
+                    },
+                    onBack = { navController.popBackStack() },
+                )
+            }
             composable("settings/plugins/{pluginId}", arguments = listOf(navArgument("pluginId") { type = NavType.StringType })) { backStack ->
                 PluginDetailScreen(backStack.arguments?.getString("pluginId").orEmpty(), onBack = { navController.popBackStack() })
             }
@@ -524,6 +538,10 @@ private fun AppContent(
                         navController.navigate(TopLevelDestination.PLANS.route) {
                             popUpTo(TopLevelDestination.TODAY.route) { saveState = true }
                             launchSingleTop = true
+                        }
+                        // U-R5：第一次保存带提醒的计划后，若有未就绪项，打开一次提醒引导。
+                        lifecycleOwner.lifecycleScope.launch {
+                            if (ReminderGuideOnce.shouldShow(navController.context)) navController.navigate("settings/reminders")
                         }
                     },
                     onBack = { navController.popBackStack() }
