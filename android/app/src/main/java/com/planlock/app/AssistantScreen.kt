@@ -221,7 +221,7 @@ fun AssistantScreen(onOpenPage: (AssistantDestination) -> Unit = {}, onBack: () 
         topBar = {
             Box(Modifier.padding(horizontal = 12.dp)) {
                 // 输入法弹出 = 全屏（导航收起）时才出现返回；平时由底部导航离开
-                AssistantMasthead(mode, aiReady, showBack = WindowInsets.isImeVisible, onBack = onBack) { target ->
+                AssistantMasthead(mode, aiReady, backendConnection, showBack = WindowInsets.isImeVisible, onBack = onBack) { target ->
                     if (target == mode) return@AssistantMasthead
                     mode = target
                     if (target == AssistantMode.AI && !aiReady) post(AssistantReply(
@@ -285,7 +285,8 @@ internal enum class AssistantMode(val label: String, val note: String) {
 }
 
 @Composable
-private fun AssistantMasthead(mode: AssistantMode, aiReady: Boolean, showBack: Boolean, onBack: () -> Unit, onModeChange: (AssistantMode) -> Unit) {
+private fun AssistantMasthead(mode: AssistantMode, aiReady: Boolean, backend: com.planlock.app.sync.BackendConnectionState,
+    showBack: Boolean, onBack: () -> Unit, onModeChange: (AssistantMode) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 8.dp).inkReveal(0)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             // 返回：仅在输入法弹出、底部导航收起时出现（这时它是唯一的回路），横向展开淡入
@@ -312,13 +313,20 @@ private fun AssistantMasthead(mode: AssistantMode, aiReady: Boolean, showBack: B
             when {
                 mode == AssistantMode.LOCAL -> mode.note
                 aiReady -> mode.note
-                else -> "AI 未就绪 · 暂由本地规则回答"
+                else -> aiPendingNote(backend)
             },
             style = InkText.caption,
             color = if (mode == AssistantMode.AI && !aiReady) InkHue.amber.color() else InkTone.soft,
             modifier = Modifier.padding(top = 8.dp),
         )
     }
+}
+
+/** BUG-135 / U-R7：AI 未就绪时的说明行按连接实况写，不在连不上时说「已连接」。 */
+internal fun aiPendingNote(backend: com.planlock.app.sync.BackendConnectionState): String = when (backend) {
+    com.planlock.app.sync.BackendConnectionState.CONNECTED -> "已连接你的个人后端 · AI 组件未启用，暂由本地规则回答"
+    com.planlock.app.sync.BackendConnectionState.UNREACHABLE -> "暂时连不上你的个人后端 · 暂由本地规则回答"
+    com.planlock.app.sync.BackendConnectionState.LOCAL_ONLY -> "仅本地使用 · 暂由本地规则回答"
 }
 
 /** 模式开关：本地 / AI 两格，选中格用该模式的颜色（本地 = 草绿，AI = 朱）。 */
