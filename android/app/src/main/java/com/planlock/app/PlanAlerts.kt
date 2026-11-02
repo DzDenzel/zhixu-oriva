@@ -91,7 +91,7 @@ object PlanAlerts {
         val strategy = store.strategy(plan.id)
         val detailLine = planNotificationDetail(store, plan)
         val reminder = phase == PlanAlertPhase.REMINDER
-        val title = if (reminder) PlanNotificationCopy.waitingTitle(plan.name, startAt - now) else PlanNotificationCopy.startTitle(plan.name)
+        val title = if (reminder) PlanNotificationCopy.waitingTitle(plan.name) else PlanNotificationCopy.startTitle(plan.name)
         val open = PendingIntent.getActivity(context, plan.id.hashCode(), Intent(context, PlanAlertActivity::class.java)
             .setData(Uri.parse("oriva://plan-alert/${phase.name}/${Uri.encode(plan.scope)}/${plan.id}/$until"))
             .putExtra("scope", plan.scope).putExtra("plan_id", plan.id).putExtra("plan_name", plan.name)
@@ -116,7 +116,9 @@ object PlanAlerts {
             .setPriority(NotificationCompat.PRIORITY_MAX).setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(publicVersion)
             .setOngoing(true).setSilent(userDnd).setContentIntent(open).setFullScreenIntent(open, true)
             .setTimeoutAfter(until - now)
-        if (reminder) builder.addAction(0, "5 分钟后再提醒", broadcast(snooze = true))
+        // 提前提醒卡片标题只写「即将开始」，剩余时间由系统倒计时到开始时刻
+        if (reminder) builder.setWhen(startAt).setShowWhen(true).setUsesChronometer(true).setChronometerCountDown(true)
+            .addAction(0, "5 分钟后再提醒", broadcast(snooze = true))
         val notification = builder.addAction(0, "我知道了", broadcast(snooze = false)).build()
         val selfPlayback = requiresOwnPolicyBypass || owned
         if (!selfPlayback && !userDnd) notification.flags = notification.flags or android.app.Notification.FLAG_INSISTENT
@@ -221,11 +223,7 @@ class PlanSnoozeReceiver : BroadcastReceiver() {
                 val due = intent.getLongExtra("trigger_at", 0)
                 com.planlock.app.record.PlanAlarmDeliveryLog(context).record(PlanAlarmKind.REMINDER, plan.id, plan.name, due, now)
                 val occurrence = PlanAlarmTime.next(plan, PlanAlarmKind.START, now)
-                if (occurrence?.startAt == startAt && now < startAt) {
-                    // 再响时刷新等待胶囊标题（「N 分钟后开始」），否则还停在第一次提醒时的分钟数
-                    PlanLiveUpdates.waiting(context, plan, startAt, occurrence.endAt, planNotificationDetail(store, plan))
-                    PlanAlerts.remind(context, plan, startAt, repeated = true)
-                }
+                if (occurrence?.startAt == startAt && now < startAt) PlanAlerts.remind(context, plan, startAt, repeated = true)
             } finally { result.finish() }
         }
     }

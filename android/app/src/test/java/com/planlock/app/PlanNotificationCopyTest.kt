@@ -5,14 +5,8 @@ import org.junit.Test
 
 class PlanNotificationCopyTest {
 
-    @Test fun waitingTitleUsesTheActualRemainingTime() {
-        assertEquals("「晨读」1 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 60_000))
-        assertEquals("「晨读」15 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 900_000))
-    }
-
-    @Test fun waitingTitleRoundsUpUntilTheNextMinute() {
-        assertEquals("「晨读」2 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 60_001))
-        assertEquals("「晨读」1 分钟后开始", PlanNotificationCopy.waitingTitle("晨读", 1))
+    @Test fun waitingTitleCarriesNoMinutesThatCouldGoStale() {
+        assertEquals("「晨读」即将开始", PlanNotificationCopy.waitingTitle("晨读"))
     }
 
     @Test fun detailLineIsTimeRangeThenType() {

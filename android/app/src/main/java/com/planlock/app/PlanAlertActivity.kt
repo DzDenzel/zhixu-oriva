@@ -56,7 +56,8 @@ class PlanAlertActivity : ComponentActivity() {
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         val reminder = phase == PlanAlertPhase.REMINDER
         val model = PlanAlertModel(
-            label = if (reminder) PlanNotificationCopy.startsInLabel(startAt - now) else "计划开始了",
+            label = if (reminder) "即将开始" else "计划开始了",
+            countdownTo = startAt.takeIf { reminder },
             planName = intent.getStringExtra("plan_name").orEmpty(),
             detail = intent.getStringExtra("plan_detail").orEmpty(),
             quietHint = intent.getStringExtra("quiet_hint"),

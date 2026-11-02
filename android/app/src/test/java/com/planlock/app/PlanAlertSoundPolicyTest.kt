@@ -38,6 +38,5 @@ class PlanAlertSoundPolicyTest {
     @Test fun blockedSnoozeTellsWholeMinutesLeft() {
         assertEquals("再过 3 分钟计划就开始了，到时直接提醒你", PlanNotificationCopy.startsSoon(2 * 60_000L + 1))
         assertEquals("再过 1 分钟计划就开始了，到时直接提醒你", PlanNotificationCopy.startsSoon(5_000L))
-        assertEquals("15 分钟后开始", PlanNotificationCopy.startsInLabel(15 * 60_000L))
     }
 }

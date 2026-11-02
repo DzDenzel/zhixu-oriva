@@ -21,6 +21,12 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
@@ -33,8 +39,10 @@ import androidx.compose.ui.unit.sp
 
 /** REQ-044 U-R1 / CHANGE-063 闹钟式全屏页的展示数据；业务（响铃、再提醒、收起）由调用方负责。 */
 data class PlanAlertModel(
-    /** 顶部一行：提前提醒阶段「15 分钟后开始」，开始阶段「计划开始了」。 */
+    /** 顶部一行：提前提醒阶段「即将开始」，开始阶段「计划开始了」。 */
     val label: String,
+    /** 提前提醒阶段的开始时刻：顶部一行后接逐秒倒计时；null 不显示。 */
+    val countdownTo: Long? = null,
     val planName: String,
     /** 「07:00–07:45 · 阅读」 */
     val detail: String,
@@ -68,11 +76,24 @@ fun PlanAlertSurface(
     }
 }
 
+/** 全屏页倒计时：不足 1 小时「mm:ss」，否则「h:mm:ss」；已到点显示「00:00」。 */
+fun alertCountdown(remainingMillis: Long): String {
+    val total = (remainingMillis.coerceAtLeast(0) + 999) / 1000
+    val h = total / 3600; val m = total % 3600 / 60; val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+}
+
 @Composable
-private fun PhaseLabel(label: String) {
+private fun PhaseLabel(label: String, countdownTo: Long?) {
+    // 页面显示期间应用在前台，逐秒刷新不违背「应用不醒也准」——胶囊与卡片的倒计时仍由系统渲染
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    if (countdownTo != null) LaunchedEffect(countdownTo) {
+        while (true) { now = System.currentTimeMillis(); delay(1000 - now % 1000) }
+    }
+    val text = countdownTo?.let { "$label · ${alertCountdown(it - now)}" } ?: label
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(Modifier.size(8.dp).background(InkTone.accent, CircleShape))
-        Text(label, style = InkText.meta, color = InkTone.accent)
+        Text(text, style = InkText.meta, color = InkTone.accent)
     }
 }
 
@@ -110,7 +131,7 @@ private fun SnoozeButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
 @Composable
 private fun CallLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowledge: () -> Unit) {
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-        PhaseLabel(model.label)
+        PhaseLabel(model.label, model.countdownTo)
         Spacer(Modifier.weight(1f))
         Text(
             model.planName, style = MaterialTheme.typography.displaySmall, color = InkTone.text, textAlign = TextAlign.Center,
@@ -132,7 +153,7 @@ private fun CallLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowledg
 private fun ClockLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowledge: () -> Unit) {
     val start = model.detail.substringBefore('–').substringBefore(" · ").takeIf { it.length == 5 && it[2] == ':' }
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-        PhaseLabel(model.label)
+        PhaseLabel(model.label, model.countdownTo)
         Spacer(Modifier.weight(1f))
         if (start != null) Text(start, style = MaterialTheme.typography.displayLarge.copy(fontSize = 72.sp), color = InkTone.text)
         Text(
@@ -151,14 +172,15 @@ private fun ClockLayout(model: PlanAlertModel, onSnooze: () -> Unit, onAcknowled
     }
 }
 
-private val previewModel = PlanAlertModel("15 分钟后开始", "专注阅读", "07:00–07:45 · 阅读", "进行中会开启免打扰", canSnooze = true)
+private val previewModel = PlanAlertModel("即将开始", System.currentTimeMillis() + 15 * 60_000L, "专注阅读", "07:00–07:45 · 阅读",
+    "进行中会开启免打扰", canSnooze = true)
 
 @Preview(name = "U-R1 甲 来电式 · 墨序浅色", widthDp = 360, heightDp = 780)
 @Composable private fun PreviewCallLight() = PlanLockTheme(ThemeMode.LIGHT) { PlanAlertSurface(previewModel, {}, {}) }
 
 @Preview(name = "U-R1 甲 来电式 · 深色 · 到点开始", widthDp = 360, heightDp = 780)
 @Composable private fun PreviewCallDark() = PlanLockTheme(ThemeMode.DARK) {
-    PlanAlertSurface(previewModel.copy(label = "计划开始了", canSnooze = false, quietHint = null), {}, {})
+    PlanAlertSurface(previewModel.copy(label = "计划开始了", countdownTo = null, canSnooze = false, quietHint = null), {}, {})
 }
 
 @Preview(name = "U-R1 乙 闹钟式 · 墨序浅色", widthDp = 360, heightDp = 780)

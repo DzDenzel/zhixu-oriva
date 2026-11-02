@@ -44,7 +44,7 @@ object PlanLiveUpdates {
         val stage = if (running) "RUNNING" else "WAITING"
         val tag = if (running) null else waitTag(plan.scope, plan.id)
         val id = if (running) FOREGROUND_ID else plan.id.hashCode()
-        val displayTitle = if (running) PlanNotificationCopy.runningTitle(plan.name) else PlanNotificationCopy.waitingTitle(plan.name, targetAt - System.currentTimeMillis())
+        val displayTitle = if (running) PlanNotificationCopy.runningTitle(plan.name) else PlanNotificationCopy.waitingTitle(plan.name)
         if (manager.activeNotifications.any { it.tag == tag && it.id == id && it.notification.`when` == targetAt &&
                 it.notification.extras.getString(PHASE) == stage && it.notification.extras.getString("oriva_occurrence") == occurrence &&
                 it.notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() == displayTitle }) return

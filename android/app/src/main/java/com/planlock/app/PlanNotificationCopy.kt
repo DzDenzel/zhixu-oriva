@@ -17,8 +17,8 @@ internal object PlanNotificationCopy {
     const val publicCompleted = "知序 · 计划已完成"
     const val publicDeferred = "知序 · 提醒被系统推迟"
 
-    fun waitingTitle(name: String, remainingMillis: Long): String =
-        "「$name」${((remainingMillis + 59_999) / 60_000).coerceAtLeast(1)} 分钟后开始"
+    /** 不写分钟数：剩余时间由系统倒计时给出，标题永远不会过时（CHANGE-063 后负责人 2026-11-02 定）。 */
+    fun waitingTitle(name: String): String = "「$name」即将开始"
 
     fun startTitle(name: String) = "「$name」开始了"
 
@@ -37,9 +37,6 @@ internal object PlanNotificationCopy {
     /** CHANGE-063：再提醒会越过开始时刻时不推迟，告诉用户还有几分钟（向上取整，至少 1 分钟）。 */
     fun startsSoon(remainingMillis: Long): String =
         "再过 ${((remainingMillis + 59_999) / 60_000).coerceAtLeast(1)} 分钟计划就开始了，到时直接提醒你"
-
-    /** 全屏页顶部一行（提前提醒阶段）：「15 分钟后开始」。 */
-    fun startsInLabel(remainingMillis: Long): String = "${((remainingMillis + 59_999) / 60_000).coerceAtLeast(1)} 分钟后开始"
 
     /** U-R1 one-line hint, only when the plan itself silences the phone. */
     fun quietHint(autoDnd: Boolean, notifySilence: Boolean): String? = when {
