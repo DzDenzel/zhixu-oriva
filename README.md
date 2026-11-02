@@ -162,7 +162,7 @@ cd android
 ```sh
 cd backend
 mvn clean verify
-java -jar planlock-app/target/planlock-app-2.1.1.jar
+java -jar planlock-app/target/planlock-app-2.1.2.jar
 ```
 
 默认监听 8080 端口。Flyway 会在空库上自动建表；已有数据库接入前请先备份并核对迁移历史，不要对存量库直接导入建表脚本。
@@ -205,10 +205,10 @@ npm run verify
 
 ```sh
 sha256sum -c SHA256SUMS
-apksigner verify --print-certs zhixu-oriva-2.1.1.apk
+apksigner verify --print-certs zhixu-oriva-2.1.2.apk
 ```
 
-Windows 可用 `Get-FileHash .\zhixu-oriva-2.1.1.apk -Algorithm SHA256`。将 `Signer #1 certificate SHA-256 digest` 与 Release 说明中公布的证书指纹比对，一致即为官方构建。
+Windows 可用 `Get-FileHash .\zhixu-oriva-2.1.2.apk -Algorithm SHA256`。将 `Signer #1 certificate SHA-256 digest` 与 Release 说明中公布的证书指纹比对，一致即为官方构建。
 
 ## 已知限制
 
@@ -222,8 +222,8 @@ Windows 可用 `Get-FileHash .\zhixu-oriva-2.1.1.apk -Algorithm SHA256`。将 `S
 | 版本 | 内容 |
 |---|---|
 | v2.1 | 自建后端部署套件、多设备同步与冲突确认、六套主题 |
-| **v2.1.1**（当前） | v2.1 收尾修复：首次启动选择、账号数据隔离、计划提醒与通知、地图选点、计划类型、统计「我的节奏」 |
-| v2.1.2 | 知行对你的了解、计划进行中的状态栏胶囊、arm64 镜像 |
+| v2.1.1 | v2.1 收尾修复：首次启动选择、账号数据隔离、计划提醒与通知、地图选点、计划类型、统计「我的节奏」 |
+| **v2.1.2**（当前候选，尚未发布） | 知行对你的了解、闹钟式提醒与状态栏胶囊、arm64 多架构构建与原生验证工作流（实测待发布阶段） |
 | v2.2 | 云平台一键部署（优先免费层，收费项事先说明） |
 | v2.3 | App 内部署向导 |
 | 之后 | 日常记录、iOS、Web 端、开源插件站 |
