@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM maven:3.9.10-eclipse-temurin-21 AS build
+FROM --platform=$BUILDPLATFORM maven:3.9.10-eclipse-temurin-21 AS build
 WORKDIR /src
 COPY . .
 RUN mvn -B -ntp -DskipTests package && \
