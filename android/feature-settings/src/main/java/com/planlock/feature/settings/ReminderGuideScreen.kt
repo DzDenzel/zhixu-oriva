@@ -59,7 +59,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /**
- * REQ-044 U-R5 一次性提醒引导：一屏列出让提醒准时响起所需的项，每项「去开启」跳系统设置，返回即刷新。
+ * REQ-044 U-R5：系统能力跳系统设置，「准时开始」回应用权限页，返回即刷新。
  * 数据由调用方提供（app 模块汇总 ReminderReadiness 与日历兜底），本页不直接改系统策略。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +67,7 @@ import kotlinx.coroutines.launch
 fun ReminderGuideScreen(
     load: suspend () -> ReminderReadiness,
     setCalendarFallback: suspend (Boolean) -> Boolean,
+    onOpenPermissions: () -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -103,7 +104,11 @@ fun ReminderGuideScreen(
         if (needed.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }) applyCalendar(true)
         else calendarPermission.launch(needed)
     }
-    fun open(intent: Intent?) {
+    fun open(key: ReadinessKey, intent: Intent?) {
+        if (key == ReadinessKey.PUNCTUAL_START) {
+            onOpenPermissions()
+            return
+        }
         intent ?: return
         runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
             .onFailure { runCatching { context.startActivity(com.planlock.app.security.PermissionIntent.appDetails(context)) } }
@@ -147,12 +152,12 @@ fun ReminderGuideScreen(
                         val action = when (row.state) { ReadinessState.OFF -> "去开启"; ReadinessState.UNKNOWN -> "去查看"; ReadinessState.ON -> null }
                         SettingsItem(
                             title = row.title, detail = row.hint,
-                            onClick = action?.let { { open(intents[row.key]) } },
+                            onClick = action?.let { { open(row.key, intents[row.key]) } },
                             trailing = {
                                 if (action == null) SettingsStateTag(readinessStateLabel(row.state), true)
                                 else Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
                                     SettingsStateTag(readinessStateLabel(row.state), false)
-                                    TextButton(onClick = { open(intents[row.key]) }, modifier = Modifier.heightIn(min = 48.dp)) { Text(action) }
+                                    TextButton(onClick = { open(row.key, intents[row.key]) }, modifier = Modifier.heightIn(min = 48.dp)) { Text(action) }
                                 }
                             },
                         )

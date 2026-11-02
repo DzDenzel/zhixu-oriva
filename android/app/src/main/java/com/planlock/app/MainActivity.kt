@@ -510,6 +510,7 @@ private fun AppContent(
                         val fallback = com.planlock.app.record.PlanCalendarFallback(appContext)
                         if (on) fallback.enable() else { fallback.disable(); true }
                     },
+                    onOpenPermissions = { navController.navigate("settings/permissions") { launchSingleTop = true } },
                     onBack = { navController.popBackStack() },
                 )
             }
