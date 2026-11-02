@@ -65,7 +65,7 @@ fun probeReminderReadiness(
             minimumImportance = if (id == PlanReminderChannel.COMPLETION_ID) {
                 NotificationManager.IMPORTANCE_DEFAULT
             } else NotificationManager.IMPORTANCE_HIGH,
-            needsChannelSound = id != PlanReminderChannel.START_ID,
+            needsChannelSound = readinessChannelNeedsSound(id),
         )
     } else emptyList()
     val ignoresBatteryOptimizations = readReadinessFact {
@@ -103,6 +103,9 @@ fun probeReminderReadiness(
         lastDeferral = lastDeferral,
     )
 }
+
+/** CHANGE-063: the waiting capsule is silent; both alarm phases use START_ID. */
+internal fun readinessChannelNeedsSound(id: String): Boolean = id != PlanReminderChannel.ID
 
 internal fun readinessState(enabled: Boolean?): ReadinessState = when (enabled) {
     true -> ReadinessState.ON

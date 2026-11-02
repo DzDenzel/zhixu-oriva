@@ -128,10 +128,19 @@ class ReminderReadinessProbeTest {
         assertEquals(ReadinessState.OFF, vendor(alertChannel.copy(soundPresent = false)))
     }
 
-    @Test fun applicationPlayedStartAlarmDoesNotNeedChannelSound() {
-        val start = alertChannel.copy(needsChannelSound = false, soundPresent = false)
-        assertEquals(ReadinessState.UNKNOWN, vendor(start))
-        assertEquals(ReadinessState.OFF, vendor(start.copy(groupBlocked = true)))
+    @Test fun silentWaitingCapsuleDoesNotNeedChannelSound() {
+        val waiting = alertChannel.copy(
+            needsChannelSound = readinessChannelNeedsSound(PlanReminderChannel.ID), soundPresent = false,
+        )
+        assertEquals(ReadinessState.UNKNOWN, vendor(waiting))
+        assertEquals(ReadinessState.OFF, vendor(waiting.copy(groupBlocked = true)))
+    }
+
+    @Test fun alarmAndCompletionRespectMutedChannelsIncludingApplicationPlayback() {
+        for (id in listOf(PlanReminderChannel.START_ID, PlanReminderChannel.COMPLETION_ID)) {
+            val channel = alertChannel.copy(needsChannelSound = readinessChannelNeedsSound(id), soundPresent = false)
+            assertEquals(id, ReadinessState.OFF, vendor(channel))
+        }
     }
 
     @Test fun oneRestrictedChannelIsNotHiddenByOtherEnabledChannels() {
