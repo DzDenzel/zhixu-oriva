@@ -1,3 +1,4 @@
 # Preserve validated license bytes and the executable wrapper on every platform.
 app/src/main/assets/licenses/zhixu_motto_OFL.txt text eol=lf
 gradlew text eol=lf
+core-plugin/src/main/cpp/quickjs/** linguist-vendored
