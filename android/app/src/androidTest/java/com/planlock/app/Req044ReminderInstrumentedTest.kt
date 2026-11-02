@@ -46,6 +46,16 @@ class Req044ReminderInstrumentedTest {
 
     @Test fun waitingCardIsCancelledWhenPlanTimeChanges() = waitingMutation("time-change")
 
+    @Test fun fullScreenAlertOwnsAnIsolatedTask() {
+        val context = qaContext()
+        val info = context.packageManager.getActivityInfo(
+            android.content.ComponentName(context, PlanAlertActivity::class.java), 0,
+        )
+        assertTrue("Full-screen alerts must not reuse the main application task", info.taskAffinity.isNullOrEmpty())
+        assertTrue(info.flags and android.content.pm.ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS != 0)
+        assertFalse(info.exported)
+    }
+
     private fun qaContext(): Context {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         check(context.packageName == "com.planlock.req044.qa") { "Requires isolated com.planlock.req044.qa target" }
