@@ -323,15 +323,26 @@ class ExecutionService : Service() {
         @Volatile private var running: ExecutionService? = null
 
         /** Idle has no service/notification. Future starts are owned by OS alarms. */
-        internal suspend fun reconcile(context: Context) {
+        internal suspend fun reconcile(context: Context) = reconcileActive(context, resumeInBackground = false)
+
+        /** Package replacement kills the running service without a foreground Activity. */
+        internal suspend fun recoverAfterReplacement(context: Context) = reconcileActive(context, resumeInBackground = true)
+
+        private suspend fun reconcileActive(context: Context, resumeInBackground: Boolean) {
             running?.let { it.requestEvaluation(); return }
-            if (!AppVisibility.foreground) return
+            if (!resumeInBackground && !AppVisibility.foreground) return
             withContext(Dispatchers.IO) {
                 val clock = Calendar.getInstance()
                 val minute = clock.get(Calendar.HOUR_OF_DAY) * 60 + clock.get(Calendar.MINUTE)
                 val date = OccurrenceDate.from(clock)
-                if (RecordStore(context).plans().any { PlanOccurrence.isActive(it, minute, date) } && AppVisibility.foreground) {
+                val store = RecordStore(context)
+                val eligible = store.plans().any {
+                    PlanOccurrence.isActive(it, minute, date) &&
+                        (!resumeInBackground || store.canBeginOccurrence(it.id, clock.timeInMillis))
+                }
+                if (eligible && (resumeInBackground || AppVisibility.foreground)) {
                     runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
+                        .onSuccess { if (resumeInBackground) android.util.Log.i("OrivaExecution", "replacement-execution-recovery-requested") }
                         .onFailure { android.util.Log.w("OrivaExecution", "Execution service start deferred", it) }
                 }
             }

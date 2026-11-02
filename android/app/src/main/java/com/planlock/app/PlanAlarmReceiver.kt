@@ -38,6 +38,8 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                     com.planlock.app.security.PlanReminderChannel.ensure(context)
                     scheduler.invalidate()
                     scheduler.reconcile()
+                    if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED)
+                        ExecutionService.recoverAfterReplacement(context)
                     return@withTimeout
                 }
                 AppSync.get(context).withLocalMutation {
