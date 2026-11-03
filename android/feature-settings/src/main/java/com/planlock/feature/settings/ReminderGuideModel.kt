@@ -18,6 +18,10 @@ internal data class ReminderGuideModel(
     val missing: Int,
     val rows: List<ReminderGuideRow>,
     val calendarOn: Boolean,
+    /** 日历开关组放在清单之前：有过推迟，或是 ColorOS（真机实测：应用闹钟被推迟时系统日历仍准点，§5.89）。 */
+    val calendarFirst: Boolean,
+    /** 关着时标「推荐」并写明原因；开着就不再劝。 */
+    val calendarRecommendation: String?,
 )
 
 /** 始终列出的四项：通知 + 除通知外最多 3 项（REQ-044 §4 第 4 条）。 */
@@ -55,7 +59,13 @@ internal fun readinessStateLabel(state: ReadinessState): String = when (state) {
     ReadinessState.UNKNOWN -> "无法读取"
 }
 
-internal fun reminderGuideModel(readiness: ReminderReadiness): ReminderGuideModel {
+/** OPPO / 一加 / realme 的系统为 ColorOS（及其海外版），会代理后台应用的闹钟（BUG-132）。 */
+internal fun isColorOsManufacturer(manufacturer: String): Boolean =
+    manufacturer.trim().lowercase() in setOf("oppo", "oneplus", "realme")
+
+internal const val COLOR_OS_CALENDAR_REASON = "推荐：这台手机会推迟应用的提醒，系统日历能按时提醒"
+
+internal fun reminderGuideModel(readiness: ReminderReadiness, colorOs: Boolean = false): ReminderGuideModel {
     val byKey = readiness.items.associateBy { it.key }
     fun state(key: ReadinessKey) = byKey[key]?.state ?: ReadinessState.UNKNOWN
     val deferral = readiness.lastDeferral
@@ -75,6 +85,8 @@ internal fun reminderGuideModel(readiness: ReminderReadiness): ReminderGuideMode
         missing = missing,
         rows = rows,
         calendarOn = state(ReadinessKey.CALENDAR_FALLBACK) == ReadinessState.ON,
+        calendarFirst = colorOs || deferral != null,
+        calendarRecommendation = COLOR_OS_CALENDAR_REASON.takeIf { colorOs && state(ReadinessKey.CALENDAR_FALLBACK) != ReadinessState.ON },
     )
 }
 

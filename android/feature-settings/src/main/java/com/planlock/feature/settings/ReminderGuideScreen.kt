@@ -55,6 +55,7 @@ import com.planlock.design.SettingsItem
 import com.planlock.design.SettingsStateTag
 import com.planlock.design.SettingsSwitchItem
 import com.planlock.design.planLockAtmosphere
+import com.planlock.design.color
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -125,7 +126,7 @@ fun ReminderGuideScreen(
         },
     ) { padding ->
         val current = readiness ?: return@Scaffold
-        val model = reminderGuideModel(current)
+        val model = reminderGuideModel(current, colorOs = isColorOsManufacturer(android.os.Build.MANUFACTURER))
         val intents = current.items.associate { it.key to it.settingsIntent }
         LazyColumn(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),
@@ -143,7 +144,9 @@ fun ReminderGuideScreen(
                             style = InkText.caption, color = InkTone.soft)
                     }
                 }
-                item { CalendarGroup(model.calendarOn, calendarBusy, calendarNote, ::requestCalendar) }
+            }
+            if (model.calendarFirst) item {
+                CalendarGroup(model.calendarOn, calendarBusy, calendarNote, model.calendarRecommendation, ::requestCalendar)
             }
             item {
                 SettingsGroup {
@@ -164,7 +167,7 @@ fun ReminderGuideScreen(
                     }
                 }
             }
-            if (model.deferralHeader == null) item { CalendarGroup(model.calendarOn, calendarBusy, calendarNote, ::requestCalendar) }
+            if (!model.calendarFirst) item { CalendarGroup(model.calendarOn, calendarBusy, calendarNote, null, ::requestCalendar) }
             if (model.verdict != ReminderGuideVerdict.NEEDS_ACTION) item {
                 Button(onClick = onBack, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = RoundedCornerShape(20.dp)) { Text("完成") }
             }
@@ -173,8 +176,12 @@ fun ReminderGuideScreen(
 }
 
 @Composable
-private fun CalendarGroup(on: Boolean, busy: Boolean, note: String?, onChange: (Boolean) -> Unit) {
+private fun CalendarGroup(on: Boolean, busy: Boolean, note: String?, recommendation: String?, onChange: (Boolean) -> Unit) {
     SettingsGroup {
+        recommendation?.let {
+            Text(it, Modifier.padding(start = 14.dp, end = 14.dp, top = 12.dp), style = InkText.caption,
+                color = InkHue.amber.color())
+        }
         SettingsSwitchItem(readinessTitle(ReadinessKey.CALENDAR_FALLBACK), readinessHint(ReadinessKey.CALENDAR_FALLBACK),
             checked = on, enabled = !busy, onCheckedChange = onChange)
         note?.let { Text(it, Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = InkText.caption, color = InkTone.soft) }

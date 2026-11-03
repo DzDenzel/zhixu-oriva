@@ -63,4 +63,21 @@ class ReminderGuideModelTest {
         assertEquals("上次提醒被系统推迟了 1 小时", header(60 * 60_000L))
         assertEquals("上次提醒被系统推迟了 1 小时", header(61 * 60_000L))
     }
+
+    @Test fun colorOsPutsCalendarFirstAndRecommendsItUntilOn() {
+        val off = reminderGuideModel(readiness(mapOf(ReadinessKey.CALENDAR_FALLBACK to OFF)), colorOs = true)
+        assertTrue(off.calendarFirst)
+        assertEquals("推荐：这台手机会推迟应用的提醒，系统日历能按时提醒", off.calendarRecommendation)
+        val on = reminderGuideModel(readiness(), colorOs = true)
+        assertTrue(on.calendarFirst)
+        assertNull(on.calendarRecommendation)
+        val other = reminderGuideModel(readiness(mapOf(ReadinessKey.CALENDAR_FALLBACK to OFF)), colorOs = false)
+        assertFalse(other.calendarFirst)
+        assertNull(other.calendarRecommendation)
+    }
+
+    @Test fun colorOsManufacturersAreRecognised() {
+        listOf("OPPO", "OnePlus", " realme ").forEach { assertTrue(isColorOsManufacturer(it)) }
+        listOf("Google", "Xiaomi", "samsung").forEach { assertFalse(isColorOsManufacturer(it)) }
+    }
 }
