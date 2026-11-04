@@ -90,4 +90,23 @@ class DndDecisionTest {
             decideDndAction(DndState(api35Plus = true, hasPolicyAccess = true, residualCleanupAttempted = true))
         )
     }
+
+    @Test
+    fun userTurningOurAppliedDndOffIsRespectedForTheOccurrence() {
+        // BUG-142 G9: the old decision re-enabled DND on the next 15-second tick.
+        assertEquals(
+            DndAction.Keep,
+            decideDndAction(DndState(recordedPlanId = 7, previousFilter = NotificationManager.INTERRUPTION_FILTER_ALL,
+                currentFilter = NotificationManager.INTERRUPTION_FILTER_ALL, neededPlanId = 7, api35Plus = true, applied = true))
+        )
+    }
+
+    @Test
+    fun userOverrideStillReleasesOurRuleWhenThePlanEnds() {
+        assertEquals(
+            DndAction.Restore(NotificationManager.INTERRUPTION_FILTER_ALL),
+            decideDndAction(DndState(recordedPlanId = 7, previousFilter = NotificationManager.INTERRUPTION_FILTER_ALL,
+                currentFilter = NotificationManager.INTERRUPTION_FILTER_ALL, neededPlanId = null, api35Plus = true, applied = true))
+        )
+    }
 }

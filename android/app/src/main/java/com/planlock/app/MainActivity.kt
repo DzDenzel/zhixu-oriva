@@ -322,7 +322,7 @@ private fun AppContent(
         androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
         sync.coordinator.coldStart()
-        ExecutionService.reconcile(context)
+        sync.withLocalMutation { ExecutionService.reconcile(context) }
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -335,8 +335,10 @@ private fun AppContent(
             if (event == Lifecycle.Event.ON_RESUME) {
                 if (sync.foregroundGate.resumed()) sync.coordinator.foregrounded()
                 lifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                    sync.withLocalMutation { com.planlock.app.record.PlanAlarmScheduler(context).reconcile() }
-                    ExecutionService.reconcile(context)
+                    sync.withLocalMutation {
+                        com.planlock.app.record.PlanAlarmScheduler(context).reconcile()
+                        ExecutionService.reconcile(context)
+                    }
                 }
             }
         }

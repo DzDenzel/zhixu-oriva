@@ -126,6 +126,27 @@ class ExecutionService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * BUG-142：前台服务被系统判超时（Android 14 shortService / 15+ 带时限类型）时必须在几秒内停下，
+     * 否则系统以 ForegroundServiceDidNotStopInTimeException 杀进程且不做任何清理。先撤掉计划的
+     * 安静模式再停，未结束的场次留给下一次协调（打开 App / 闹钟 / 开机）按时钟收尾。
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) = stopForTimeout("type=$fgsType")
+
+    @Deprecated("Android 14 shortService callback; API 35 delivers onTimeout(startId, fgsType).")
+    override fun onTimeout(startId: Int) = stopForTimeout("short")
+
+    private fun stopForTimeout(kind: String) {
+        android.util.Log.w("OrivaExecution", "foreground-timeout $kind")
+        PlanAlerts.stopRing()
+        ExecutionEngine.stop()
+        NotificationSilenceController.setRequired(false)
+        runCatching { dnd.reconcileBlocking(null) }.onFailure { android.util.Log.w("OrivaQuiet", "timeout release failed", it) }
+        if (running === this) running = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
     override fun onDestroy() {
         android.util.Log.i("OrivaExecution", "service-destroyed")
         PlanAlerts.stopRing()
@@ -322,30 +343,57 @@ class ExecutionService : Service() {
     companion object {
         @Volatile private var running: ExecutionService? = null
 
-        /** Idle has no service/notification. Future starts are owned by OS alarms. */
+        /**
+         * Idle has no service/notification. Future starts are owned by OS alarms.
+         * BUG-142：没有执行服务、此刻也没有该进行的计划时，撤掉崩溃 / 被杀 / 结束闹钟被推迟后残留的
+         * 免打扰与通知静默，并收尾仍开着的执行记录。调用方持有 withLocalMutation（与 PlanCompletionGate 同约定）。
+         */
         internal suspend fun reconcile(context: Context) = reconcileActive(context, resumeInBackground = false)
 
-        /** Package replacement kills the running service without a foreground Activity. */
-        internal suspend fun recoverAfterReplacement(context: Context) = reconcileActive(context, resumeInBackground = true)
+        /** Package replacement, boot and clock changes kill or outlive the service without a foreground Activity. */
+        internal suspend fun recoverInBackground(context: Context) = reconcileActive(context, resumeInBackground = true)
 
         private suspend fun reconcileActive(context: Context, resumeInBackground: Boolean) {
             running?.let { it.requestEvaluation(); return }
-            if (!resumeInBackground && !AppVisibility.foreground) return
             withContext(Dispatchers.IO) {
+                // A background process start (listener bind, alarm) may run before any Activity restored the
+                // account scope; deciding on the wrong scope's plans would release a running plan's quiet mode.
+                com.planlock.app.api.TokenStore.restore(context.planLockPreferences)
                 val clock = Calendar.getInstance()
                 val minute = clock.get(Calendar.HOUR_OF_DAY) * 60 + clock.get(Calendar.MINUTE)
                 val date = OccurrenceDate.from(clock)
                 val store = RecordStore(context)
-                val eligible = store.plans().any {
-                    PlanOccurrence.isActive(it, minute, date) &&
-                        (!resumeInBackground || store.canBeginOccurrence(it.id, clock.timeInMillis))
+                val plans = store.plans()
+                val activeNow = plans.filter { PlanOccurrence.isActive(it, minute, date) }
+                val eligible = activeNow.any { !resumeInBackground || store.canBeginOccurrence(it.id, clock.timeInMillis) }
+                if (eligible) {
+                    if (resumeInBackground || AppVisibility.foreground) {
+                        runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
+                            .onSuccess { if (resumeInBackground) android.util.Log.i("OrivaExecution", "background-execution-recovery-requested") }
+                            .onFailure { android.util.Log.w("OrivaExecution", "Execution service start deferred", it) }
+                    }
+                    return@withContext
                 }
-                if (eligible && (resumeInBackground || AppVisibility.foreground)) {
-                    runCatching { ContextCompat.startForegroundService(context, Intent(context, ExecutionService::class.java)) }
-                        .onSuccess { if (resumeInBackground) android.util.Log.i("OrivaExecution", "replacement-execution-recovery-requested") }
-                        .onFailure { android.util.Log.w("OrivaExecution", "Execution service start deferred", it) }
+                // A plan that is still running owns its quiet mode even when its service is momentarily absent.
+                if (activeNow.any { store.canBeginOccurrence(it.id, clock.timeInMillis) }) return@withContext
+                releaseResidualQuiet(context, store, plans, clock.timeInMillis)
+            }
+        }
+
+        private suspend fun releaseResidualQuiet(context: Context, store: RecordStore, plans: List<PlanSnapshotEntity>, now: Long) {
+            plans.forEach { plan ->
+                if (store.activeExecution(plan.id) != null) {
+                    android.util.Log.i("OrivaQuiet", "residual-execution-closed plan=${plan.id}")
+                    PlanCompletion.finish(context, store, plan, now)
                 }
             }
+            NotificationSilenceController.setRequired(false)
+            // Every entry point lands here; only touch the platform when a record or a non-default filter remains.
+            val recorded = context.planLockPreferences.data.first()[PlanLockPreferenceKeys.dndPlanId] != null
+            val filter = context.getSystemService(NotificationManager::class.java).currentInterruptionFilter
+            if (!recorded && filter == NotificationManager.INTERRUPTION_FILTER_ALL) return
+            val dnd = DndController(context).reconcile(null)
+            android.util.Log.i("OrivaQuiet", "residual-release dnd=$dnd")
         }
 
         private const val TICK_MS = 15_000L

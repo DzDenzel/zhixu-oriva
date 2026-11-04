@@ -38,8 +38,9 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                     com.planlock.app.security.PlanReminderChannel.ensure(context)
                     scheduler.invalidate()
                     scheduler.reconcile()
-                    if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED)
-                        ExecutionService.recoverAfterReplacement(context)
+                    // BUG-142：开机 / 改时间 / 时区 / 覆盖安装都可能跨过计划结束：继续仍在进行的计划，
+                    // 或撤掉已过期计划残留的免打扰与静默。
+                    AppSync.get(context).withLocalMutation { ExecutionService.recoverInBackground(context) }
                     return@withTimeout
                 }
                 AppSync.get(context).withLocalMutation {
@@ -82,6 +83,8 @@ class PlanAlarmReceiver : BroadcastReceiver() {
                     }
                     scheduler.reconcile(store)
                 }
+                // BUG-142：任何一次闹钟投递都是一次收尾机会（被推迟的 END、下一场的提醒都会走到这里）。
+                AppSync.get(context).withLocalMutation { ExecutionService.reconcile(context) }
             } } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { android.util.Log.w("OrivaAlarms", "Plan alarm delivery failed", error) }
             finally { pending.finish() }

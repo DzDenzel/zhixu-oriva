@@ -34,6 +34,18 @@ object PlanAlertSoundPolicy {
         verified && ringerMode == AudioManager.RINGER_MODE_NORMAL && (filter == NotificationManager.INTERRUPTION_FILTER_ALL || planOwnedDnd)
     fun vibrate(ringerMode: Int, filter: Int, planOwnedDnd: Boolean, verified: Boolean = true): Boolean =
         verified && ringerMode != AudioManager.RINGER_MODE_SILENT && (filter == NotificationManager.INTERRUPTION_FILTER_ALL || planOwnedDnd)
+
+    /**
+     * BUG-142 G6/G7：免打扰是**任一**知序计划开的（不限当前计划、提前提醒同样适用），且开之前用户没有自己的免打扰。
+     * 只看持久记录与当前过滤器，不依赖开始提醒与执行服务切换归属的先后。
+     */
+    fun planOwnedDnd(recordedPlanId: Long?, previousFilter: Int?, filter: Int): Boolean =
+        recordedPlanId != null && previousFilter == NotificationManager.INTERRUPTION_FILTER_ALL &&
+            filter == NotificationManager.INTERRUPTION_FILTER_ALARMS
+
+    /** 计划自己的免打扰或通知静默会压掉通知音频，这时提醒必须改走闹钟音频自播放。 */
+    fun needsAlarmPlayback(planOwnedDnd: Boolean, planSilenceActive: Boolean, requiresOwnPolicyBypass: Boolean): Boolean =
+        requiresOwnPolicyBypass || planOwnedDnd || planSilenceActive
 }
 
 /** CHANGE-063：再提醒只属于提前提醒；5 分钟后若已到开始时刻就不再推迟，由开始闹钟接手。 */
@@ -102,9 +114,8 @@ object PlanAlerts {
             action(context, plan.scope, plan.id, startAt, snooze), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val state = context.planLockPreferences.data.first()
         val filter = manager.currentInterruptionFilter
-        val owned = !reminder && state[PlanLockPreferenceKeys.dndPlanId] == plan.id &&
-            state[PlanLockPreferenceKeys.dndPreviousFilter] == NotificationManager.INTERRUPTION_FILTER_ALL &&
-            filter == NotificationManager.INTERRUPTION_FILTER_ALARMS
+        val owned = PlanAlertSoundPolicy.planOwnedDnd(state[PlanLockPreferenceKeys.dndPlanId],
+            state[PlanLockPreferenceKeys.dndPreviousFilter], filter)
         // On API37 the SILENT instance flag suppresses full-screen presentation too.
         // Only user-owned DND requests silence; normal and plan-owned alarms remain interruptive.
         val userDnd = filter != NotificationManager.INTERRUPTION_FILTER_ALL && !owned
@@ -120,7 +131,7 @@ object PlanAlerts {
         if (reminder) builder.setWhen(startAt).setShowWhen(true).setUsesChronometer(true).setChronometerCountDown(true)
             .addAction(0, "5 分钟后再提醒", broadcast(snooze = true))
         val notification = builder.addAction(0, "我知道了", broadcast(snooze = false)).build()
-        val selfPlayback = requiresOwnPolicyBypass || owned
+        val selfPlayback = PlanAlertSoundPolicy.needsAlarmPlayback(owned, NotificationSilenceController.isRequired(), requiresOwnPolicyBypass)
         if (!selfPlayback && !userDnd) notification.flags = notification.flags or android.app.Notification.FLAG_INSISTENT
         manager.notify("${phase.tag}:${plan.scope}", plan.id.hashCode(), notification)
         val channel = if (Build.VERSION.SDK_INT >= 26) manager.getNotificationChannel(PlanReminderChannel.START_ID) else null

@@ -43,7 +43,8 @@ class DndController(private val context: Context) {
                 neededPlanId = neededPlanId,
                 api35Plus = Build.VERSION.SDK_INT >= 35,
                 hasPolicyAccess = hasPolicyAccess,
-                residualCleanupAttempted = residualCleanupAttempted
+                residualCleanupAttempted = residualCleanupAttempted,
+                applied = record?.applied == true,
             )
         )
         return when (decision) {
@@ -78,23 +79,24 @@ class DndController(private val context: Context) {
 
     private suspend fun enableNew(planId: Long): DndResult {
         if (!hasPolicyAccess()) return DndResult.PermissionMissing
-        writeRecord(DndRecord(planId, notificationManager.currentInterruptionFilter, System.currentTimeMillis()))
-        return try {
-            setFilter(NotificationManager.INTERRUPTION_FILTER_ALARMS)
-            DndResult.Applied
-        } catch (_: SecurityException) {
-            DndResult.PermissionMissing
-        }
+        writeRecord(DndRecord(planId, notificationManager.currentInterruptionFilter, appliedAt = 0L))
+        return apply(planId)
     }
 
     private suspend fun reapply(): DndResult {
         if (!hasPolicyAccess()) return DndResult.PermissionMissing
-        return try {
-            setFilter(NotificationManager.INTERRUPTION_FILTER_ALARMS)
-            DndResult.Applied
-        } catch (_: SecurityException) {
-            DndResult.PermissionMissing
-        }
+        return apply(readRecord()?.planId ?: return DndResult.Noop)
+    }
+
+    private suspend fun apply(planId: Long): DndResult = try {
+        // API 35+: a rule the user snoozed (quick settings "off") stays snoozed while it is active, so deactivate
+        // it first; activating it again starts a fresh, unsnoozed activation (BUG-142).
+        if (Build.VERSION.SDK_INT >= 35) setFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
+        setFilter(NotificationManager.INTERRUPTION_FILTER_ALARMS)
+        preferences.edit { p -> if (p[PlanLockPreferenceKeys.dndPlanId] == planId) p[PlanLockPreferenceKeys.dndAppliedAt] = System.currentTimeMillis() }
+        DndResult.Applied
+    } catch (_: SecurityException) {
+        DndResult.PermissionMissing
     }
 
     private suspend fun restoreRecord(record: DndRecord) {
@@ -112,7 +114,9 @@ class DndController(private val context: Context) {
         notificationManager.setInterruptionFilter(filter)
     }
 
-    private data class DndRecord(val planId: Long, val previousFilter: Int, val appliedAt: Long)
+    private data class DndRecord(val planId: Long, val previousFilter: Int, val appliedAt: Long) {
+        val applied get() = appliedAt > 0L
+    }
 
     private suspend fun readRecord(): DndRecord? {
         val p = preferences.data.first()

@@ -11,7 +11,7 @@
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
@@ -90,9 +90,15 @@
             </intent-filter>
         </service>
 
+        <!-- BUG-142：计划执行要覆盖整场计划（睡眠计划可达 9 小时以上）。dataSync 在 Android 15+ 每天累计
+             上限 6 小时，超时即崩溃且免打扰残留，故用不限时长的 specialUse。 -->
         <service
             android:name=".ExecutionService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs for the whole duration of a user-scheduled focus plan: tracks plan end time and turns the plan's Do Not Disturb and notification silence back off when the plan ends." />
+        </service>
     </application>
 </manifest>

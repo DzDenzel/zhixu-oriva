@@ -9,7 +9,9 @@ data class DndState(
     val neededPlanId: Long? = null,
     val api35Plus: Boolean = false,
     val hasPolicyAccess: Boolean = true,
-    val residualCleanupAttempted: Boolean = false
+    val residualCleanupAttempted: Boolean = false,
+    /** The recorded filter change was confirmed by the platform (not merely written ahead). */
+    val applied: Boolean = false,
 )
 
 sealed interface DndAction {
@@ -24,7 +26,9 @@ sealed interface DndAction {
 fun decideDndAction(state: DndState): DndAction = when {
     !state.hasPolicyAccess && (state.recordedPlanId != null || state.neededPlanId != null) -> DndAction.PermissionMissing
     state.recordedPlanId != null && state.neededPlanId == state.recordedPlanId -> {
-        if (state.currentFilter == state.previousFilter) DndAction.Enable else DndAction.Keep
+        // BUG-142 G9: once our DND took effect, a return to the previous filter means the user turned it off
+        // for this occurrence; only a write-ahead record whose platform call never succeeded is retried.
+        if (state.currentFilter == state.previousFilter && !state.applied) DndAction.Enable else DndAction.Keep
     }
     state.recordedPlanId != null && state.neededPlanId == null -> {
         // API 35+ changes our implicit rule, not the global filter contributed by other rules.

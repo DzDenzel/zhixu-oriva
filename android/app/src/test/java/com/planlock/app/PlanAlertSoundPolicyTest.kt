@@ -39,4 +39,21 @@ class PlanAlertSoundPolicyTest {
         assertEquals("再过 3 分钟计划就开始了，到时直接提醒你", PlanNotificationCopy.startsSoon(2 * 60_000L + 1))
         assertEquals("再过 1 分钟计划就开始了，到时直接提醒你", PlanNotificationCopy.startsSoon(5_000L))
     }
+    @Test fun anyPlanOwnedDndCountsAsOwnedIncludingAnotherPlans() {
+        // BUG-142 G6/G7: plan 7 holds DND while plan 9's reminder / start fires; the old check required the same plan.
+        assertTrue(PlanAlertSoundPolicy.planOwnedDnd(recordedPlanId = 7, previousFilter = 1, filter = 4))
+        // Without a record, or when the user already had DND before the plan, the DND is the user's.
+        assertFalse(PlanAlertSoundPolicy.planOwnedDnd(recordedPlanId = null, previousFilter = null, filter = 4))
+        assertFalse(PlanAlertSoundPolicy.planOwnedDnd(recordedPlanId = 7, previousFilter = 2, filter = 4))
+        // Our record but the user moved off our filter: no longer ours.
+        assertFalse(PlanAlertSoundPolicy.planOwnedDnd(recordedPlanId = 7, previousFilter = 1, filter = 2))
+    }
+    @Test fun planQuietModesForceAlarmPlaybackForEveryAlert() {
+        // A plain reminder (no own bypass) during a plan's notification silence or DND must use alarm audio.
+        assertTrue(PlanAlertSoundPolicy.needsAlarmPlayback(planOwnedDnd = false, planSilenceActive = true, requiresOwnPolicyBypass = false))
+        assertTrue(PlanAlertSoundPolicy.needsAlarmPlayback(planOwnedDnd = true, planSilenceActive = false, requiresOwnPolicyBypass = false))
+        assertFalse(PlanAlertSoundPolicy.needsAlarmPlayback(planOwnedDnd = false, planSilenceActive = false, requiresOwnPolicyBypass = false))
+        // Silence alone never overrides the user's own DND: ring() still checks sound() with the real filter.
+        assertFalse(PlanAlertSoundPolicy.sound(2, 2, planOwnedDnd = false))
+    }
 }
