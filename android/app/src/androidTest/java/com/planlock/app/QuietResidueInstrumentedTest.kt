@@ -49,6 +49,10 @@ class QuietResidueInstrumentedTest {
         val deadline = SystemClock.elapsedRealtime() + 3_000
         while (!manager.isNotificationPolicyAccessGranted && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(50)
         assumeTrue("Notification policy access unavailable", manager.isNotificationPolicyAccessGranted)
+        // The test runs in the app process, whose start-up reconcile releases any DND not owned by a running plan
+        // (the BUG-142 fix itself). Let that pass finish so it cannot race the fake plan's record below.
+        runBlocking { AppSync.get(context).withLocalMutation { ExecutionService.reconcile(context) } }
+        SystemClock.sleep(1_500)
         assumeTrue("User DND must be off before the test", manager.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALL)
     }
 
