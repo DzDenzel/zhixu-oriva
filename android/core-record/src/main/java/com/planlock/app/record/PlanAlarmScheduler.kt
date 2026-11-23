@@ -23,18 +23,23 @@ class PlanAlarmScheduler(context: Context) {
         val plans = store.plans()
         val punctualStart = PlanTimingPreferences.enabled(app.planLockPreferences).first()
         val fallback = PlanCalendarFallback(app)
-        if (fallback.needsReconcile()) fallback.reconcile(scope, plans, now)
+        val needsFallback = fallback.needsReconcile()
+        if (needsFallback) fallback.reconcile(scope, plans, now)
         synchronized(lock) {
             if (scope != TokenStore.state.value.dataScope) return
-            val desired = plans.flatMap { plan -> PlanAlarmKind.entries.mapNotNull { kind ->
-                PlanAlarmTime.next(plan, kind, now)?.let { alarm -> Triple("$scope\n${plan.id}\n${kind.name}", plan.id, alarm) }
-            } }.associateBy { it.first }
-            registry.all.keys.filter { it !in desired }.forEach(::cancelKey)
-            desired.values.forEach { (key, id, alarm) ->
-                val exact = Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()
-                val mode = planAlarmDeliveryMode(alarm.kind, punctualStart, exact)
-                val signature = "${alarm.triggerAt}:${mode.name}"
-                if (registry.getString(key, null) == signature) return@forEach
+            val exact = Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()
+            val existingRegistry = registry.all.mapValues { it.value as? String }
+            val planResult = PlanAlarmReconcilePlanner.plan(
+                scope = scope,
+                plans = plans,
+                now = now,
+                punctualStart = punctualStart,
+                exactAllowed = exact,
+                existingRegistry = existingRegistry,
+                calendarFallbackNeedsReconcile = needsFallback,
+            )
+            planResult.cancelKeys.forEach(::cancelKey)
+            planResult.scheduleEntries.forEach { (key, id, alarm, mode, _) ->
                 val intent = pending(scope, id, alarm.kind, PendingIntent.FLAG_UPDATE_CURRENT, alarm) ?: return@forEach
                 val registeredMode = try {
                     when (mode) {

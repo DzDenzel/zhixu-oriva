@@ -30,8 +30,14 @@ class PlanCalendarFallback(context: Context) {
 
     fun isEnabled(): Boolean = preferences.getBoolean(ENABLED, false) && hasPermission()
 
+    fun shouldSuppressOccurrence(kind: PlanAlarmKind, due: Long, now: Long, deferred: Boolean): Boolean =
+        PlanCalendarFallbackPolicy.shouldSuppressOccurrence(kind, due, now, deferred, isEnabled())
+
     /** Includes deferred deletion after the switch was turned off; does not require permission. */
-    fun needsReconcile(): Boolean = preferences.getBoolean(ENABLED, false) || preferences.getBoolean(CLEANUP, false)
+    fun needsReconcile(): Boolean = PlanCalendarFallbackPolicy.shouldReconcile(
+        enabled = preferences.getBoolean(ENABLED, false),
+        cleanupPending = preferences.getBoolean(CLEANUP, false),
+    )
 
     /** The caller owns the runtime permission request; this method never launches UI. */
     suspend fun enable(): Boolean = withContext(Dispatchers.IO) {

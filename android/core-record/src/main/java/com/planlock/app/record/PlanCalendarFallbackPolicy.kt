@@ -42,6 +42,26 @@ internal data class PlanCalendarSyncDiff(
 internal object PlanCalendarFallbackPolicy {
     const val MINUTE_MS = 60_000L
     const val UPCOMING_OCCURRENCES = 32
+    const val ON_TIME_SUPPRESSION_WINDOW_MS = 5_000L
+
+    /**
+     * Suppress the calendar backup reminder only when our own REMINDER or START alarm
+     * arrived within the on-time window; never suppress when deferred or delayed > 5s.
+     */
+    fun shouldSuppressOccurrence(
+        kind: PlanAlarmKind,
+        due: Long,
+        now: Long,
+        deferred: Boolean = PlanAlarmLateness.isDeferred(due, now),
+        fallbackEnabled: Boolean,
+    ): Boolean = fallbackEnabled &&
+        !deferred &&
+        (kind == PlanAlarmKind.REMINDER || kind == PlanAlarmKind.START) &&
+        now >= due &&
+        now - due <= ON_TIME_SUPPRESSION_WINDOW_MS
+
+    /** Reconcile whenever calendar fallback is enabled OR pending cleanup remains after disable. */
+    fun shouldReconcile(enabled: Boolean, cleanupPending: Boolean): Boolean = enabled || cleanupPending
 
     // CalendarContract supports nonnegative advance minutes, not "one minute after".
     fun reminderMinutes(leadMinutes: Int?): Int = (leadMinutes ?: 0).coerceAtLeast(1) - 1

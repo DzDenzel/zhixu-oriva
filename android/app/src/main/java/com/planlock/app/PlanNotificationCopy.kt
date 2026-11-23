@@ -16,6 +16,7 @@ internal object PlanNotificationCopy {
     const val publicRunning = "知序 · 计划进行中"
     const val publicCompleted = "知序 · 计划已完成"
     const val publicDeferred = "知序 · 提醒被系统推迟"
+    const val publicForegroundStartBlocked = "知序 · 计划未能自动开始"
 
     /** 不写分钟数：剩余时间由系统倒计时给出，标题永远不会过时（CHANGE-063 后负责人 2026-11-02 定）。 */
     fun waitingTitle(name: String): String = "「$name」即将开始"
@@ -33,6 +34,9 @@ internal object PlanNotificationCopy {
 
     fun deferred(name: String, lateMs: Long) =
         PlanNotificationText("「$name」的提醒被系统推迟了 ${com.planlock.app.api.reminderDelayLabel(lateMs)}", "手机的后台策略推迟了提醒")
+
+    fun foregroundStartBlocked(name: String) =
+        PlanNotificationText("「$name」未能自动开始", "系统限制了后台启动，点击恢复执行或前往后台权限设置")
 
     /** CHANGE-063：再提醒会越过开始时刻时不推迟，告诉用户还有几分钟（向上取整，至少 1 分钟）。 */
     fun startsSoon(remainingMillis: Long): String =

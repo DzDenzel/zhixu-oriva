@@ -170,4 +170,45 @@ class PlanCalendarFallbackPolicyTest {
         assertEquals(canonical.endAt, event.endAt)
         assertEquals(ny.id, event.timeZone)
     }
+
+    @Test fun suppressionAllowsOnlyOnTimeWindowAndNeverDeferredOrOverFiveSeconds() {
+        val due = 1_000_000L
+        assertTrue(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.REMINDER, due, due, deferred = false, fallbackEnabled = true))
+        assertTrue(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.START, due, due + 5_000L, deferred = false, fallbackEnabled = true))
+
+        // Over 5s drift or deferred must never suppress calendar fallback.
+        assertFalse(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.START, due, due + 5_001L, deferred = false, fallbackEnabled = true))
+        assertFalse(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.REMINDER, due, due + 5_001L, deferred = false, fallbackEnabled = true))
+        assertFalse(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.START, due, due + 1_000L, deferred = true, fallbackEnabled = true))
+        assertFalse(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.START, due, due + 60_001L, fallbackEnabled = true))
+
+        // END, early trigger, or disabled fallback must not suppress.
+        assertFalse(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.END, due, due, deferred = false, fallbackEnabled = true))
+        assertFalse(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.START, due, due - 1L, deferred = false, fallbackEnabled = true))
+        assertFalse(PlanCalendarFallbackPolicy.shouldSuppressOccurrence(PlanAlarmKind.START, due, due, deferred = false, fallbackEnabled = false))
+    }
+
+    @Test fun shouldReconcileIncludesPendingCleanupAfterDisable() {
+        assertTrue(PlanCalendarFallbackPolicy.shouldReconcile(enabled = true, cleanupPending = false))
+        assertTrue(PlanCalendarFallbackPolicy.shouldReconcile(enabled = false, cleanupPending = true))
+        assertFalse(PlanCalendarFallbackPolicy.shouldReconcile(enabled = false, cleanupPending = false))
+    }
+
+    @Test fun endingActiveOccurrenceEarlyOrDisablingDeletesCurrentCalendarEvent() {
+        val active = expand(now = "2026-10-20 10:30", count = 2)
+        val stored = active.mapIndexed { idx, event -> PlanCalendarStoredEvent(100L + idx, event) }
+        assertEquals(time("2026-10-20 10:00"), active.first().key.startAt)
+
+        // End only today's occurrence early: today's event must be deleted while tomorrow stays.
+        val endedToday = expand(plan().copy(endedOccurrenceDate = "2026-10-20"), now = "2026-10-20 10:30", count = 2)
+        val endedDiff = PlanCalendarFallbackPolicy.diff(stored, endedToday)
+        assertEquals(listOf(100L), endedDiff.delete.map { it.eventId })
+        assertTrue(endedDiff.insert.any { it.key.startAt == time("2026-10-22 10:00") })
+
+        // Disable plan: all stored calendar events must be deleted.
+        val disabled = expand(plan().copy(status = 0), now = "2026-10-20 10:30", count = 2)
+        val disabledDiff = PlanCalendarFallbackPolicy.diff(stored, disabled)
+        assertEquals(listOf(100L, 101L), disabledDiff.delete.map { it.eventId })
+        assertTrue(disabledDiff.insert.isEmpty())
+    }
 }
