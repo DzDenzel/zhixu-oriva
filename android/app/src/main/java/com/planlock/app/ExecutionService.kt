@@ -100,6 +100,7 @@ class ExecutionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        NotificationSilenceController.initialize(this)
         recordStore = RecordStore(this)
         syncClient = AppSync.get(this)
         resolver = AppPackageResolver(this)
@@ -119,6 +120,7 @@ class ExecutionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // App resume/permission return should reconcile immediately instead of
         // waiting for the next 15-second tick.
+        NotificationSilenceController.initialize(this)
         latestStartId = startId
         requestEvaluation()
         return START_STICKY
@@ -354,6 +356,7 @@ class ExecutionService : Service() {
         internal suspend fun recoverInBackground(context: Context) = reconcileActive(context, resumeInBackground = true)
 
         private suspend fun reconcileActive(context: Context, resumeInBackground: Boolean) {
+            NotificationSilenceController.initialize(context)
             running?.let { it.requestEvaluation(); return }
             withContext(Dispatchers.IO) {
                 // A background process start (listener bind, alarm) may run before any Activity restored the

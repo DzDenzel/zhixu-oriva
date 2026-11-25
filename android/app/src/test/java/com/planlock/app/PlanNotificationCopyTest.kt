@@ -45,4 +45,11 @@ class PlanNotificationCopyTest {
         assertEquals("进行中会静默其他应用的通知", PlanNotificationCopy.quietHint(autoDnd = false, notifySilence = true))
         assertEquals("进行中会开启免打扰，并静默其他应用的通知", PlanNotificationCopy.quietHint(autoDnd = true, notifySilence = true))
     }
+
+    @Test fun foregroundStartBlockedCopyPromptsRecoveryAndSettings() {
+        val copy = PlanNotificationCopy.foregroundStartBlocked("晨读")
+        assertEquals("「晨读」未能自动开始", copy.title)
+        assertEquals("系统限制了后台启动，点击恢复执行或前往后台权限设置", copy.body)
+        assertEquals("知序 · 计划未能自动开始", PlanNotificationCopy.publicForegroundStartBlocked)
+    }
 }
