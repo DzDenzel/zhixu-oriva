@@ -119,7 +119,7 @@ docker compose --env-file .env -f docker-compose.yml logs --tail 100 backend
 | 现象 | 检查 |
 |---|---|
 | 找不到 Docker / engine 未就绪 | 启动 Docker Desktop，选择 Linux 容器；Linux 检查 Docker 服务和当前用户权限 |
-| 拉镜像 404 / denied | 核对 `ORIVA_IMAGE` 的仓库与标签；网络无法访问 GHCR 时，使用源码 ZIP 和本地 `--build` / `-Build` |
+| 拉镜像 404 / denied | 核对 `ORIVA_IMAGE` 的仓库与标签；网络无法访问 GHCR 时，使用源码 ZIP 和本地 `--build` / `-Build`。如源码 `--build` 构建过程中访问 Maven Central 受限或超时，可设置环境变量 `HTTPS_PROXY` 或可选镜像源 `ORIVA_MAVEN_MIRROR=https://maven.aliyun.com/repository/central` 后再运行 `sh install.sh --build`（PowerShell 先执行 `$env:ORIVA_MAVEN_MIRROR='https://maven.aliyun.com/repository/central'` 再运行 `-Build`） |
 | 端口已占用 | 在首次启动前修改 ORIVA_PORT，避免占用别的后端；不要结束不属于本实例的进程 |
 | 手机连不上电脑 | 同一 Wi-Fi / 网段，使用电脑实际局域网 IP；放行对应端口；关闭访客 Wi-Fi 的设备隔离；检查 VPN |
 | 电脑能打开，手机打不开 | 不要把 localhost、127.0.0.1、Docker 内服务名发给手机；云端确认 DNS 与 HTTPS |
@@ -133,7 +133,7 @@ docker compose --env-file .env -f docker-compose.yml logs --tail 100 backend
 
 镜像工作流构建 linux/amd64 与 linux/arm64，保留 SBOM 与 provenance；原生 arm64 runner 拉取同一 digest，通过安装脚本、健康 / 迁移 / 初始化和登录→新建计划→读回冒烟后，才生成 `backend-image-manifest`（源码提交、镜像标签 / digest、平台、arm64Verified、迁移文件及摘要）。`-rc.N` 候选标签只触发镜像构建与验证，不创建公开 Release。arm64 在原生 arm64 云环境验证，具体 NAS 型号未逐一验证。
 
-健康接口 `/api/v1/health` 不需要登录，只报告状态、版本、迁移版本、实例 ID 和初始化状态，不含秘密。镜像通过 `VERSION` 构建参数报告版本，未指定时为 `development`；源码直跑默认为 `2.1.3`。
+健康接口 `/api/v1/health` 不需要登录，只报告状态、版本、迁移版本、实例 ID 和初始化状态，不含秘密。镜像通过 `VERSION` 构建参数报告版本，未显式覆盖与源码直跑均默认为 `2.1.3`。
 
 部署模式禁用公开注册，以及验证码签发、验证码登录和验证码找回；请使用所有者账号密码登录。密码登录与密保答案共用失败预算：同一账号或同一来源地址在 15 分钟窗口内累计失败 5 次，后续尝试暂时拒绝；正确认证清零当前账号与来源的计数。已存在账号按用户 ID 计数，大小写等账号别名不能重置预算。Redis 不可用时拒绝认证，不降级放行。未显式配置受信代理时，来源只使用服务器连接地址；受信代理规则见上面的公网 HTTPS 说明。窗口从首次失败开始计算，拒绝请求不延长窗口。
 
