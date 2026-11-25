@@ -280,6 +280,58 @@ class StrategyServiceTest {
                         .isEqualTo(ErrorCode.INVALID_PARAM.getCode()));
     }
 
+    @Test
+    void upsertDefaultsNullFlagsToFalseOnInsert() {
+        when(planRefMapper.countOwnedPlan(50L, 1L)).thenReturn(1);
+        PlanStrategy reloaded = new PlanStrategy();
+        reloaded.setId(500L);
+        reloaded.setPlanId(50L);
+        reloaded.setAutoDnd(false);
+        reloaded.setNotifySilence(true);
+        reloaded.setVersion(0L);
+        when(strategyMapper.findByPlanId(50L)).thenReturn(null, reloaded);
+        when(strategyMapper.insert(any(PlanStrategy.class))).thenReturn(1);
+
+        StrategyUpsertRequest req = new StrategyUpsertRequest();
+        req.setNotifySilence(true);
+
+        strategyService.upsert(1L, 50L, req, null);
+
+        ArgumentCaptor<PlanStrategy> captor = ArgumentCaptor.forClass(PlanStrategy.class);
+        verify(strategyMapper).insert(captor.capture());
+        assertThat(captor.getValue().getAutoDnd()).isFalse();
+        assertThat(captor.getValue().getNotifySilence()).isTrue();
+    }
+
+    @Test
+    void upsertPreservesExistingFlagsWhenOmittedOnUpdate() {
+        when(planRefMapper.countOwnedPlan(51L, 1L)).thenReturn(1);
+        PlanStrategy existing = new PlanStrategy();
+        existing.setId(501L);
+        existing.setPlanId(51L);
+        existing.setAutoDnd(true);
+        existing.setNotifySilence(false);
+        existing.setVersion(1L);
+        PlanStrategy reloaded = new PlanStrategy();
+        reloaded.setId(501L);
+        reloaded.setPlanId(51L);
+        reloaded.setAutoDnd(true);
+        reloaded.setNotifySilence(true);
+        reloaded.setVersion(2L);
+        when(strategyMapper.findByPlanId(51L)).thenReturn(existing, reloaded);
+        when(strategyMapper.updateWithVersion(any(PlanStrategy.class))).thenReturn(1);
+
+        StrategyUpsertRequest req = new StrategyUpsertRequest();
+        req.setNotifySilence(true);
+
+        strategyService.upsert(1L, 51L, req, 1L);
+
+        ArgumentCaptor<PlanStrategy> captor = ArgumentCaptor.forClass(PlanStrategy.class);
+        verify(strategyMapper).updateWithVersion(captor.capture());
+        assertThat(captor.getValue().getAutoDnd()).isTrue();
+        assertThat(captor.getValue().getNotifySilence()).isTrue();
+    }
+
     private static AppItem appItem(String name, String packageName) {
         AppItem item = new AppItem();
         item.setName(name);

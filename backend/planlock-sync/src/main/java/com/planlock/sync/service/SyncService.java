@@ -159,6 +159,13 @@ public class SyncService {
             throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
         }
         if (syncMapper.countStrategy(item.getPlanId()) == 0) {
+            // Normalize omitted boolean switches to match NOT NULL DEFAULT 0 on initial insert.
+            if (item.getAutoDnd() == null) {
+                item.setAutoDnd(false);
+            }
+            if (item.getNotifySilence() == null) {
+                item.setNotifySilence(false);
+            }
             if (syncMapper.insertStrategy(item) == 0) {
                 throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
             }
