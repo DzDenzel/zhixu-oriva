@@ -44,7 +44,7 @@ public class StrategyService {
         if (existing == null) {
             PlanStrategy strategy = new PlanStrategy();
             strategy.setPlanId(planId);
-            apply(strategy, req);
+            apply(strategy, req, null);
             strategy.setVersion(0L);
             if (strategyMapper.insert(strategy) == 0) {
                 throw new BusinessException(ErrorCode.NOT_FOUND, "计划不存在");
@@ -56,7 +56,7 @@ public class StrategyService {
         }
         PlanStrategy strategy = new PlanStrategy();
         strategy.setPlanId(planId);
-        apply(strategy, req);
+        apply(strategy, req, existing);
         strategy.setVersion(baseVersion);
         int updated = strategyMapper.updateWithVersion(strategy);
         if (updated == 0) {
@@ -71,11 +71,13 @@ public class StrategyService {
         }
     }
 
-    private void apply(PlanStrategy strategy, StrategyUpsertRequest req) {
+    private void apply(PlanStrategy strategy, StrategyUpsertRequest req, PlanStrategy existing) {
         strategy.setBlacklistApps(writeJson(req.getBlacklistApps()));
         strategy.setWhitelistApps(writeJson(req.getWhitelistApps()));
-        strategy.setAutoDnd(req.getAutoDnd());
-        strategy.setNotifySilence(req.getNotifySilence());
+        strategy.setAutoDnd(req.getAutoDnd() != null ? req.getAutoDnd()
+                : (existing != null && Boolean.TRUE.equals(existing.getAutoDnd())));
+        strategy.setNotifySilence(req.getNotifySilence() != null ? req.getNotifySilence()
+                : (existing != null && Boolean.TRUE.equals(existing.getNotifySilence())));
     }
 
     private StrategyResponse toResponse(PlanStrategy s) {

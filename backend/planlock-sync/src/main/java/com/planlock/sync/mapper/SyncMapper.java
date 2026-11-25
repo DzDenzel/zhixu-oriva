@@ -112,7 +112,7 @@ public interface SyncMapper {
     int insertStrategy(@Param("s") SyncPushRequest.StrategyItem s);
 
     @Update("UPDATE plan_strategies SET blacklist_apps = #{s.blacklistApps}, whitelist_apps = #{s.whitelistApps}, "
-            + "auto_dnd = #{s.autoDnd}, notify_silence = #{s.notifySilence}, version = version + 1 "
+            + "auto_dnd = COALESCE(#{s.autoDnd}, auto_dnd), notify_silence = COALESCE(#{s.notifySilence}, notify_silence), version = version + 1 "
             + "WHERE plan_id = #{s.planId} AND version = #{s.baseVersion}")
     int updateStrategy(@Param("s") SyncPushRequest.StrategyItem s);
 }
