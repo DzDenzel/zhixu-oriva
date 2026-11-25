@@ -1,5 +1,6 @@
 package com.planlock.feature.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -61,10 +62,29 @@ fun PluginDetailScreen(pluginId: String, onBack: () -> Unit) {
             if (record == null) item { UIStatePanel(UiState.EMPTY, "此插件已卸载或不存在", onBack, emptySubject = "插件") }
             else {
                 val manifest = record.manifest
+                val metadata = formatPluginMetadata(manifest.author, manifest.license, manifest.homepage, manifest.repository)
                 item { PluginCard {
                     Text(manifest.name, style = MaterialTheme.typography.titleLarge)
                     Text("${manifest.version} · ${pluginSourceLabel(manifest.sourceType)}")
                     Text(manifest.description.ifBlank { "未提供整体说明" })
+                    metadata.author?.let { Text("作者：$it", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    metadata.license?.let { Text("许可证：$it", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    metadata.homepageUrl?.let { url ->
+                        Text(
+                            "主页：$url",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { safeOpenExternalUrl(context, url) },
+                        )
+                    }
+                    metadata.repositoryUrl?.let { url ->
+                        Text(
+                            "源码仓库：$url",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { safeOpenExternalUrl(context, url) },
+                        )
+                    }
                     Text(when {
                         loaded.any { it.manifest.id == pluginId } -> "状态：已启用"
                         record.lastError != null -> "状态：加载失败"

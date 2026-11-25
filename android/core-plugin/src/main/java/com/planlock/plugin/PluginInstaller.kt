@@ -51,7 +51,10 @@ class PluginInstaller(
     private val artifactStore: PluginArtifactStore,
     private val tempFileFactory: () -> File,
 ) {
-    fun install(entry: PluginCatalogEntry): PluginInstallResult {
+    fun install(entry: PluginCatalogEntry, safeMode: Boolean = false): PluginInstallResult {
+        if (!PluginSourcePolicy.canDownloadFromSource(entry.manifest.sourceType, safeMode)) {
+            return PluginInstallResult.Failed("安全模式已开启，已禁止下载第三方来源插件")
+        }
         val temp = tempFileFactory()
         return try {
             val bytes = downloader.download(entry.downloadUrl, temp)
@@ -78,11 +81,13 @@ class PluginInstaller(
 
 class HttpPluginDownloader : PluginDownloader {
     override fun download(url: String, target: File): Long {
+        val safeUrl = PluginMetadataValidator.requireOptionalHttpUrl(url, "downloadUrl")
+            ?: throw IllegalArgumentException("Missing plugin downloadUrl")
         PluginPublicTransport.get?.let { get ->
-            target.writeBytes(get(url))
+            target.writeBytes(get(safeUrl))
             return target.length()
         }
-        val connection = URL(url).openConnection() as HttpURLConnection
+        val connection = URL(safeUrl).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
         connection.readTimeout = 30_000
         connection.instanceFollowRedirects = false
@@ -99,10 +104,12 @@ class HttpPluginDownloader : PluginDownloader {
 
 /** Verifies signed JAR payload entries and matches the signer against the selected source anchor set. */
 class SignedJarPluginPackageVerifier(
-    private val trustedFingerprintsBySource: Map<String, Set<String>>,
+    private val trustedFingerprintsProvider: () -> Map<String, Set<String>>,
 ) : PluginPackageVerifier {
+    constructor(trustedFingerprintsBySource: Map<String, Set<String>>) : this({ trustedFingerprintsBySource })
+
     override fun verify(file: File, expectedSourceId: String): VerifiedPluginPackage {
-        val trusted = trustedFingerprintsBySource[expectedSourceId]
+        val trusted = trustedFingerprintsProvider()[expectedSourceId]
             ?.map { normalizeFingerprint(it) }
             ?.toSet()
             .orEmpty()
