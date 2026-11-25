@@ -31,11 +31,97 @@ EOF
     fi
     rmdir "$KIT/.install-lock"; trap - EXIT HUP INT TERM
 fi
+cached_base_images_ready() {
+    base_images=$(awk '
+        { sub(/\r$/, ""); sub(/^[ \t]+/, "") }
+        /^[Ff][Rr][Oo][Mm][ \t]+/ {
+            n = split($0, fields, /[ \t]+/)
+            idx = 2
+            while (idx <= n && fields[idx] ~ /^--/) idx++
+            if (idx <= n) {
+                img = fields[idx]
+                if (img != "" && img !~ /^-/ && tolower(img) != "scratch" && !(tolower(img) in stages)) print img
+                if (idx + 2 <= n && tolower(fields[idx + 1]) == "as") stages[tolower(fields[idx + 2])] = 1
+            }
+        }
+    ' "$1") || return 1
+    [ -n "$base_images" ] || return 1
+    printf '%s\n' "$base_images" | (
+        found=false
+        while IFS= read -r image; do
+            [ -n "$image" ] || continue
+            found=true
+            docker image inspect "$image" >/dev/null 2>&1 || exit 1
+        done
+        [ "$found" = true ]
+    )
+}
+resolve_maven_mirror() {
+    LC_ALL=C awk 'BEGIN {
+        v = ENVIRON["ORIVA_MAVEN_MIRROR"]
+        if (v == "") exit 0
+        if (v ~ /[\001-\040\042\047\134\177]/ || v !~ /^https:\/\/[A-Za-z0-9._:\/-]+$/) exit 2
+        rest = substr(v, 9)
+        slash = index(rest, "/")
+        auth = (slash > 0 ? substr(rest, 1, slash - 1) : rest)
+        if (auth == "") exit 2
+        colon = index(auth, ":")
+        if (colon > 0) {
+            host = substr(auth, 1, colon - 1)
+            port = substr(auth, colon + 1)
+            if (port !~ /^[0-9]+$/) exit 2
+            pnum = port + 0
+            if (pnum < 1 || pnum > 65535) exit 2
+        } else {
+            host = auth
+        }
+        if (host == "" || host !~ /^[A-Za-z0-9._-]+$/ || host ~ /^\.|\.$|\.\./) exit 2
+        printf "%s", v
+        exit 0
+    }'
+}
+compose_build_backend() {
+    pull_flag=${1:-}
+    set -- build
+    if [ -n "$pull_flag" ]; then
+        set -- "$@" "$pull_flag"
+    fi
+    for proxy_key in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+        proxy_val=$(LC_ALL=C awk -v k="$proxy_key" 'BEGIN {
+            v = ENVIRON[k]
+            if (v != "" && v !~ /[\001-\040\177]/) printf "%s", v
+            exit
+        }')
+        if [ -n "$proxy_val" ]; then
+            set -- "$@" --build-arg "$proxy_key=$proxy_val"
+        fi
+    done
+    if [ -n "${maven_mirror:-}" ]; then
+        set -- "$@" --build-arg "MAVEN_MIRROR_URL=$maven_mirror"
+    fi
+    set -- "$@" backend
+    compose "$@"
+}
 check_env
 if [ "$SHOW" = false ]; then
     if [ "$BUILD" = true ]; then
-        [ -f "$KIT/../backend/Dockerfile" ] || fail 'Local build requires the complete source archive. See README.'
-        compose build --pull backend
+        dockerfile="$KIT/../backend/Dockerfile"
+        [ -f "$dockerfile" ] || fail 'Local build requires the complete source archive. See README.'
+        maven_mirror=''
+        if maven_mirror=$(resolve_maven_mirror); then
+            :
+        else
+            maven_mirror=''
+            printf '%s\n' 'Warning: ignoring invalid ORIVA_MAVEN_MIRROR (must be an https:// URL without whitespace, credentials, query/fragment, or XML/shell special characters).' >&2
+        fi
+        if ! compose_build_backend --pull; then
+            if cached_base_images_ready "$dockerfile"; then
+                printf '%s\n' 'Warning: compose build --pull failed, but required base images are cached locally; retrying build without --pull.' >&2
+                compose_build_backend
+            else
+                fail 'Backend image build failed and required base images are not cached locally. Check Docker registry connectivity and retry.'
+            fi
+        fi
         compose up -d --wait --wait-timeout 240 --no-build
     else
         compose pull
