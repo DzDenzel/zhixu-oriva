@@ -26,6 +26,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -96,7 +97,14 @@ class JournalControllerTest {
 
         mockMvc.perform(get("/api/v1/journals/export").param("format", "markdown"))
                 .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")))
                 .andExpect(content().contentType("text/markdown;charset=UTF-8"))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("夜风很好")));
+
+        mockMvc.perform(post("/api/v1/journals")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"entryDate\":\"2026-11-25\",\"content\":\"" + "x".repeat(20_001) + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(ErrorCode.INVALID_PARAM.getCode()));
     }
 }

@@ -47,17 +47,13 @@ public class JournalService {
         entry.setStatus(1);
         entry.setVersion(0L);
         journalMapper.insert(entry);
-        return toResponse(journalMapper.findByIdForUpdate(entry.getId()));
+        return toResponse(journalMapper.findByIdForUpdate(userId, entry.getId()));
     }
 
     @Transactional
     public JournalResponse update(Long userId, Long id, Long baseVersion, JournalUpsertRequest req) {
         if (baseVersion == null) {
             throw new BusinessException(ErrorCode.INVALID_PARAM, "缺少 baseVersion");
-        }
-        JournalEntry existing = journalMapper.findById(id);
-        if (existing == null || !existing.getUserId().equals(userId) || Integer.valueOf(0).equals(existing.getStatus())) {
-            throw new BusinessException(ErrorCode.NOT_FOUND, "日常记录不存在");
         }
         JournalRules.validateClientId(req.getClientId());
         JournalEntry next = new JournalEntry();
@@ -67,36 +63,33 @@ public class JournalService {
         applyValidated(next, req);
 
         if (journalMapper.updateWithVersion(next) == 0) {
-            JournalEntry current = journalMapper.findByIdForUpdate(id);
-            if (current == null || !current.getUserId().equals(userId)) {
+            JournalEntry current = journalMapper.findStateForUpdate(userId, id);
+            if (current == null || Integer.valueOf(0).equals(current.getStatus())) {
                 throw new BusinessException(ErrorCode.NOT_FOUND, "日常记录不存在");
             }
             throw new BusinessException(ErrorCode.VERSION_CONFLICT);
         }
-        return toResponse(journalMapper.findById(id));
+        return toResponse(journalMapper.findById(userId, id));
     }
 
     @Transactional
     public void delete(Long userId, Long id, Long baseVersion) {
-        JournalEntry existing = journalMapper.findById(id);
-        if (existing == null) {
-            return;
-        }
-        if (!existing.getUserId().equals(userId)) {
+        JournalEntry current = journalMapper.findStateForUpdate(userId, id);
+        if (current == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "日常记录不存在");
         }
-        if (Integer.valueOf(0).equals(existing.getStatus())) {
+        if (Integer.valueOf(0).equals(current.getStatus())) {
             return;
         }
         if (baseVersion == null) {
             journalMapper.softDelete(id, userId);
         } else if (journalMapper.softDeleteWithVersion(id, userId, baseVersion) == 0) {
-            JournalEntry current = journalMapper.findByIdForUpdate(id);
-            if (current == null || Integer.valueOf(0).equals(current.getStatus())) {
-                return;
-            }
-            if (!current.getUserId().equals(userId)) {
+            JournalEntry latest = journalMapper.findStateForUpdate(userId, id);
+            if (latest == null) {
                 throw new BusinessException(ErrorCode.NOT_FOUND, "日常记录不存在");
+            }
+            if (Integer.valueOf(0).equals(latest.getStatus())) {
+                return;
             }
             throw new BusinessException(ErrorCode.VERSION_CONFLICT);
         }

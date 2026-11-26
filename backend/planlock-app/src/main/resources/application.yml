@@ -47,3 +47,6 @@ logging:
     com.planlock: debug
     # User insert parameters contain password hashes; never print them in deployment logs.
     com.planlock.account.mapper: info
+    # Journal entries and sync payloads contain private user notes/tags; never print SQL parameters.
+    com.planlock.record.journal.mapper: info
+    com.planlock.sync.mapper: info

@@ -8,6 +8,7 @@ import com.planlock.record.journal.service.JournalService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -67,6 +68,7 @@ public class JournalController {
     public ResponseEntity<String> export(@RequestParam(defaultValue = "markdown") String format) {
         String body = journalService.exportMarkdown(UserContext.userId(), format);
         return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
                 .contentType(MARKDOWN_UTF8)
                 .body(body);
     }

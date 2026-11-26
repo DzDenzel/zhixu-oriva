@@ -1,8 +1,11 @@
 package com.planlock.feature.plan
 
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
+import android.os.PersistableBundle
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -75,11 +78,11 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.planlock.app.api.JournalExportItem
 import com.planlock.app.api.JournalRules
 import com.planlock.app.api.TokenStore
 import com.planlock.app.record.RecordStore
+import com.planlock.app.record.SyncConfirmation
 import com.planlock.app.record.entity.JournalSnapshotEntity
 import com.planlock.app.sync.AppSync
 import com.planlock.design.FormIssue
@@ -104,7 +107,6 @@ import com.planlock.design.inkTint
 import com.planlock.design.rememberInkFormTargets
 import com.planlock.design.rememberInkPress
 import com.planlock.design.saveBarHint
-import com.planlock.design.tint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -112,6 +114,47 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+internal data class ScopedJournalsState(
+    val scope: String = "",
+    val entries: List<JournalSnapshotEntity> = emptyList(),
+    val loading: Boolean = true,
+    val error: String? = null,
+)
+
+internal data class JournalEditorSession(
+    val scope: String,
+    val targetId: Long?,
+    val snapshot: JournalSnapshotEntity?,
+)
+
+internal fun visibleJournalsForScope(state: ScopedJournalsState, activeScope: String): List<JournalSnapshotEntity> =
+    if (state.scope == activeScope) state.entries.filter { it.scope == activeScope } else emptyList()
+
+internal fun canCommitJournalInScope(
+    editorScope: String,
+    activeScope: String,
+    snapshot: JournalSnapshotEntity? = null,
+): Boolean = editorScope == activeScope && (snapshot == null || snapshot.scope == activeScope)
+
+internal fun prepareScopedJournalExport(
+    items: List<JournalSnapshotEntity>,
+    expectedScope: String,
+    activeScope: String,
+): String? {
+    if (expectedScope != activeScope || items.isEmpty() || items.any { it.scope != activeScope }) return null
+    val exportItems = items.map {
+        JournalExportItem(
+            id = it.id,
+            entryDate = it.entryDate,
+            mood = it.mood,
+            tags = JournalRules.parseTagsJson(it.tagsJson),
+            content = it.content,
+        )
+    }
+    val scopeLabel = if (activeScope == "local\nlocal") "本地游客模式" else "个人空间"
+    return JournalRules.exportMarkdown(exportItems, scopeLabel = scopeLabel)
+}
 
 internal fun filterJournalEntries(
     entries: List<JournalSnapshotEntity>,
@@ -171,9 +214,23 @@ internal fun moodToneColor(mood: String?): Color = when (mood) {
     else -> InkTone.soft
 }
 
+internal fun createSensitiveMarkdownClip(markdown: String): ClipData =
+    ClipData.newPlainText("知序日常记录", markdown).apply {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            description.extras = PersistableBundle().apply {
+                val extraKey = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    ClipDescription.EXTRA_IS_SENSITIVE
+                } else {
+                    "android.content.extra.IS_SENSITIVE"
+                }
+                putBoolean(extraKey, true)
+            }
+        }
+    }
+
 private fun copyMarkdownToClipboard(context: Context, markdown: String) {
     val clipboard = context.getSystemService(ClipboardManager::class.java)
-    clipboard?.setPrimaryClip(ClipData.newPlainText("知序日常记录", markdown))
+    clipboard?.setPrimaryClip(createSensitiveMarkdownClip(markdown))
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -188,35 +245,60 @@ fun JournalScreen(
     val sync = remember { AppSync.get(context) }
     val syncState by sync.coordinator.state.collectAsState()
     val authState by TokenStore.state.collectAsState()
+    val currentScope = authState.dataScope
     val localRevision by store.localRevision.collectAsState()
+    val confirmations by store.observeConfirmations().collectAsState(initial = emptyList())
+    val journalConfirmations = remember(confirmations) { confirmations.filter { it.kind == "journal" } }
     val scope = rememberCoroutineScope()
 
-    var entries by remember { mutableStateOf<List<JournalSnapshotEntity>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var reloadNonce by remember { mutableStateOf(0) }
+    var journalState by remember(currentScope) {
+        mutableStateOf(ScopedJournalsState(scope = currentScope, loading = true))
+    }
+    var reloadNonce by remember(currentScope) { mutableStateOf(0) }
 
-    var selectedMood by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedTag by rememberSaveable { mutableStateOf<String?>(null) }
-    var query by rememberSaveable { mutableStateOf("") }
+    var selectedMood by rememberSaveable(currentScope) { mutableStateOf<String?>(null) }
+    var selectedTag by rememberSaveable(currentScope) { mutableStateOf<String?>(null) }
+    var query by rememberSaveable(currentScope) { mutableStateOf("") }
 
-    var showEditor by rememberSaveable { mutableStateOf(openComposerInitially) }
-    var editingId by rememberSaveable { mutableStateOf<Long?>(null) }
-    var saving by remember { mutableStateOf(false) }
+    var initialComposerConsumed by rememberSaveable { mutableStateOf(false) }
+    var editorSession by remember(currentScope) { mutableStateOf<JournalEditorSession?>(null) }
+    var saving by remember(currentScope) { mutableStateOf(false) }
+    var selectedConfirmation by remember(currentScope) { mutableStateOf<SyncConfirmation?>(null) }
+    var resolvingConflict by remember(currentScope) { mutableStateOf(false) }
+    var conflictError by remember(currentScope) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(authState.dataScope, localRevision, syncState.revision, reloadNonce) {
+    LaunchedEffect(openComposerInitially, currentScope) {
+        if (openComposerInitially && !initialComposerConsumed) {
+            initialComposerConsumed = true
+            editorSession = JournalEditorSession(scope = currentScope, targetId = null, snapshot = null)
+        }
+    }
+
+    LaunchedEffect(currentScope, localRevision, syncState.revision, reloadNonce) {
+        if (journalState.scope != currentScope) {
+            journalState = ScopedJournalsState(scope = currentScope, loading = true)
+        }
         try {
-            val loaded = withContext(Dispatchers.IO) { store.journals() }
-            entries = loaded
-            loadError = null
+            val loaded = withContext(Dispatchers.IO) {
+                store.forScope(currentScope).journals().also { rows ->
+                    check(rows.all { it.scope == currentScope }) { "读取归属已变化" }
+                }
+            }
+            if (currentScope == TokenStore.state.value.dataScope) {
+                journalState = ScopedJournalsState(scope = currentScope, entries = loaded, loading = false, error = null)
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            loadError = "日常记录读取失败，请重试"
-        } finally {
-            loading = false
+            if (currentScope == TokenStore.state.value.dataScope) {
+                journalState = journalState.copy(scope = currentScope, loading = false, error = "日常记录读取失败，请重试")
+            }
         }
     }
+
+    val entries = remember(journalState, currentScope) { visibleJournalsForScope(journalState, currentScope) }
+    val loading = journalState.scope != currentScope || journalState.loading
+    val loadError = journalState.error.takeIf { journalState.scope == currentScope }
 
     val filtered = remember(entries, selectedMood, selectedTag, query) {
         filterJournalEntries(entries, selectedMood, selectedTag, query)
@@ -225,60 +307,87 @@ fun JournalScreen(
     val moodOptions = remember(entries) {
         (JournalRules.PRESET_MOODS + entries.mapNotNull { it.mood?.trim()?.takeIf { m -> m.isNotEmpty() } }).distinct()
     }
-    val editingEntry = remember(entries, editingId) {
-        editingId?.let { id -> entries.firstOrNull { it.id == id } }
+
+    selectedConfirmation?.let { pendingConfirmation ->
+        SyncConfirmationDialog(
+            confirmation = pendingConfirmation,
+            busy = resolvingConflict,
+            error = conflictError,
+            onDismiss = { if (!resolvingConflict) { selectedConfirmation = null; conflictError = null } },
+            onResolve = { keepMine ->
+                if (!resolvingConflict) {
+                    resolvingConflict = true
+                    conflictError = null
+                    scope.launch {
+                        try {
+                            sync.resolveConfirmation(pendingConfirmation, keepMine)
+                            selectedConfirmation = null
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            conflictError = "同步确认失败，请重试"
+                        } finally {
+                            resolvingConflict = false
+                        }
+                    }
+                }
+            },
+        )
     }
 
-    if (showEditor) {
+    editorSession?.takeIf { it.scope == currentScope }?.let { activeEditor ->
+        val editingEntry = activeEditor.targetId?.let { id ->
+            entries.firstOrNull { it.id == id && it.scope == activeEditor.scope } ?: activeEditor.snapshot?.takeIf { it.scope == activeEditor.scope }
+        }
         JournalEditorSheet(
+            editorScope = activeEditor.scope,
             current = editingEntry,
             suggestedTags = allTags,
             saving = saving,
-            onDismiss = { if (!saving) { showEditor = false; editingId = null } },
+            onDismiss = { if (!saving) editorSession = null },
             onCopySingle = { item ->
-                val md = JournalRules.exportMarkdown(
-                    listOf(
-                        JournalExportItem(
-                            item.id,
-                            item.entryDate,
-                            item.mood,
-                            JournalRules.parseTagsJson(item.tagsJson),
-                            item.content,
-                        )
-                    ),
-                    scopeLabel = if (authState.dataScope == "local\nlocal") "本地游客模式" else "个人空间",
-                )
-                copyMarkdownToClipboard(context, md)
-                onNotice("已复制这条日常记录为 Markdown")
+                val md = prepareScopedJournalExport(listOf(item), activeEditor.scope, TokenStore.state.value.dataScope)
+                if (md == null) {
+                    onNotice("账号已切换，请重新打开记录")
+                } else {
+                    copyMarkdownToClipboard(context, md)
+                    onNotice("已复制这条日常记录为 Markdown")
+                }
             },
             onSave = { entryDate, mood, tags, content ->
                 if (!saving) {
-                    saving = true
-                    scope.launch {
-                        try {
-                            val expectedScope = authState.dataScope
-                            withContext(Dispatchers.IO) {
-                                sync.withLocalMutation {
-                                    store.saveJournalChange(
-                                        entryDate = entryDate,
-                                        mood = mood,
-                                        tags = tags,
-                                        content = content,
-                                        id = editingEntry?.id,
-                                        expectedScope = expectedScope,
-                                    )
+                    val liveScope = TokenStore.state.value.dataScope
+                    if (!canCommitJournalInScope(activeEditor.scope, liveScope, editingEntry)) {
+                        editorSession = null
+                        onNotice("账号已切换，请重新操作")
+                    } else {
+                        saving = true
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    sync.withLocalMutation {
+                                        val nowScope = TokenStore.state.value.dataScope
+                                        check(canCommitJournalInScope(activeEditor.scope, nowScope, editingEntry)) { "scope_changed" }
+                                        store.forScope(activeEditor.scope).saveJournalChange(
+                                            entryDate = entryDate,
+                                            mood = mood,
+                                            tags = tags,
+                                            content = content,
+                                            id = editingEntry?.id,
+                                            expectedScope = activeEditor.scope,
+                                        )
+                                    }
                                 }
+                                sync.localChangesCommitted()
+                                editorSession = null
+                                onNotice("已保存日常记录")
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                onNotice("保存失败，请重试")
+                            } finally {
+                                saving = false
                             }
-                            sync.localChangesCommitted()
-                            showEditor = false
-                            editingId = null
-                            onNotice("已保存日常记录")
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (e: Exception) {
-                            onNotice(e.message ?: "保存失败，请重试")
-                        } finally {
-                            saving = false
                         }
                     }
                 }
@@ -286,24 +395,31 @@ fun JournalScreen(
             onDelete = editingEntry?.let { target ->
                 {
                     if (!saving) {
-                        saving = true
-                        scope.launch {
-                            try {
-                                withContext(Dispatchers.IO) {
-                                    sync.withLocalMutation {
-                                        store.softDeleteJournal(target.id, target.scope)
+                        val liveScope = TokenStore.state.value.dataScope
+                        if (!canCommitJournalInScope(activeEditor.scope, liveScope, target)) {
+                            editorSession = null
+                            onNotice("账号已切换，请重新操作")
+                        } else {
+                            saving = true
+                            scope.launch {
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        sync.withLocalMutation {
+                                            val nowScope = TokenStore.state.value.dataScope
+                                            check(canCommitJournalInScope(activeEditor.scope, nowScope, target)) { "scope_changed" }
+                                            store.forScope(activeEditor.scope).softDeleteJournal(target.id, activeEditor.scope)
+                                        }
                                     }
+                                    sync.localChangesCommitted()
+                                    editorSession = null
+                                    onNotice("已删除日常记录")
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (_: Exception) {
+                                    onNotice("删除失败，请重试")
+                                } finally {
+                                    saving = false
                                 }
-                                sync.localChangesCommitted()
-                                showEditor = false
-                                editingId = null
-                                onNotice("已删除日常记录")
-                            } catch (cancelled: CancellationException) {
-                                throw cancelled
-                            } catch (e: Exception) {
-                                onNotice(e.message ?: "删除失败，请重试")
-                            } finally {
-                                saving = false
                             }
                         }
                     }
@@ -335,20 +451,15 @@ fun JournalScreen(
                 },
                 actions = {
                     TextButton(
-                        enabled = filtered.isNotEmpty(),
+                        enabled = !loading && filtered.isNotEmpty(),
                         onClick = {
-                            val items = filtered.map {
-                                JournalExportItem(
-                                    id = it.id,
-                                    entryDate = it.entryDate,
-                                    mood = it.mood,
-                                    tags = JournalRules.parseTagsJson(it.tagsJson),
-                                    content = it.content,
-                                )
+                            val md = prepareScopedJournalExport(filtered, journalState.scope, TokenStore.state.value.dataScope)
+                            if (md == null) {
+                                onNotice("账号已切换，请刷新后重试")
+                            } else {
+                                copyMarkdownToClipboard(context, md)
+                                onNotice("已复制 ${filtered.size} 条记录为 Markdown")
                             }
-                            val scopeLabel = if (authState.dataScope == "local\nlocal") "本地游客模式" else "个人空间"
-                            copyMarkdownToClipboard(context, JournalRules.exportMarkdown(items, scopeLabel = scopeLabel))
-                            onNotice("已复制 ${items.size} 条记录为 Markdown")
                         },
                         modifier = Modifier.heightIn(min = 48.dp),
                     ) {
@@ -361,7 +472,12 @@ fun JournalScreen(
         },
         floatingActionButton = {
             if (!loading) {
-                InkFab(onClick = { editingId = null; showEditor = true }, description = "写一条日常记录")
+                InkFab(
+                    onClick = {
+                        editorSession = JournalEditorSession(scope = currentScope, targetId = null, snapshot = null)
+                    },
+                    description = "写一条日常记录",
+                )
             }
         },
     ) { innerPadding ->
@@ -390,6 +506,16 @@ fun JournalScreen(
                         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 96.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        if (journalConfirmations.isNotEmpty()) {
+                            item(key = "journal-confirmations") {
+                                SyncConfirmationStatus(
+                                    confirmations = journalConfirmations,
+                                    bulkDeletion = null,
+                                    onSelect = { selectedConfirmation = it },
+                                    onBulkSelect = {},
+                                )
+                            }
+                        }
                         item(key = "filters") {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedTextField(
@@ -463,7 +589,9 @@ fun JournalScreen(
                                     )
                                     if (entries.isEmpty()) {
                                         OutlinedButton(
-                                            onClick = { editingId = null; showEditor = true },
+                                            onClick = {
+                                                editorSession = JournalEditorSession(scope = currentScope, targetId = null, snapshot = null)
+                                            },
                                             modifier = Modifier.heightIn(min = 48.dp),
                                         ) {
                                             Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -474,29 +602,23 @@ fun JournalScreen(
                                 }
                             }
                         } else {
-                            itemsIndexed(filtered, key = { _, item -> "journal-${item.id}" }) { index, item ->
+                            itemsIndexed(filtered, key = { _, item -> "journal-${item.scope}-${item.id}" }) { index, item ->
                                 JournalEntryCard(
                                     entry = item,
                                     modifier = Modifier.inkReveal(index.coerceAtMost(8)),
                                     onClick = {
-                                        editingId = item.id
-                                        showEditor = true
+                                        if (item.scope == TokenStore.state.value.dataScope) {
+                                            editorSession = JournalEditorSession(scope = item.scope, targetId = item.id, snapshot = item)
+                                        }
                                     },
                                     onCopy = {
-                                        val md = JournalRules.exportMarkdown(
-                                            listOf(
-                                                JournalExportItem(
-                                                    item.id,
-                                                    item.entryDate,
-                                                    item.mood,
-                                                    JournalRules.parseTagsJson(item.tagsJson),
-                                                    item.content,
-                                                )
-                                            ),
-                                            scopeLabel = if (authState.dataScope == "local\nlocal") "本地游客模式" else "个人空间",
-                                        )
-                                        copyMarkdownToClipboard(context, md)
-                                        onNotice("已复制这条记录为 Markdown")
+                                        val md = prepareScopedJournalExport(listOf(item), item.scope, TokenStore.state.value.dataScope)
+                                        if (md == null) {
+                                            onNotice("账号已切换，请刷新后重试")
+                                        } else {
+                                            copyMarkdownToClipboard(context, md)
+                                            onNotice("已复制这条记录为 Markdown")
+                                        }
                                     },
                                 )
                             }
@@ -586,6 +708,7 @@ private fun JournalEntryCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun JournalEditorSheet(
+    editorScope: String,
     current: JournalSnapshotEntity?,
     suggestedTags: List<String> = emptyList(),
     saving: Boolean = false,
@@ -595,16 +718,17 @@ fun JournalEditorSheet(
     onDelete: (() -> Unit)? = null,
 ) {
     val today = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
-    var entryDate by remember(current?.id) { mutableStateOf(current?.entryDate ?: today) }
-    var mood by remember(current?.id) { mutableStateOf(current?.mood) }
-    var tags by remember(current?.id) { mutableStateOf(JournalRules.parseTagsJson(current?.tagsJson)) }
-    var tagInput by remember(current?.id) { mutableStateOf("") }
-    var tagError by remember(current?.id) { mutableStateOf<String?>(null) }
-    var content by remember(current?.id) { mutableStateOf(current?.content.orEmpty()) }
+    val draftKey = Triple(editorScope, current?.id, current?.scope)
+    var entryDate by remember(draftKey) { mutableStateOf(current?.entryDate ?: today) }
+    var mood by remember(draftKey) { mutableStateOf(current?.mood) }
+    var tags by remember(draftKey) { mutableStateOf(JournalRules.parseTagsJson(current?.tagsJson)) }
+    var tagInput by remember(draftKey) { mutableStateOf("") }
+    var tagError by remember(draftKey) { mutableStateOf<String?>(null) }
+    var content by remember(draftKey) { mutableStateOf(current?.content.orEmpty()) }
 
-    var showDatePicker by remember { mutableStateOf(false) }
-    var confirmDelete by remember(current?.id) { mutableStateOf(false) }
-    var attempted by remember(current?.id) { mutableStateOf(false) }
+    var showDatePicker by remember(draftKey) { mutableStateOf(false) }
+    var confirmDelete by remember(draftKey) { mutableStateOf(false) }
+    var attempted by remember(draftKey) { mutableStateOf(false) }
 
     val issues = journalFormIssues(entryDate, mood, tags, content)
     val shownIssues = if (attempted) issues else emptyList()
@@ -691,7 +815,7 @@ fun JournalEditorSheet(
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("心情（可选）", style = InkText.eyebrow, color = InkTone.soft)
-                    val allMoodChoices = remember(current?.mood) {
+                    val allMoodChoices = remember(draftKey) {
                         (JournalRules.PRESET_MOODS + listOfNotNull(current?.mood?.takeIf { it.isNotBlank() })).distinct()
                     }
                     FlowRow(
@@ -761,7 +885,7 @@ fun JournalEditorSheet(
                             tagInput = ""
                             tagError = null
                         } else {
-                            tagError = check.exceptionOrNull()?.message ?: "标签无效"
+                            tagError = "标签最多 8 个，每个不超过 20 字且不含控制字符"
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {

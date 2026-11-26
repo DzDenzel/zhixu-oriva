@@ -38,6 +38,18 @@ internal class SnapshotReconciler(
     private suspend fun capture(kind: String, id: Long, remote: SyncPullResponse): SyncConfirmation {
         val intents = pending.all().filter { it.syncEntityKey() == "$kind:$id" }
         val last = intents.lastOrNull()
+        if (kind == "journal") {
+            val deleting = last?.let { Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).item.status == 0 } == true
+            val archived = last?.localSnapshot?.let { Json.decodeFromString<DeletedSnapshot>(it) }
+            return SyncConfirmation(
+                kind = "journal",
+                id = id,
+                deleting = deleting,
+                localJournal = journals.byId(id) ?: archived?.let { null },
+                remoteJournal = remote.journals?.firstOrNull { it.id == id },
+                intentIds = intents.map { it.id },
+            )
+        }
         val deleting = last?.type in setOf("plan_delete", "schedule_delete")
         val archive = last?.localSnapshot?.let { Json.decodeFromString<DeletedSnapshot>(it) }
         return SyncConfirmation(kind, id, deleting,
@@ -62,9 +74,10 @@ internal class SnapshotReconciler(
         remoteSchedules: List<SyncScheduleView>,
         remoteJournals: List<SyncJournalView> = emptyList(),
     ) = store.scopedTransaction {
-        val remote = SyncPullResponse(remotePlans, remoteSchedules, remoteStrategies)
+        val remote = SyncPullResponse(remotePlans, remoteSchedules, remoteStrategies, journals = remoteJournals)
         val planIds = remotePlans.map { it.id }.toSet()
         val scheduleIds = remoteSchedules.map { it.id }.toSet()
+        val activeJournalIds = remoteJournals.filter { it.status == 1 }.map { it.id }.toSet()
         // A complete pull is also the acknowledgement for a deletion whose response was lost.
         pending.all().filter { it.type in setOf("plan_delete", "schedule_delete") }.forEach { row ->
             val key = requireNotNull(row.syncEntityKey())
@@ -79,6 +92,18 @@ internal class SnapshotReconciler(
             val key = requireNotNull(row.syncEntityKey())
             val id = key.substringAfter(':').toLong()
             if (id > 0 && id !in (if (key.startsWith("plan:")) planIds else scheduleIds)) markConflict(row, remote)
+        }
+        pending.all().filter { it.type == "journal_upsert" }.forEach { row ->
+            val queued = Json.decodeFromString<JournalPendingUpsert>(row.payload.orEmpty())
+            if (queued.localId > 0) {
+                if (queued.item.status == 0 && queued.localId !in activeJournalIds) {
+                    val key = requireNotNull(row.syncEntityKey())
+                    pending.delete(pending.all().filter { it.syncEntityKey() == key && it.id <= row.id }.map { it.id })
+                    pending.deleteByClientId("conflict:$key")
+                } else if (queued.item.status == 1 && queued.localId !in activeJournalIds) {
+                    markConflict(row, remote)
+                }
+            }
         }
         // Refresh the comparison atomically, including edits made while a dialog was open.
         confirmations().forEach { old ->
@@ -143,7 +168,12 @@ internal class SnapshotReconciler(
         val resolved = store.scopedTransaction {
             val row = pending.byClientId("conflict:${expected.key}") ?: return@scopedTransaction false
             val old = Json.decodeFromString<SyncConfirmation>(row.payload.orEmpty())
-            val remote = SyncPullResponse(listOfNotNull(old.remotePlan), listOfNotNull(old.remoteSchedule), listOfNotNull(old.remoteStrategy))
+            val remote = SyncPullResponse(
+                listOfNotNull(old.remotePlan),
+                listOfNotNull(old.remoteSchedule),
+                listOfNotNull(old.remoteStrategy),
+                journals = listOfNotNull(old.remoteJournal),
+            )
             val current = capture(old.kind, old.id, remote)
             if (old != expected || current != old) {
                 metadata(CONFLICT, row.clientId, Json.encodeToString(current))
@@ -154,25 +184,52 @@ internal class SnapshotReconciler(
             pending.deleteByClientId("local-confirmation:${old.kind}:${old.id}")
             if (old.kind == "plan") pending.deleteByClientId("local-confirmation:strategy:${old.id}")
             if (!keepMine) {
-                if (old.kind == "plan") {
-                    if (old.remoteDeleted) removePlan(old.id)
-                    else { plans.delete(old.id); strategies.deleteByPlanId(old.id) }
-                    old.remotePlan?.let { plans.upsertAll(listOf(it.toSnapshot())) }
-                    old.remoteStrategy?.let { strategies.upsertRemote(listOf(it.toSnapshot())) }
-                } else {
-                    removeSchedule(old.id)
-                    old.remoteSchedule?.let { schedules.upsertAll(listOf(it.toSnapshot())) }
+                when (old.kind) {
+                    "plan" -> {
+                        if (old.remoteDeleted) removePlan(old.id)
+                        else { plans.delete(old.id); strategies.deleteByPlanId(old.id) }
+                        old.remotePlan?.let { plans.upsertAll(listOf(it.toSnapshot())) }
+                        old.remoteStrategy?.let { strategies.upsertRemote(listOf(it.toSnapshot())) }
+                    }
+                    "journal" -> {
+                        val remoteRow = old.remoteJournal
+                        if (remoteRow != null) journals.upsertAll(listOf(remoteRow.toSnapshot()))
+                        else journals.delete(old.id)
+                    }
+                    else -> {
+                        removeSchedule(old.id)
+                        old.remoteSchedule?.let { schedules.upsertAll(listOf(it.toSnapshot())) }
+                    }
                 }
             } else if (old.deleting) {
                 if (!old.remoteDeleted) {
-                    if (old.kind == "plan") {
-                        plans.upsertAll(listOf((old.localPlan ?: requireNotNull(old.remotePlan).toSnapshot()).copy(version = old.remotePlan?.version)))
-                        old.localStrategy?.let { strategies.upsertAll(listOf(it)) }
-                        store.deletePlan(old.id)
-                    } else {
-                        schedules.upsertAll(listOf((old.localSchedule ?: requireNotNull(old.remoteSchedule).toSnapshot()).copy(version = requireNotNull(old.remoteSchedule).version)))
-                        store.enqueueScheduleDelete(old.id)
+                    when (old.kind) {
+                        "plan" -> {
+                            plans.upsertAll(listOf((old.localPlan ?: requireNotNull(old.remotePlan).toSnapshot()).copy(version = old.remotePlan?.version)))
+                            old.localStrategy?.let { strategies.upsertAll(listOf(it)) }
+                            store.deletePlan(old.id)
+                        }
+                        "journal" -> {
+                            val remoteRow = requireNotNull(old.remoteJournal)
+                            journals.upsertAll(listOf((old.localJournal ?: remoteRow.toSnapshot()).copy(status = 1, version = remoteRow.version)))
+                            store.softDeleteJournal(old.id)
+                        }
+                        else -> {
+                            schedules.upsertAll(listOf((old.localSchedule ?: requireNotNull(old.remoteSchedule).toSnapshot()).copy(version = requireNotNull(old.remoteSchedule).version)))
+                            store.enqueueScheduleDelete(old.id)
+                        }
                     }
+                }
+            } else if (old.kind == "journal") {
+                val local = requireNotNull(old.localJournal) { "本机版本缺失，已保留确认状态" }
+                val tags = com.planlock.app.api.JournalRules.parseTagsJson(local.tagsJson)
+                if (old.remoteDeleted) {
+                    old.remoteJournal?.let { journals.upsertAll(listOf(it.toSnapshot())) } ?: journals.delete(old.id)
+                    store.saveJournalChange(local.entryDate, local.mood, tags, local.content, id = null)
+                } else {
+                    val version = old.remoteJournal?.version ?: local.version
+                    journals.upsertAll(listOf(local.copy(status = 1, version = version)))
+                    store.saveJournalChange(local.entryDate, local.mood, tags, local.content, id = old.id)
                 }
             } else if (old.kind == "plan") {
                 val local = requireNotNull(old.localPlan) { "本机版本缺失，已保留确认状态" }

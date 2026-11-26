@@ -97,7 +97,14 @@ public class SyncService {
             }
         }
         if (req.getJournals() != null) {
+            if (req.getJournals().size() > JournalRules.MAX_SYNC_BATCH_SIZE) {
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "单次同步日常记录不能超过 500 条");
+            }
             for (var item : req.getJournals()) {
+                if (item == null) {
+                    results.add(fail("journal:null", new BusinessException(ErrorCode.INVALID_PARAM, "日常记录条目不能为空"), null));
+                    continue;
+                }
                 String key = "journal:" + item.getId();
                 try {
                     pushJournal(userId, item);

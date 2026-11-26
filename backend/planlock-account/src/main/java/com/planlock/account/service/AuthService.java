@@ -149,6 +149,7 @@ public class AuthService {
         if (guestUserId == null || guestUserId.equals(currentUserId)) {
             result.put("mergedPlans", 0L);
             result.put("mergedSchedules", 0L);
+            result.put("mergedJournals", 0L);
             return result;
         }
         User source = userMapper.findById(guestUserId);
@@ -166,6 +167,8 @@ public class AuthService {
         mergeMapper.clearGuestPlanTypes(guestUserId);
         result.put("mergedPlans", (long) plans);
         result.put("mergedSchedules", (long) mergeMapper.transferSchedules(guestUserId, currentUserId));
+        result.put("mergedJournals", (long) mergeMapper.transferJournals(guestUserId, currentUserId));
+        mergeMapper.clearDuplicateGuestJournals(guestUserId, currentUserId);
         mergeMapper.reassignDeletedPlanTypes(currentUserId);
         return result;
     }

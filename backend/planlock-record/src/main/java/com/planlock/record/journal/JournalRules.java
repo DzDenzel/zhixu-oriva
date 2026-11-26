@@ -9,12 +9,9 @@ import com.planlock.record.journal.entity.JournalEntry;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -24,13 +21,15 @@ public final class JournalRules {
 
     public static final int MAX_CLIENT_ID_LENGTH = 64;
     public static final int MAX_MOOD_LENGTH = 24;
+    public static final int MAX_RAW_MOOD_LENGTH = 64;
     public static final int MAX_TAGS_COUNT = 8;
+    public static final int MAX_RAW_TAGS_COUNT = 32;
     public static final int MAX_TAG_LENGTH = 20;
+    public static final int MAX_RAW_TAG_LENGTH = 64;
     public static final int MAX_CONTENT_LENGTH = 10_000;
+    public static final int MAX_RAW_CONTENT_LENGTH = 20_000;
+    public static final int MAX_SYNC_BATCH_SIZE = 500;
 
-    private static final Pattern HEADING_LINE = Pattern.compile("^(\\s{0,3})(#{1,6})(\\s|$)(.*)$");
-    private static final Pattern THEMATIC_BREAK = Pattern.compile("^(\\s{0,3})([-*_])\\2{2,}\\s*$");
-    private static final Pattern HTML_TAG_START = Pattern.compile("^(\\s*)(<[a-zA-Z/!].*)$");
     private static final DateTimeFormatter EXPORT_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private JournalRules() {
@@ -49,6 +48,9 @@ public final class JournalRules {
         if (mood == null) {
             return null;
         }
+        if (mood.length() > MAX_RAW_MOOD_LENGTH) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "心情长度超出限制");
+        }
         if (containsDisallowedControl(mood, false)) {
             throw new BusinessException(ErrorCode.INVALID_PARAM, "心情不能包含控制字符");
         }
@@ -65,6 +67,9 @@ public final class JournalRules {
     public static String normalizeContent(String raw) {
         if (raw == null) {
             throw new BusinessException(ErrorCode.INVALID_PARAM, "正文不能为空");
+        }
+        if (raw.length() > MAX_RAW_CONTENT_LENGTH) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "正文长度超出限制");
         }
         String normalized = raw.replace("\r\n", "\n").replace('\r', '\n');
         if (containsDisallowedControl(normalized, true)) {
@@ -83,10 +88,16 @@ public final class JournalRules {
         if (rawTags == null || rawTags.isEmpty()) {
             return List.of();
         }
+        if (rawTags.size() > MAX_RAW_TAGS_COUNT) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "标签列表项数超出限制");
+        }
         LinkedHashSet<String> cleaned = new LinkedHashSet<>();
         for (String tag : rawTags) {
             if (tag == null) {
-                continue;
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "标签项不能为空");
+            }
+            if (tag.length() > MAX_RAW_TAG_LENGTH) {
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "单个标签长度超出限制");
             }
             if (containsDisallowedControl(tag, false)) {
                 throw new BusinessException(ErrorCode.INVALID_PARAM, "标签不能包含控制字符");
@@ -144,7 +155,8 @@ public final class JournalRules {
         sb.append("- 记录数: ").append(active.size()).append("\n\n");
 
         for (JournalEntry entry : active) {
-            sb.append("## ").append(entry.getEntryDate());
+            String dateLabel = entry.getEntryDate() == null ? "0000-00-00" : entry.getEntryDate().toString();
+            sb.append("## ").append(dateLabel);
             String mood = normalizeMoodOptional(entry.getMood());
             if (mood != null) {
                 sb.append(" · ").append(escapeMarkdownInline(mood));
@@ -163,7 +175,7 @@ public final class JournalRules {
             if (mood != null || !tags.isEmpty()) {
                 sb.append('\n');
             }
-            sb.append(escapeMarkdownBody(entry.getContent())).append("\n\n");
+            sb.append(formatFencedBody(entry.getContent())).append("\n\n");
         }
         return sb.toString();
     }
@@ -190,7 +202,7 @@ public final class JournalRules {
             if (i == 0 && (c == '=' || c == '+' || c == '-' || c == '@')) {
                 out.append('\\');
             } else if (c == '\\' || c == '`' || c == '*' || c == '_' || c == '#' || c == '>'
-                    || c == '|' || c == '[' || c == ']' || c == '<') {
+                    || c == '|' || c == '[' || c == ']' || c == '<' || c == '(' || c == ')' || c == '!') {
                 out.append('\\');
             }
             out.append(c);
@@ -198,34 +210,31 @@ public final class JournalRules {
         return out.toString();
     }
 
-    static String escapeMarkdownBody(String raw) {
-        if (raw == null) {
-            return "";
-        }
-        String normalized = stripControlChars(raw.replace("\r\n", "\n").replace('\r', '\n'), true);
-        String[] lines = normalized.split("\n", -1);
-        List<String> escaped = new ArrayList<>(lines.length);
-        for (String line : lines) {
-            String safeLine = line;
-            Matcher heading = HEADING_LINE.matcher(safeLine);
-            if (heading.matches()) {
-                safeLine = heading.group(1) + "\\" + heading.group(2) + heading.group(3) + heading.group(4);
-            } else if (THEMATIC_BREAK.matcher(safeLine).matches()) {
-                safeLine = "\\" + safeLine;
-            } else if (HTML_TAG_START.matcher(safeLine).matches()) {
-                Matcher html = HTML_TAG_START.matcher(safeLine);
-                if (html.matches()) {
-                    safeLine = html.group(1) + "\\" + html.group(2);
+    /**
+     * 使用动态长度反引号代码围栏隔离任意多行正文，防止 Setext/ATX 标题、围栏闭合、引用或内联 HTML 破坏结构。
+     */
+    static String formatFencedBody(String raw) {
+        String sanitized = stripControlChars((raw == null ? "" : raw).replace("\r\n", "\n").replace('\r', '\n'), true);
+        int maxRun = 0;
+        int currentRun = 0;
+        for (int i = 0; i < sanitized.length(); i++) {
+            if (sanitized.charAt(i) == '`') {
+                currentRun++;
+                if (currentRun > maxRun) {
+                    maxRun = currentRun;
                 }
-            } else if (!safeLine.isEmpty()) {
-                char first = safeLine.charAt(0);
-                if (first == '=' || first == '+' || first == '@') {
-                    safeLine = "\\" + safeLine;
-                }
+            } else {
+                currentRun = 0;
             }
-            escaped.add(safeLine);
         }
-        return String.join("\n", escaped);
+        String fence = "`".repeat(Math.max(3, maxRun + 1));
+        StringBuilder out = new StringBuilder(sanitized.length() + fence.length() * 2 + 8);
+        out.append(fence).append("text\n").append(sanitized);
+        if (!sanitized.isEmpty() && !sanitized.endsWith("\n")) {
+            out.append('\n');
+        }
+        out.append(fence);
+        return out.toString();
     }
 
     private static String normalizeMoodOptional(String mood) {

@@ -28,4 +28,13 @@ public interface MergeMapper {
 
     @Update("UPDATE schedules SET user_id = #{toUserId}, version = version + 1 WHERE user_id = #{fromUserId}")
     int transferSchedules(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
+
+    @Update("UPDATE journal_entries g LEFT JOIN journal_entries t ON t.user_id = #{toUserId} AND t.client_id = g.client_id "
+            + "SET g.user_id = #{toUserId}, g.version = g.version + 1 "
+            + "WHERE g.user_id = #{fromUserId} AND t.id IS NULL")
+    int transferJournals(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
+
+    @org.apache.ibatis.annotations.Delete("DELETE g FROM journal_entries g JOIN journal_entries t "
+            + "ON t.user_id = #{toUserId} AND t.client_id = g.client_id WHERE g.user_id = #{fromUserId}")
+    int clearDuplicateGuestJournals(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
 }

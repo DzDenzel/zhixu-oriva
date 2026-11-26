@@ -2,10 +2,15 @@ package com.planlock.feature.plan
 
 import com.planlock.app.api.WeatherLocation
 import com.planlock.app.api.WeatherSnapshot
+import com.planlock.app.api.dto.SyncJournalView
+import com.planlock.app.record.SyncConfirmation
 import com.planlock.app.record.entity.JournalSnapshotEntity
 import com.planlock.app.sync.SyncOverview
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -18,6 +23,7 @@ class JournalPresentationTest {
         tagsJson: String?,
         content: String,
         status: Int = 1,
+        scope: String = "instance\n1",
     ) = JournalSnapshotEntity(
         id = id,
         userId = 1L,
@@ -28,7 +34,7 @@ class JournalPresentationTest {
         content = content,
         status = status,
         version = 0L,
-        scope = "instance\n1",
+        scope = scope,
     )
 
     @Test
@@ -44,6 +50,52 @@ class JournalPresentationTest {
         assertEquals(listOf(3L, 2L), filterJournalEntries(entries, tag = "编码").map { it.id })
         assertEquals(listOf(3L), filterJournalEntries(entries, tag = "编码", query = "测试").map { it.id })
         assertEquals(listOf("散步", "夜晚", "编码", "复盘"), distinctJournalTags(entries))
+    }
+
+    @Test
+    fun `scope guards invalidate stale state reject cross-instance commits and block stale export`() {
+        val scopeA = "instanceA\n1"
+        val scopeB = "instanceB\n1"
+        val itemA = entry(42L, "2026-11-26", "平静", null, "A空间私密日记", scope = scopeA)
+        val stateA = ScopedJournalsState(scope = scopeA, entries = listOf(itemA), loading = false)
+
+        // Switching to another instance with identical remote ID 42 must expose zero entries.
+        assertEquals(listOf(42L), visibleJournalsForScope(stateA, scopeA).map { it.id })
+        assertTrue(visibleJournalsForScope(stateA, scopeB).isEmpty())
+
+        // Cross-scope save/delete/export must be rejected even if numeric ID matches.
+        assertTrue(canCommitJournalInScope(scopeA, scopeA, itemA))
+        assertFalse(canCommitJournalInScope(scopeA, scopeB, itemA))
+        assertFalse(canCommitJournalInScope(scopeB, scopeB, itemA))
+
+        assertNotNull(prepareScopedJournalExport(listOf(itemA), scopeA, scopeA))
+        assertNull(prepareScopedJournalExport(listOf(itemA), scopeA, scopeB))
+        assertNull(prepareScopedJournalExport(listOf(itemA), scopeB, scopeB))
+    }
+
+    @Test
+    fun `journal conflict presentation summarizes both versions clearly`() {
+        val local = entry(7L, "2026-11-26", "专注", """["编码"]""", "本机修改正文")
+        val remote = SyncJournalView(
+            id = 7L,
+            userId = 1L,
+            entryDate = "2026-11-26",
+            mood = "平静",
+            tags = listOf("阅读"),
+            content = "云端修改正文",
+            status = 1,
+            version = 2L,
+        )
+        val presentation = SyncConfirmation(
+            kind = "journal",
+            id = 7L,
+            localJournal = local,
+            remoteJournal = remote,
+        ).presentation()
+        assertTrue(presentation.title.contains("2026-11-26"))
+        assertEquals(4, presentation.fields.size)
+        assertEquals("保留对方版本", presentation.keepRemoteLabel)
+        assertEquals("保留我的版本", presentation.keepMineLabel)
     }
 
     @Test

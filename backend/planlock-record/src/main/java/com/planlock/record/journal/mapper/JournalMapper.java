@@ -12,16 +12,19 @@ import java.time.LocalDate;
 import java.util.List;
 
 /**
- * journal_entries 表 Mapper（record/journal 领域）。
+ * journal_entries 表 Mapper（全部单行读/写 SQL 强制绑定 userId）。
  */
 @Mapper
 public interface JournalMapper {
 
-    @Select("SELECT * FROM journal_entries WHERE id = #{id}")
-    JournalEntry findById(@Param("id") Long id);
+    @Select("SELECT * FROM journal_entries WHERE id = #{id} AND user_id = #{userId}")
+    JournalEntry findById(@Param("userId") Long userId, @Param("id") Long id);
 
-    @Select("SELECT * FROM journal_entries WHERE id = #{id} FOR UPDATE")
-    JournalEntry findByIdForUpdate(@Param("id") Long id);
+    @Select("SELECT * FROM journal_entries WHERE id = #{id} AND user_id = #{userId} FOR UPDATE")
+    JournalEntry findByIdForUpdate(@Param("userId") Long userId, @Param("id") Long id);
+
+    @Select("SELECT id, user_id, status, version FROM journal_entries WHERE id = #{id} AND user_id = #{userId} FOR UPDATE")
+    JournalEntry findStateForUpdate(@Param("userId") Long userId, @Param("id") Long id);
 
     @Select("SELECT * FROM journal_entries WHERE user_id = #{userId} AND status = 1 "
             + "AND (#{from} IS NULL OR entry_date >= #{from}) "

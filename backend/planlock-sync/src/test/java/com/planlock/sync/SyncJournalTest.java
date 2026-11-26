@@ -1,6 +1,7 @@
 package com.planlock.sync;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.planlock.common.BusinessException;
 import com.planlock.common.ErrorCode;
 import com.planlock.record.journal.entity.JournalEntry;
 import com.planlock.sync.dto.SyncItemResult;
@@ -10,9 +11,11 @@ import com.planlock.sync.service.SyncService;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -116,5 +119,45 @@ class SyncJournalTest {
         assertThat(results.get(3).isOk()).isTrue();
         assertThat(results.get(3).getVersion()).isEqualTo(2L);
         verify(mapper).insertJournal(eq(1L), eq(create), eq("[\"测试\"]"));
+    }
+
+    @Test
+    void pushHandlesNullJournalElementWithoutBatchFailureAndRejectsOversizedBatch() {
+        var valid = new SyncPushRequest.JournalItem();
+        valid.setClientId("cid-ok");
+        valid.setEntryDate(LocalDate.of(2026, 11, 26));
+        valid.setContent("有效内容");
+        doAnswer(inv -> {
+            SyncPushRequest.JournalItem j = inv.getArgument(1);
+            j.setId(55L);
+            return 1;
+        }).when(mapper).insertJournal(eq(1L), eq(valid), any());
+        SyncItemResult identity = new SyncItemResult();
+        identity.setId(55L);
+        identity.setVersion(0L);
+        identity.setClientId("cid-ok");
+        when(mapper.journalIdentity(1L, 55L)).thenReturn(identity);
+
+        List<SyncPushRequest.JournalItem> items = new ArrayList<>();
+        items.add(null);
+        items.add(valid);
+        var req = new SyncPushRequest();
+        req.setJournals(items);
+
+        var results = service.push(1L, req).getResults();
+        assertThat(results).hasSize(2);
+        assertThat(results.get(0).isOk()).isFalse();
+        assertThat(results.get(0).getCode()).isEqualTo(ErrorCode.INVALID_PARAM.getCode());
+        assertThat(results.get(1).isOk()).isTrue();
+
+        List<SyncPushRequest.JournalItem> oversized = new ArrayList<>();
+        for (int i = 0; i < 501; i++) {
+            oversized.add(valid);
+        }
+        var tooMany = new SyncPushRequest();
+        tooMany.setJournals(oversized);
+        assertThatThrownBy(() -> service.push(1L, tooMany))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code").isEqualTo(ErrorCode.INVALID_PARAM.getCode());
     }
 }

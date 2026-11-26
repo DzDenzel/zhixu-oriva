@@ -22,7 +22,7 @@ class JournalRulesAndContractTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
-    fun `normalization enforces content mood and tag boundaries`() {
+    fun `normalization enforces raw and normalized content mood and tag boundaries`() {
         assertEquals("a\nb\nc", JournalRules.normalizeContent("a\r\nb\rc"))
         assertEquals("平静", JournalRules.normalizeMood("  平静  "))
         assertNull(JournalRules.normalizeMood("   "))
@@ -32,30 +32,66 @@ class JournalRulesAndContractTest {
 
         try { JournalRules.normalizeContent("   "); fail() } catch (_: IllegalArgumentException) {}
         try { JournalRules.normalizeContent("x".repeat(10_001)); fail() } catch (_: IllegalArgumentException) {}
+        try { JournalRules.normalizeContent("x".repeat(20_001)); fail() } catch (_: IllegalArgumentException) {}
         try { JournalRules.normalizeContent("bad\u0007"); fail() } catch (_: IllegalArgumentException) {}
         try { JournalRules.normalizeMood("a".repeat(25)); fail() } catch (_: IllegalArgumentException) {}
+        try { JournalRules.normalizeMood("a".repeat(65)); fail() } catch (_: IllegalArgumentException) {}
         try { JournalRules.normalizeTags((1..9).map { "t$it" }); fail() } catch (_: IllegalArgumentException) {}
+        try { JournalRules.normalizeTags(List(33) { "dup" }); fail() } catch (_: IllegalArgumentException) {}
         try { JournalRules.normalizeTags(listOf("t".repeat(21))); fail() } catch (_: IllegalArgumentException) {}
     }
 
     @Test
-    fun `exportMarkdown sorts descending and escapes heading and formula injection`() {
+    fun `exportMarkdown isolates complex markdown syntax and sanitizes invalid dates`() {
         val md = JournalRules.exportMarkdown(
             entries = listOf(
                 JournalExportItem(1L, "2026-11-24", "平静", listOf("散步"), "旧记录"),
-                JournalExportItem(2L, "2026-11-25", "=CMD()", listOf("+formula", "tag|pipe"), "## 伪造\n=SUM(1,2)\n<script>x</script>\n---"),
+                JournalExportItem(
+                    2L,
+                    "2026-11-25",
+                    "=CMD() #evil",
+                    listOf("+formula", "tag|pipe", "![x](https://evil)"),
+                    "## 伪造日期标题\nSetext伪造\n===\n```\n闭合尝试\n````\n~~~bash\n> ## 引用\n- ## 列表\ninline <img src=x>\n![px](https://example.invalid)\n=SUM(1,2)\r\n",
+                ),
+                JournalExportItem(3L, "2026-99-99\n## injected", null, emptyList(), "异常日期"),
             ),
             scopeLabel = "本地游客模式",
             exportedAt = "2026-11-26 10:00:00",
         )
         assertTrue(md.indexOf("## 2026-11-25") < md.indexOf("## 2026-11-24"))
-        assertTrue(md.contains("\\## 伪造"))
-        assertTrue(md.contains("\\=SUM(1,2)"))
-        assertTrue(md.contains("\\<script>x</script>"))
-        assertTrue(md.contains("\\---"))
-        assertTrue(md.contains("\\=CMD()"))
-        assertTrue(md.contains("\\+formula"))
-        assertTrue(md.contains("tag\\|pipe"))
+        assertTrue(md.contains("`````text\n"))
+        assertTrue(md.contains("\n`````\n"))
+        assertTrue(md.contains("## 0000-00-00"))
+        assertFalse(md.contains("2026-99-99"))
+
+        val outerHeadings = extractOuterHeadings(md)
+        assertEquals(
+            listOf(
+                "# 知序 · 日常记录导出",
+                "## 2026-11-25 · \\=CMD\\(\\) \\#evil",
+                "## 2026-11-24 · 平静",
+                "## 0000-00-00",
+            ),
+            outerHeadings,
+        )
+    }
+
+    private fun extractOuterHeadings(md: String): List<String> {
+        val headings = mutableListOf<String>()
+        var activeFence: String? = null
+        for (line in md.split('\n')) {
+            if (activeFence == null) {
+                if (line.startsWith("```")) {
+                    val len = line.takeWhile { it == '`' }.length
+                    activeFence = "`".repeat(len)
+                } else if (line.startsWith("#")) {
+                    headings += line
+                }
+            } else if (line == activeFence) {
+                activeFence = null
+            }
+        }
+        return headings
     }
 
     @Test

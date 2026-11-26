@@ -17,7 +17,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -27,7 +26,7 @@ class JournalServiceTest {
     private final JournalService service = new JournalService(mapper, new ObjectMapper());
 
     @Test
-    void createUsesClientIdIdempotencyAndReturnsPersistedRow() {
+    void createUsesClientIdIdempotencyAndUserScopedReadback() {
         JournalUpsertRequest req = new JournalUpsertRequest();
         req.setClientId("j-client-1");
         req.setEntryDate(LocalDate.of(2026, 11, 25));
@@ -51,39 +50,34 @@ class JournalServiceTest {
             arg.setId(88L);
             return 1;
         }).when(mapper).insert(any());
-        when(mapper.findByIdForUpdate(88L)).thenReturn(stored);
+        when(mapper.findByIdForUpdate(1L, 88L)).thenReturn(stored);
 
         var response = service.create(1L, req);
         assertThat(response.getId()).isEqualTo(88L);
         assertThat(response.getTags()).containsExactly("编码");
         assertThat(response.getVersion()).isEqualTo(0L);
+        verify(mapper).findByIdForUpdate(1L, 88L);
     }
 
     @Test
-    void updateEnforcesOwnershipAndOptimisticLock() {
-        JournalEntry foreign = new JournalEntry();
-        foreign.setId(10L);
-        foreign.setUserId(99L);
-        foreign.setStatus(1);
-        when(mapper.findById(10L)).thenReturn(foreign);
-
+    void updateEnforcesUserScopedOwnershipAndOptimisticLock() {
         JournalUpsertRequest req = new JournalUpsertRequest();
         req.setEntryDate(LocalDate.of(2026, 11, 25));
         req.setContent("越权尝试");
 
+        when(mapper.updateWithVersion(any())).thenReturn(0);
+        when(mapper.findStateForUpdate(1L, 10L)).thenReturn(null);
+
         assertThatThrownBy(() -> service.update(1L, 10L, 0L, req))
                 .isInstanceOf(BusinessException.class)
                 .extracting("code").isEqualTo(ErrorCode.NOT_FOUND.getCode());
-        verify(mapper, never()).updateWithVersion(any());
 
         JournalEntry owned = new JournalEntry();
         owned.setId(11L);
         owned.setUserId(1L);
         owned.setStatus(1);
         owned.setVersion(1L);
-        when(mapper.findById(11L)).thenReturn(owned);
-        when(mapper.updateWithVersion(any())).thenReturn(0);
-        when(mapper.findByIdForUpdate(11L)).thenReturn(owned);
+        when(mapper.findStateForUpdate(1L, 11L)).thenReturn(owned);
 
         assertThatThrownBy(() -> service.update(1L, 11L, 0L, req))
                 .isInstanceOf(BusinessException.class)
@@ -91,27 +85,37 @@ class JournalServiceTest {
     }
 
     @Test
-    void softDeleteRejectsForeignUserAndDetectsVersionConflict() {
-        JournalEntry foreign = new JournalEntry();
-        foreign.setId(20L);
-        foreign.setUserId(2L);
-        foreign.setStatus(1);
-        when(mapper.findById(20L)).thenReturn(foreign);
-
-        assertThatThrownBy(() -> service.delete(1L, 20L, 0L))
+    void softDeleteReturnsIdenticalNotFoundForMissingAndForeignUserIdsAndIdempotentForOwnDeleted() {
+        // Missing ID -> NOT_FOUND
+        when(mapper.findStateForUpdate(1L, 999L)).thenReturn(null);
+        assertThatThrownBy(() -> service.delete(1L, 999L, null))
                 .isInstanceOf(BusinessException.class)
                 .extracting("code").isEqualTo(ErrorCode.NOT_FOUND.getCode());
 
-        JournalEntry owned = new JournalEntry();
-        owned.setId(21L);
-        owned.setUserId(1L);
-        owned.setStatus(1);
-        owned.setVersion(2L);
-        when(mapper.findById(21L)).thenReturn(owned);
-        when(mapper.softDeleteWithVersion(21L, 1L, 1L)).thenReturn(0);
-        when(mapper.findByIdForUpdate(21L)).thenReturn(owned);
+        // Foreign user's active or deleted ID -> SQL scopes by userId -> null -> identical NOT_FOUND
+        when(mapper.findStateForUpdate(2L, 20L)).thenReturn(null);
+        assertThatThrownBy(() -> service.delete(2L, 20L, 0L))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code").isEqualTo(ErrorCode.NOT_FOUND.getCode());
 
-        assertThatThrownBy(() -> service.delete(1L, 21L, 1L))
+        // Own already soft-deleted record -> idempotent success
+        JournalEntry ownDeleted = new JournalEntry();
+        ownDeleted.setId(21L);
+        ownDeleted.setUserId(1L);
+        ownDeleted.setStatus(0);
+        ownDeleted.setVersion(1L);
+        when(mapper.findStateForUpdate(1L, 21L)).thenReturn(ownDeleted);
+        service.delete(1L, 21L, 0L);
+
+        // Own active record with stale baseVersion -> VERSION_CONFLICT
+        JournalEntry ownActive = new JournalEntry();
+        ownActive.setId(22L);
+        ownActive.setUserId(1L);
+        ownActive.setStatus(1);
+        ownActive.setVersion(2L);
+        when(mapper.findStateForUpdate(1L, 22L)).thenReturn(ownActive);
+        when(mapper.softDeleteWithVersion(22L, 1L, 1L)).thenReturn(0);
+        assertThatThrownBy(() -> service.delete(1L, 22L, 1L))
                 .isInstanceOf(BusinessException.class)
                 .extracting("code").isEqualTo(ErrorCode.VERSION_CONFLICT.getCode());
     }

@@ -18,9 +18,15 @@ data class SyncConfirmation(
     val remoteSchedule: SyncScheduleView? = null,
     val intentIds: List<Long> = emptyList(),
     val strategyChanged: Boolean = false,
+    val localJournal: JournalSnapshotEntity? = null,
+    val remoteJournal: SyncJournalView? = null,
 ) {
     val key get() = "$kind:$id"
-    val remoteDeleted get() = if (kind == "plan") remotePlan == null else remoteSchedule == null
+    val remoteDeleted get() = when (kind) {
+        "plan" -> remotePlan == null
+        "journal" -> remoteJournal == null || remoteJournal.status == 0
+        else -> remoteSchedule == null
+    }
 }
 
 @Serializable

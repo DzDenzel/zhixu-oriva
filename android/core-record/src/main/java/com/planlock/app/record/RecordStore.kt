@@ -825,18 +825,49 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         check(expectedScope == null || expectedScope == dataScope()) { "账号已变化，请重新打开编辑页" }
         val id = resolveJournalId(inputId)
         val existing = journalDao.byId(id) ?: return@scopedTransaction
+        if (existing.status == 0) return@scopedTransaction
         val queuedRows = pendingDao.all().filter {
             it.type == "journal_upsert" && Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).localId == id
         }
-        if (id < 0 && pendingDao.byClientId("journal-identity-$id") == null) {
-            if (queuedRows.isNotEmpty()) pendingDao.delete(queuedRows.map { it.id })
-            journalDao.delete(id)
-            return@scopedTransaction
-        }
-        if (existing.status == 0) return@scopedTransaction
-        val baseVersion = rebasedVersion("journal", id, existing.version, existing.version)
         val tags = JournalRules.parseTagsJson(existing.tagsJson)
         journalDao.upsertAll(listOf(existing.copy(status = 0)))
+        if (id < 0 && pendingDao.byClientId("journal-identity-$id") == null) {
+            // Retain durable soft-delete intent so an in-flight create never resurrects on next pull.
+            if (queuedRows.isNotEmpty()) {
+                queuedRows.forEach { row ->
+                    val queued = Json.decodeFromString<JournalPendingUpsert>(row.payload.orEmpty())
+                    pendingDao.update(
+                        row.copy(
+                            payload = Json.encodeToString(
+                                queued.copy(item = queued.item.copy(status = 0))
+                            )
+                        )
+                    )
+                }
+            } else {
+                val clientId = existing.clientId ?: "journal-${UUID.randomUUID()}"
+                val syncItem = SyncJournalItem(
+                    id = null,
+                    baseVersion = null,
+                    clientId = clientId,
+                    entryDate = existing.entryDate,
+                    mood = existing.mood,
+                    tags = tags,
+                    content = existing.content,
+                    status = 0,
+                )
+                pendingDao.insert(
+                    PendingRecordEntity(
+                        type = "journal_upsert",
+                        planId = null,
+                        clientId = "journal-delete-${UUID.randomUUID()}",
+                        payload = Json.encodeToString(JournalPendingUpsert(id, null, syncItem)),
+                    )
+                )
+            }
+            return@scopedTransaction
+        }
+        val baseVersion = rebasedVersion("journal", id, existing.version, existing.version)
         val marker = "journal-delete-${UUID.randomUUID()}"
         val syncItem = SyncJournalItem(
             id = id,
@@ -877,15 +908,18 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         }
         recordAcknowledgement("journal", serverId, queued.baseVersion, version)
         val current = journalDao.byId(queued.localId)
+        val locallyDeletedWhileInFlight = queued.item.status == 1 && (current == null || current.status == 0)
         if (queued.localId != serverId) journalDao.delete(serverId)
         if (current != null) {
             journalDao.delete(queued.localId)
             journalDao.upsertAll(listOf(current.copy(id = serverId, version = version, clientId = current.clientId ?: queued.item.clientId)))
         }
         pendingDao.delete(listOf(sent.id))
+        var hasQueuedDelete = false
         pendingDao.all().filter { it.type == "journal_upsert" }.forEach { p ->
             val later = Json.decodeFromString<JournalPendingUpsert>(p.payload.orEmpty())
-            if (later.localId == queued.localId) {
+            if (later.localId == queued.localId || later.localId == serverId) {
+                if (later.item.status == 0) hasQueuedDelete = true
                 pendingDao.update(
                     p.copy(
                         payload = Json.encodeToString(
@@ -898,6 +932,28 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
                     )
                 )
             }
+        }
+        if (locallyDeletedWhileInFlight && !hasQueuedDelete) {
+            val baseItem = current?.let {
+                SyncJournalItem(
+                    id = serverId,
+                    baseVersion = version,
+                    clientId = it.clientId ?: queued.item.clientId,
+                    entryDate = it.entryDate,
+                    mood = it.mood,
+                    tags = JournalRules.parseTagsJson(it.tagsJson),
+                    content = it.content,
+                    status = 0,
+                )
+            } ?: queued.item.copy(id = serverId, baseVersion = version, status = 0)
+            pendingDao.insert(
+                PendingRecordEntity(
+                    type = "journal_upsert",
+                    planId = null,
+                    clientId = "journal-delete-${UUID.randomUUID()}",
+                    payload = Json.encodeToString(JournalPendingUpsert(serverId, version, baseItem)),
+                )
+            )
         }
     }
 

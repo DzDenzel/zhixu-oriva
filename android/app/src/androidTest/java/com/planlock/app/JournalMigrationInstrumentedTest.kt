@@ -149,6 +149,38 @@ class JournalMigrationInstrumentedTest {
             client.pushPendingRecords()
             assertEquals(0, remoteStore.single().status)
             assertEquals(1L, remoteStore.single().version)
+
+            // A7-06 并发竞态回归：离线新建后、在途上传未 ack 前本地删除，ack 到达后必须补发软删，拉取不得复活
+            val raceLocalId = store.saveJournalChange(
+                entryDate = "2026-11-26",
+                mood = "专注",
+                tags = listOf("竞态测试"),
+                content = "在途创建后立即删除",
+            )
+            val inFlightRow = store.pending().single()
+            store.softDeleteJournal(raceLocalId)
+            assertTrue(store.journals().isEmpty())
+
+            // 模拟先前已在途的 status=1 创建请求在服务端成功落库并返回 serverId=902
+            val serverId = 902L
+            remoteStore += SyncJournalView(
+                id = serverId,
+                userId = 1L,
+                clientId = store.journal(raceLocalId)?.clientId,
+                entryDate = "2026-11-26",
+                mood = "专注",
+                tags = listOf("竞态测试"),
+                content = "在途创建后立即删除",
+                status = 1,
+                version = 0L,
+            )
+            store.acknowledgeJournal(inFlightRow, serverId, 0L)
+            assertTrue(store.pending().isNotEmpty())
+            client.pushPendingRecords()
+            assertTrue(store.pending().isEmpty())
+            client.pull()
+            assertTrue(store.journals().isEmpty())
+            assertEquals(0, remoteStore.first { it.id == serverId }.status)
         } finally {
             db.close()
             context.deleteDatabase(name)

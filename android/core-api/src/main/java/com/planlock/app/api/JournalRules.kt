@@ -20,16 +20,17 @@ data class JournalExportItem(
 object JournalRules {
     const val MAX_CLIENT_ID_LENGTH = 64
     const val MAX_MOOD_LENGTH = 24
+    const val MAX_RAW_MOOD_LENGTH = 64
     const val MAX_TAGS_COUNT = 8
+    const val MAX_RAW_TAGS_COUNT = 32
     const val MAX_TAG_LENGTH = 20
+    const val MAX_RAW_TAG_LENGTH = 64
     const val MAX_CONTENT_LENGTH = 10_000
+    const val MAX_RAW_CONTENT_LENGTH = 20_000
 
     val PRESET_MOODS: List<String> = listOf("平静", "开心", "专注", "疲惫", "焦虑", "充实")
 
     private val ISO_DATE_REGEX = Regex("\\d{4}-\\d{2}-\\d{2}")
-    private val HEADING_LINE = Regex("^(\\s{0,3})(#{1,6})(\\s|$)(.*)$")
-    private val THEMATIC_BREAK = Regex("^(\\s{0,3})([-*_])\\2{2,}\\s*$")
-    private val HTML_TAG_START = Regex("^(\\s*)(<[a-zA-Z/!].*)$")
 
     fun isValidIsoDate(value: String): Boolean {
         if (!ISO_DATE_REGEX.matches(value)) return false
@@ -48,6 +49,7 @@ object JournalRules {
 
     fun normalizeMood(mood: String?): String? {
         if (mood == null) return null
+        require(mood.length <= MAX_RAW_MOOD_LENGTH) { "心情长度超出限制" }
         require(!containsDisallowedControl(mood, allowNewlineAndTab = false)) { "心情不能包含控制字符" }
         val trimmed = mood.trim()
         if (trimmed.isEmpty()) return null
@@ -56,6 +58,7 @@ object JournalRules {
     }
 
     fun normalizeContent(raw: String): String {
+        require(raw.length <= MAX_RAW_CONTENT_LENGTH) { "正文长度超出限制" }
         val normalized = raw.replace("\r\n", "\n").replace('\r', '\n')
         require(!containsDisallowedControl(normalized, allowNewlineAndTab = true)) { "正文包含非法控制字符" }
         require(normalized.isNotBlank()) { "正文不能为空" }
@@ -65,8 +68,10 @@ object JournalRules {
 
     fun normalizeTags(rawTags: List<String>): List<String> {
         if (rawTags.isEmpty()) return emptyList()
+        require(rawTags.size <= MAX_RAW_TAGS_COUNT) { "标签列表项数超出限制" }
         val cleaned = LinkedHashSet<String>()
         for (raw in rawTags) {
+            require(raw.length <= MAX_RAW_TAG_LENGTH) { "单个标签长度超出限制" }
             require(!containsDisallowedControl(raw, allowNewlineAndTab = false)) { "标签不能包含控制字符" }
             val trimmed = raw.trim()
             if (trimmed.isEmpty()) continue
@@ -96,7 +101,7 @@ object JournalRules {
         exportedAt: String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()),
     ): String {
         val sorted = entries.sortedWith(
-            compareByDescending<JournalExportItem> { it.entryDate }
+            compareByDescending<JournalExportItem> { if (isValidIsoDate(it.entryDate)) it.entryDate else "0000-00-00" }
                 .thenByDescending { it.id },
         )
         return buildString {
@@ -105,7 +110,8 @@ object JournalRules {
             append("- 导出时间: ").append(escapeInline(exportedAt)).append('\n')
             append("- 记录数: ").append(sorted.size).append("\n\n")
             for (entry in sorted) {
-                append("## ").append(entry.entryDate)
+                val safeDate = if (isValidIsoDate(entry.entryDate)) entry.entryDate else "0000-00-00"
+                append("## ").append(safeDate)
                 val mood = entry.mood?.trim()?.takeIf { it.isNotEmpty() }
                 if (mood != null) {
                     append(" · ").append(escapeInline(mood))
@@ -122,7 +128,7 @@ object JournalRules {
                 if (mood != null || entry.tags.isNotEmpty()) {
                     append('\n')
                 }
-                append(escapeBody(entry.content)).append("\n\n")
+                append(formatFencedBody(entry.content)).append("\n\n")
             }
         }
     }
@@ -135,7 +141,8 @@ object JournalRules {
                 if (index == 0 && (c == '=' || c == '+' || c == '-' || c == '@')) {
                     append('\\')
                 } else if (c == '\\' || c == '`' || c == '*' || c == '_' || c == '#' ||
-                    c == '>' || c == '|' || c == '[' || c == ']' || c == '<'
+                    c == '>' || c == '|' || c == '[' || c == ']' || c == '<' ||
+                    c == '(' || c == ')' || c == '!'
                 ) {
                     append('\\')
                 }
@@ -144,18 +151,28 @@ object JournalRules {
         }
     }
 
-    fun escapeBody(raw: String): String {
-        val normalized = stripControlChars(raw.replace("\r\n", "\n").replace('\r', '\n'), allowNewlineAndTab = true)
-        return normalized.split('\n').joinToString("\n") { line ->
-            val heading = HEADING_LINE.matchEntire(line)
-            val html = HTML_TAG_START.matchEntire(line)
-            when {
-                heading != null -> "${heading.groupValues[1]}\\${heading.groupValues[2]}${heading.groupValues[3]}${heading.groupValues[4]}"
-                THEMATIC_BREAK.matches(line) -> "\\$line"
-                html != null -> "${html.groupValues[1]}\\${html.groupValues[2]}"
-                line.isNotEmpty() && line[0] in charArrayOf('=', '+', '@') -> "\\$line"
-                else -> line
+    /**
+     * 使用动态长度反引号代码围栏隔离任意多行正文，防止 Setext/ATX 标题、围栏闭合、引用或内联 HTML 破坏结构。
+     */
+    fun formatFencedBody(raw: String): String {
+        val sanitized = stripControlChars(raw.replace("\r\n", "\n").replace('\r', '\n'), allowNewlineAndTab = true)
+        var maxRun = 0
+        var currentRun = 0
+        for (c in sanitized) {
+            if (c == '`') {
+                currentRun++
+                if (currentRun > maxRun) maxRun = currentRun
+            } else {
+                currentRun = 0
             }
+        }
+        val fence = "`".repeat(maxOf(3, maxRun + 1))
+        return buildString(sanitized.length + fence.length * 2 + 8) {
+            append(fence).append("text\n").append(sanitized)
+            if (sanitized.isNotEmpty() && !sanitized.endsWith('\n')) {
+                append('\n')
+            }
+            append(fence)
         }
     }
 
