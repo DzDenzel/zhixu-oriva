@@ -1,0 +1,46 @@
+{
+  "catalogFormatVersion": 1,
+  "sourceId": "oriva-community-examples",
+  "sourceType": "THIRD_PARTY",
+  "sourceName": "ORIVA 社区插件示例站",
+  "sourceDescription": "知序 ORIVA 开源插件站静态模板与社区 PR 收录示例。所有条目均经过 ZIP 安全边界、plugin.json 一致性与 JAR 签名证书指纹核验。",
+  "trustedFingerprints": [
+    "92:70:60:2B:17:33:20:CE:46:AD:93:06:EE:F9:63:CB:C0:47:32:6C:77:9D:8D:95:93:36:FE:BB:A6:D3:2E:C1"
+  ],
+  "plugins": [
+    {
+      "artifact": "ink-focus-cue-0.1.0.pljs",
+      "id": "ink-focus-cue",
+      "name": "墨序专注提示",
+      "version": "0.1.0",
+      "contractVersion": 2,
+      "type": "js",
+      "entryPoint": "entryPoint",
+      "requiredCapabilities": [
+        "QUERY_TODAY",
+        "FEEDBACK"
+      ],
+      "description": "读取今日安排生成克制的墨序专注提示，支持简短与温和两种语气。",
+      "author": "ORIVA Community Contributors",
+      "homepage": "https://github.com/DzDenzel/PlanLock",
+      "repository": "https://github.com/DzDenzel/PlanLock",
+      "license": "MIT"
+    },
+    {
+      "artifact": "quiet-rhythm-tip-0.1.0.pljs",
+      "id": "quiet-rhythm-tip",
+      "name": "节律微提醒",
+      "version": "0.1.0",
+      "contractVersion": 2,
+      "type": "js",
+      "entryPoint": "onRhythmTip",
+      "requiredCapabilities": [
+        "QUERY_TODAY"
+      ],
+      "description": "根据今日已安排时段统计给出简明节律建议（只读查询，不申请额外系统权限）。",
+      "author": "ORIVA Ink Studio",
+      "homepage": "https://example.org/oriva-plugins/quiet-rhythm-tip",
+      "license": "Apache-2.0"
+    }
+  ]
+}

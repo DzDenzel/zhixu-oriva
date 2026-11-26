@@ -1,0 +1,46 @@
+name: Validate and build ORIVA plugin registry
+on:
+  pull_request:
+    paths:
+      - 'deploy/plugin-registry/**'
+      - '.github/workflows/plugin-registry.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'deploy/plugin-registry/**'
+      - '.github/workflows/plugin-registry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-registry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Run plugin registry unit and adversarial tests
+        run: python3 -m unittest discover -s deploy/plugin-registry/tests -v
+      - name: Validate registry manifest and signed artifacts
+        run: python3 deploy/plugin-registry/registry_tool.py validate --registry deploy/plugin-registry/registry.json --json
+      - name: Build deterministic static plugin registry site
+        run: python3 deploy/plugin-registry/registry_tool.py build --registry deploy/plugin-registry/registry.json --output deploy/plugin-registry/dist --clean
+      - name: Verify generated SHA256SUMS
+        working-directory: deploy/plugin-registry/dist
+        run: sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-registry-site
+          path: deploy/plugin-registry/dist/
+          retention-days: 14
+          if-no-files-found: error

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'self'; form-action 'none';">
+  <title>知序 ORIVA · 开源插件站</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="masthead">
+      <div class="masthead-top">
+        <div class="brand-lockup">
+          <span class="seal-mark" aria-hidden="true">序</span>
+          <div>
+            <p class="eyebrow">ORIVA OPEN PLUGIN REGISTRY</p>
+            <h1 id="site-title">开源插件目录</h1>
+          </div>
+        </div>
+        <button id="theme-toggle" class="ghost-btn" type="button" aria-pressed="false">切换夜墨</button>
+      </div>
+      <p id="site-description" class="lead-copy">正在读取插件目录清单…</p>
+      <div class="meta-strip" id="source-badges" aria-label="来源元数据"></div>
+    </header>
+
+    <main>
+      <section class="paper-panel subscription-panel" aria-labelledby="subscribe-heading">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">CONNECT ANDROID CLIENT</p>
+            <h2 id="subscribe-heading">添加到知序客户端</h2>
+          </div>
+          <span class="badge badge-jade">零后端静态托管</span>
+        </div>
+
+        <div class="copy-grid">
+          <div class="copy-field">
+            <span class="field-label">目录 JSON 地址（catalog.json）</span>
+            <div class="copy-row">
+              <code id="catalog-url-text" class="mono-box">./catalog.json</code>
+              <button id="copy-catalog-url" class="seal-btn" type="button">复制地址</button>
+            </div>
+          </div>
+          <div class="copy-field">
+            <span class="field-label">来源 ID（sourceId，配置信任锚时必填）</span>
+            <div class="copy-row">
+              <code id="source-id-text" class="mono-box">—</code>
+              <button id="copy-source-id" class="outline-btn" type="button">复制 ID</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="fingerprint-block">
+          <span class="field-label">签名证书 SHA-256 信任锚指纹</span>
+          <div id="fingerprint-list" class="fingerprint-list"></div>
+        </div>
+
+        <ol class="guide-steps">
+          <li>在手机打开知序 <strong>设置 → 插件</strong>，阅读风险说明后关闭「安全模式」。</li>
+          <li>点击 <strong>自定义第三方来源 → 添加来源</strong>，填入来源名称、上方复制的「目录 JSON 地址」与「来源 ID」。</li>
+          <li>粘贴「信任锚指纹」完成绑定；未绑定指纹时仅可发现浏览，客户端绝不会跳过 JAR 签名校验。</li>
+        </ol>
+
+        <p class="safety-note">
+          安全说明：第三方插件与知序运行在同一进程，项目不审核、不背书或保证任何第三方插件；安装时客户端仍强制核验文件 SHA-256 与签名证书指纹。
+        </p>
+      </section>
+
+      <section class="catalog-section" aria-labelledby="catalog-heading">
+        <div class="toolbar">
+          <div>
+            <p class="eyebrow">VERIFIED ARTIFACTS</p>
+            <h2 id="catalog-heading">收录插件列表</h2>
+          </div>
+          <div class="controls">
+            <label class="sr-only" for="search-input">搜索插件</label>
+            <input id="search-input" class="search-input" type="search" placeholder="搜索名称、ID、作者或能力…" autocomplete="off">
+            <div class="filter-group" role="group" aria-label="按插件类型筛选">
+              <button class="filter-btn is-active" type="button" data-type="all" aria-pressed="true">全部</button>
+              <button class="filter-btn" type="button" data-type="js" aria-pressed="false">JS</button>
+              <button class="filter-btn" type="button" data-type="dex" aria-pressed="false">DEX</button>
+            </div>
+          </div>
+        </div>
+
+        <p id="result-summary" class="result-summary" aria-live="polite"></p>
+        <div id="status-panel" class="status-panel" hidden></div>
+        <div id="plugin-grid" class="plugin-grid"></div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>纯静态零外链构建 · 墨序（ORIVA Ink）</span>
+      <nav aria-label="静态产物文件">
+        <a href="./catalog.json" target="_blank" rel="noopener noreferrer">catalog.json</a>
+        <a href="./SHA256SUMS" target="_blank" rel="noopener noreferrer">SHA256SUMS</a>
+      </nav>
+    </footer>
+  </div>
+
+  <div id="copy-toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
