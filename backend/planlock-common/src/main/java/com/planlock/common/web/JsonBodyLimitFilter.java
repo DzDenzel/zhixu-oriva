@@ -124,9 +124,13 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
                 segments.add(currentSlab);
             }
 
-            ServletInputStream in = request.getInputStream();
+            // Defer getInputStream() until after CAS budget admission so exhausted chunked streams reject before blocking on read().
+            ServletInputStream in = null;
             while (true) {
                 if (total == maxLimit) {
+                    if (in == null) {
+                        in = request.getInputStream();
+                    }
                     int extra = in.read();
                     if (extra == -1) {
                         break;
@@ -137,10 +141,6 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
                     return;
                 }
                 if (currentSlab == null || currentSlabOffset >= currentSlab.length) {
-                    int nextByte = in.read();
-                    if (nextByte == -1) {
-                        break;
-                    }
                     int desiredSlab = Math.min(CHUNK_SIZE, maxLimit - total);
                     int slabCap;
                     if (effectiveMaxConcurrent > 0L) {
@@ -156,12 +156,26 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
                     } else {
                         slabCap = desiredSlab;
                     }
+                    if (in == null) {
+                        in = request.getInputStream();
+                    }
+                    int nextByte = in.read();
+                    if (nextByte == -1) {
+                        if (effectiveMaxConcurrent > 0L) {
+                            releaseConcurrentBytes(slabCap);
+                            reserved -= slabCap;
+                        }
+                        break;
+                    }
                     currentSlab = new byte[slabCap];
                     currentSlabOffset = 0;
                     segments.add(currentSlab);
                     currentSlab[currentSlabOffset++] = (byte) nextByte;
                     total++;
                     continue;
+                }
+                if (in == null) {
+                    in = request.getInputStream();
                 }
                 int maxRead = Math.min(currentSlab.length - currentSlabOffset, maxLimit - total);
                 int count = in.read(currentSlab, currentSlabOffset, maxRead);

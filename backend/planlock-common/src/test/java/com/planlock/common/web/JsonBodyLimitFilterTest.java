@@ -22,10 +22,12 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -846,7 +848,7 @@ class JsonBodyLimitFilterTest {
         assertThat(maxReadLenObserved.get()).isLessThanOrEqualTo(100);
         assertThat(filter.getActiveBufferedBytes()).isZero();
 
-        // 4. Blocking chunked stream stalled before first byte allocates 0 bytes in activeBufferedBytes.
+        // 4. Blocking chunked stream reserves <= 100 B via atomic CAS before blocking on first read, then releases on EOF.
         var blockedLatch = new CountDownLatch(1);
         var releaseLatch = new CountDownLatch(1);
         var executor = Executors.newSingleThreadExecutor();
@@ -864,7 +866,7 @@ class JsonBodyLimitFilterTest {
                 return null;
             });
             assertThat(blockedLatch.await(5, TimeUnit.SECONDS)).isTrue();
-            assertThat(filter.getActiveBufferedBytes()).isZero();
+            assertThat(filter.getActiveBufferedBytes()).isBetween(1L, 100L);
             releaseLatch.countDown();
             future.get(5, TimeUnit.SECONDS);
             assertThat(filter.getActiveBufferedBytes()).isZero();
@@ -1020,6 +1022,236 @@ class JsonBodyLimitFilterTest {
         AtomicBoolean normalReached = new AtomicBoolean(false);
         filter.doFilter(normalReq, new MockHttpServletResponse(), (r, s) -> normalReached.set(true));
         assertThat(normalReached.get()).isTrue();
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+    }
+
+    @Test
+    void chunkedRequestWhenBudgetExhaustedRejectsBeforeGetInputStreamWhilePreservingSmallRouteReserve() throws Exception {
+        long sixteenMiB = 16L * 1024L * 1024L;
+        long fourMiB = 4L * 1024L * 1024L;
+        var props = new JsonBodyLimitProperties();
+        props.setMaxConcurrentJsonBufferBytes(36L * 1024L * 1024L); // 32 MiB large pool + 4 MiB small reserve floor
+        props.setSmallPayloadReserveBytes(fourMiB);
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+
+        var readStartedLatch = new CountDownLatch(2);
+        var releaseStreamsLatch = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            var big1 = executor.submit(() -> {
+                MockHttpServletRequest req = blockingDeclaredLengthRequest(
+                        "/api/v1/sync/push", sixteenMiB, readStartedLatch, releaseStreamsLatch, false);
+                filter.doFilter(req, new MockHttpServletResponse(), (r, s) -> { });
+                return null;
+            });
+            var big2 = executor.submit(() -> {
+                MockHttpServletRequest req = blockingDeclaredLengthRequest(
+                        "/api/v1/sync/push", sixteenMiB, readStartedLatch, releaseStreamsLatch, false);
+                filter.doFilter(req, new MockHttpServletResponse(), (r, s) -> { });
+                return null;
+            });
+
+            assertThat(readStartedLatch.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(filter.getActiveBufferedBytes()).isEqualTo(32L * 1024L * 1024L);
+
+            // Chunked large-route request MUST be rejected before touching getInputStream() or read().
+            AtomicBoolean largeStreamTouched = new AtomicBoolean(false);
+            AtomicBoolean largeChainReached = new AtomicBoolean(false);
+            MockHttpServletRequest chunkedLarge = new MockHttpServletRequest("POST", "/api/v1/journals") {
+                @Override public long getContentLengthLong() { return -1L; }
+                @Override public int getContentLength() { return -1; }
+                @Override public ServletInputStream getInputStream() {
+                    largeStreamTouched.set(true);
+                    throw new AssertionError("getInputStream must not be called when concurrent budget is exhausted");
+                }
+            };
+            chunkedLarge.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            chunkedLarge.addHeader("Authorization", bearerToken());
+            MockHttpServletResponse chunkedLargeRes = new MockHttpServletResponse();
+            filter.doFilter(chunkedLarge, chunkedLargeRes, (r, s) -> largeChainReached.set(true));
+            assertThat(largeStreamTouched.get()).isFalse();
+            assertThat(largeChainReached.get()).isFalse();
+            assertThat(chunkedLargeRes.getContentAsString()).contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
+            assertThat(filter.getActiveBufferedBytes()).isEqualTo(32L * 1024L * 1024L);
+
+            // Public <= 64 KiB chunked route (/api/v1/auth/login) STILL succeeds via the 4 MiB reserve floor.
+            byte[] smallPayload = "{\"account\":\"owner@example.com\",\"password\":\"secret123\"}".getBytes(StandardCharsets.UTF_8);
+            AtomicBoolean smallChainReached = new AtomicBoolean(false);
+            MockHttpServletRequest chunkedSmall = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+                @Override public long getContentLengthLong() { return -1L; }
+                @Override public int getContentLength() { return -1; }
+                @Override public ServletInputStream getInputStream() {
+                    return new ChunkedDeliveryInputStream(smallPayload, 7);
+                }
+            };
+            chunkedSmall.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            filter.doFilter(chunkedSmall, new MockHttpServletResponse(), (r, s) -> {
+                smallChainReached.set(true);
+                byte[] seen = r.getInputStream().readAllBytes();
+                assertThat(seen).isEqualTo(smallPayload);
+            });
+            assertThat(smallChainReached.get()).isTrue();
+            assertThat(filter.getActiveBufferedBytes()).isEqualTo(32L * 1024L * 1024L);
+
+            releaseStreamsLatch.countDown();
+            big1.get(5, TimeUnit.SECONDS);
+            big2.get(5, TimeUnit.SECONDS);
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+        } finally {
+            releaseStreamsLatch.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentChunkedRaceNearBudgetCeilingOnlyAllowsSingleCasWinnerIntoInputStream() throws Exception {
+        var props = new JsonBodyLimitProperties();
+        props.setMaxConcurrentJsonBufferBytes(JsonBodyLimitFilter.CHUNK_SIZE); // Exact 1 slab budget (8 KiB)
+        props.setSmallPayloadReserveBytes(0L);
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+
+        int threadCount = 4;
+        var startGate = new CountDownLatch(1);
+        var winnerBlocked = new CountDownLatch(1);
+        var releaseWinner = new CountDownLatch(1);
+        var streamCalls = new AtomicInteger(0);
+        var chainCalls = new AtomicInteger(0);
+        var executor = Executors.newFixedThreadPool(threadCount);
+        try {
+            List<Future<MockHttpServletResponse>> futures = new ArrayList<>();
+            for (int i = 0; i < threadCount; i++) {
+                futures.add(executor.submit(() -> {
+                    startGate.await();
+                    MockHttpServletRequest req = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+                        @Override public long getContentLengthLong() { return -1L; }
+                        @Override public int getContentLength() { return -1; }
+                        @Override public ServletInputStream getInputStream() {
+                            streamCalls.incrementAndGet();
+                            return new BlockingServletInputStream(winnerBlocked, releaseWinner, false);
+                        }
+                    };
+                    req.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                    MockHttpServletResponse res = new MockHttpServletResponse();
+                    filter.doFilter(req, res, (r, s) -> chainCalls.incrementAndGet());
+                    return res;
+                }));
+            }
+
+            startGate.countDown();
+            assertThat(winnerBlocked.await(5, TimeUnit.SECONDS)).isTrue();
+
+            // Wait briefly for losing threads to return; only the CAS winner may touch getInputStream().
+            int rejectedCount = 0;
+            for (Future<MockHttpServletResponse> future : futures) {
+                if (future.isDone()) {
+                    MockHttpServletResponse r = future.get();
+                    assertThat(r.getContentAsString()).contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
+                    rejectedCount++;
+                }
+            }
+            // Wait until all 3 losers have completed rejection before unblocking the winner.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (rejectedCount < threadCount - 1 && System.nanoTime() < deadline) {
+                rejectedCount = 0;
+                for (Future<MockHttpServletResponse> future : futures) {
+                    if (future.isDone()) {
+                        rejectedCount++;
+                    }
+                }
+                if (rejectedCount < threadCount - 1) {
+                    Thread.sleep(10L);
+                }
+            }
+            assertThat(rejectedCount).isEqualTo(threadCount - 1);
+            assertThat(streamCalls.get()).isEqualTo(1);
+            assertThat(filter.getActiveBufferedBytes()).isEqualTo(JsonBodyLimitFilter.CHUNK_SIZE);
+
+            releaseWinner.countDown();
+            int succeededCount = 0;
+            int finalRejectedCount = 0;
+            for (Future<MockHttpServletResponse> future : futures) {
+                MockHttpServletResponse r = future.get(5, TimeUnit.SECONDS);
+                if (r.getContentAsString().contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode())) {
+                    finalRejectedCount++;
+                } else {
+                    succeededCount++;
+                }
+            }
+            assertThat(succeededCount).isEqualTo(1);
+            assertThat(finalRejectedCount).isEqualTo(threadCount - 1);
+            assertThat(streamCalls.get()).isEqualTo(1);
+            assertThat(chainCalls.get()).isEqualTo(1);
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+        } finally {
+            releaseWinner.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void chunkedSubsequentSlabEofReleasesUnusedReservationAndPreservesExactMaxLimitProbe() throws Exception {
+        var props = new JsonBodyLimitProperties();
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+        int smallRouteLimit = (int) props.getMaxJsonRequestBytes(); // 64 KiB
+        assertThat(smallRouteLimit).isEqualTo(64 * 1024);
+
+        // 1. Payload exactly equals CHUNK_SIZE (8 KiB) (< maxLimit 64 KiB): next-slab probe hits EOF and releases slab 2 reservation immediately.
+        byte[] exactSlabPayload = ("{\"p\":\"" + "a".repeat(JsonBodyLimitFilter.CHUNK_SIZE - 8) + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        assertThat(exactSlabPayload.length).isEqualTo(JsonBodyLimitFilter.CHUNK_SIZE);
+        AtomicLong activeInsideExactSlabChain = new AtomicLong(-1L);
+        MockHttpServletRequest exactSlabReq = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() {
+                return new UnsizedInputStream(exactSlabPayload);
+            }
+        };
+        exactSlabReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        filter.doFilter(exactSlabReq, new MockHttpServletResponse(), (r, s) -> {
+            activeInsideExactSlabChain.set(filter.getActiveBufferedBytes());
+            assertThat(r.getInputStream().readAllBytes()).isEqualTo(exactSlabPayload);
+        });
+        assertThat(activeInsideExactSlabChain.get()).isEqualTo(JsonBodyLimitFilter.CHUNK_SIZE);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 2. Chunked stream at exact maxLimit (64 KiB) succeeds via 1-byte EOF probe without extra reservation.
+        byte[] exactMaxPayload = ("{\"p\":\"" + "b".repeat(smallRouteLimit - 8) + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        assertThat(exactMaxPayload.length).isEqualTo(smallRouteLimit);
+        AtomicLong activeInsideMaxChain = new AtomicLong(-1L);
+        MockHttpServletRequest exactMaxReq = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() {
+                return new ChunkedDeliveryInputStream(exactMaxPayload, 1024);
+            }
+        };
+        exactMaxReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        filter.doFilter(exactMaxReq, new MockHttpServletResponse(), (r, s) -> {
+            activeInsideMaxChain.set(filter.getActiveBufferedBytes());
+            assertThat(r.getInputStream().readAllBytes()).isEqualTo(exactMaxPayload);
+        });
+        assertThat(activeInsideMaxChain.get()).isEqualTo(smallRouteLimit);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 3. Chunked stream at maxLimit + 1 byte is rejected as payload_limit.
+        byte[] overMaxPayload = ("{\"p\":\"" + "c".repeat(smallRouteLimit - 7) + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        assertThat(overMaxPayload.length).isEqualTo(smallRouteLimit + 1);
+        MockHttpServletRequest overMaxReq = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() {
+                return new ChunkedDeliveryInputStream(overMaxPayload, 1024);
+            }
+        };
+        overMaxReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        MockHttpServletResponse overMaxRes = new MockHttpServletResponse();
+        AtomicBoolean overMaxReached = new AtomicBoolean(false);
+        filter.doFilter(overMaxReq, overMaxRes, (r, s) -> overMaxReached.set(true));
+        assertThat(overMaxReached.get()).isFalse();
+        assertThat(overMaxRes.getContentAsString()).contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
         assertThat(filter.getActiveBufferedBytes()).isZero();
     }
 
