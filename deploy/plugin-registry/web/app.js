@@ -32,9 +32,11 @@
   }
 
   var SAFE_ARTIFACT_REL_PATTERN = /^(?:\.\/)?artifacts\/([A-Za-z0-9._-]+)$/;
+  var SAFE_ARTIFACT_FILENAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 
   function isSafeArtifactFilename(name) {
     if (!name || name === "." || name === "..") return false;
+    if (!SAFE_ARTIFACT_FILENAME_PATTERN.test(name)) return false;
     return name.endsWith(".plp") || name.endsWith(".pljs");
   }
 
@@ -43,6 +45,7 @@
     var trimmed = raw.trim();
     if (!trimmed || trimmed.length > MAX_URL_LENGTH) return null;
     if (hasControlOrWhitespace(trimmed) || trimmed.indexOf("\\") !== -1) return null;
+    if (trimmed.indexOf("?") !== -1 || trimmed.indexOf("#") !== -1) return null;
     if (trimmed.startsWith("//")) return null;
 
     var relMatch = SAFE_ARTIFACT_REL_PATTERN.exec(trimmed);
@@ -51,8 +54,8 @@
       if (baseHref && (baseHref.startsWith("http://") || baseHref.startsWith("https://"))) {
         try {
           var base = new URL(baseHref);
-          var resolved = new URL(trimmed, base);
-          if (resolved.origin !== base.origin) return null;
+          var resolved = new URL("./artifacts/" + relMatch[1], base);
+          if (resolved.origin !== base.origin || resolved.search || resolved.hash) return null;
           return safeHttpUrl(resolved.href);
         } catch (_err) {
           return null;
@@ -67,10 +70,12 @@
       var targetUrl = new URL(safeAbs);
       var originUrl = new URL(baseHref);
       if (targetUrl.origin !== originUrl.origin) return null;
-      var pathParts = targetUrl.pathname.split("/");
-      var fname = pathParts[pathParts.length - 1];
-      var parentDir = pathParts.length >= 2 ? pathParts[pathParts.length - 2] : "";
-      if (parentDir !== "artifacts" || !isSafeArtifactFilename(fname)) return null;
+      if (targetUrl.search || targetUrl.hash) return null;
+      var expectedArtifactsDir = new URL("./artifacts/", originUrl);
+      if (targetUrl.origin !== expectedArtifactsDir.origin) return null;
+      if (!targetUrl.pathname.startsWith(expectedArtifactsDir.pathname)) return null;
+      var remainder = targetUrl.pathname.slice(expectedArtifactsDir.pathname.length);
+      if (!isSafeArtifactFilename(remainder)) return null;
       return targetUrl.href;
     } catch (_err) {
       return null;

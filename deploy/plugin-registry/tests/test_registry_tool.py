@@ -389,7 +389,70 @@ class RegistryToolTests(unittest.TestCase):
         _write_unsigned_package(chain_pkg, manifest)
         _sign_package(chain_pkg, chain_ks, chain_env, "leaf", env_var="ORIVA_TEST_KS_CHAIN")
         cert_info = registry_tool.inspect_package_certificates(chain_pkg)
+        self.assertTrue(cert_info["diagnosticOnly"])
+        self.assertFalse(cert_info["trustGranted"])
         self.assertEqual([s["certSha256"] for s in cert_info["commonSigners"]], [leaf_fp])
+
+        # Disjoint-signed inspect-cert reports empty commonSigners as diagnostic-only (no trust)
+        disjoint_info = registry_tool.inspect_package_certificates(disjoint_pkg)
+        self.assertTrue(disjoint_info["diagnosticOnly"])
+        self.assertFalse(disjoint_info["trustGranted"])
+        self.assertEqual(disjoint_info["commonSigners"], [])
+
+        # 4. S1 residual: 1 valid signature pair + 1 empty/corrupt/unattributed extra pair MUST be rejected
+        base_signed = reg_dir / "artifacts" / "base-valid.pljs"
+        _write_unsigned_package(base_signed, manifest)
+        _sign_package(base_signed, self.ks_a, self.env_a, "alpha", sigfile="ALPHA")
+
+        # 4a. Empty auxiliary .SF / .RSA pair alongside valid ALPHA
+        empty_pair_pkg = reg_dir / "artifacts" / "empty-pair.pljs"
+        with zipfile.ZipFile(base_signed, "r") as zin, zipfile.ZipFile(empty_pair_pkg, "w") as zout:
+            for item in zin.infolist():
+                zout.writestr(item, zin.read(item.filename))
+            zout.writestr("META-INF/BOGUS.SF", b"")
+            zout.writestr("META-INF/BOGUS.RSA", b"")
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Empty META-INF"):
+            registry_tool.inspect_zip_bytes(empty_pair_pkg.read_bytes(), "empty-pair.pljs")
+        with self.assertRaises(registry_tool.RegistryValidationError):
+            registry_tool.verify_jar_cryptographic_signers(empty_pair_pkg, "empty-pair.pljs", {self.fp_a})
+
+        # 4b. Non-empty corrupt auxiliary .SF / .RSA pair alongside valid ALPHA
+        corrupt_pair_pkg = reg_dir / "artifacts" / "corrupt-pair.pljs"
+        with zipfile.ZipFile(base_signed, "r") as zin, zipfile.ZipFile(corrupt_pair_pkg, "w") as zout:
+            for item in zin.infolist():
+                zout.writestr(item, zin.read(item.filename))
+            zout.writestr("META-INF/BOGUS.SF", b"Signature-Version: 1.0\r\nSHA-256-Digest-Manifest: invalid\r\n\r\n")
+            zout.writestr("META-INF/BOGUS.RSA", b"not-a-valid-pkcs7-block")
+        with self.assertRaises(registry_tool.RegistryValidationError):
+            registry_tool.verify_jar_cryptographic_signers(corrupt_pair_pkg, "corrupt-pair.pljs", {self.fp_a})
+
+        # 4c. Valid PKCS7 auxiliary pair referencing an absent entry -> rejected
+        dummy_zip = reg_dir / "artifacts" / "dummy-other.pljs"
+        with zipfile.ZipFile(dummy_zip, "w") as zd:
+            zd.writestr("not-in-target.txt", b"unrelated payload")
+        _sign_package(dummy_zip, self.ks_b, self.env_b, "beta", sigfile="UNUSED")
+        unattributed_pkg = reg_dir / "artifacts" / "unattributed-pair.pljs"
+        with zipfile.ZipFile(base_signed, "r") as za, zipfile.ZipFile(dummy_zip, "r") as zb, zipfile.ZipFile(unattributed_pkg, "w") as zout:
+            for item in za.infolist():
+                zout.writestr(item, za.read(item.filename))
+            zout.writestr("META-INF/UNUSED.SF", zb.read("META-INF/UNUSED.SF"))
+            zout.writestr("META-INF/UNUSED.RSA", zb.read("META-INF/UNUSED.RSA"))
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "no manifest section|Unattributed"):
+            registry_tool.verify_jar_cryptographic_signers(unattributed_pkg, "unattributed-pair.pljs", {self.fp_a})
+
+        # 4d. Valid PKCS7 auxiliary pair signing a main-attributes-only manifest (0 attributed payloads) -> rejected
+        manifest_only = reg_dir / "artifacts" / "manifest-only.pljs"
+        with zipfile.ZipFile(manifest_only, "w") as zm:
+            zm.writestr("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n")
+        _sign_package(manifest_only, self.ks_b, self.env_b, "beta", sigfile="MANONLY")
+        manonly_pkg = reg_dir / "artifacts" / "manonly-extra.pljs"
+        with zipfile.ZipFile(base_signed, "r") as za, zipfile.ZipFile(manifest_only, "r") as zm, zipfile.ZipFile(manonly_pkg, "w") as zout:
+            for item in za.infolist():
+                zout.writestr(item, za.read(item.filename))
+            zout.writestr("META-INF/MANONLY.SF", zm.read("META-INF/MANONLY.SF"))
+            zout.writestr("META-INF/MANONLY.RSA", zm.read("META-INF/MANONLY.RSA"))
+        with self.assertRaises(registry_tool.RegistryValidationError):
+            registry_tool.verify_jar_cryptographic_signers(manonly_pkg, "manonly-extra.pljs", {self.fp_a})
 
         reg_path.write_text(
             json.dumps(
@@ -626,6 +689,38 @@ class RegistryToolTests(unittest.TestCase):
             with self.assertRaisesRegex(registry_tool.RegistryValidationError, "size out of bounds"):
                 registry_tool.read_bounded_package(oversized, reg_dir / "artifacts")
 
+        # 6. S2 residual: cumulative repo package size limit & streaming ValidatedPlugin has no verified_bytes
+        validated_ok = registry_tool.validate_registry(reg_path)
+        self.assertFalse(hasattr(validated_ok.plugins[0], "verified_bytes"))
+        self.assertGreater(validated_ok.plugins[0].package_size, 0)
+        with patch.object(registry_tool, "MAX_TOTAL_REGISTRY_BYTES", 100):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "cumulative package size"):
+                registry_tool.validate_registry(reg_path)
+
+        # 7. S2 residual: --clean refuses symlinked dist, '..' traversal, or overlapping source directories
+        victim_dir = self.root / "victim_should_survive"
+        victim_dir.mkdir()
+        (victim_dir / "keep.txt").write_text("must-survive", encoding="utf-8")
+        symlinked_out = self.root / "symlink_dist"
+
+        def fake_clean_lstat(p, *args, **kwargs):
+            st = real_lstat(p, *args, **kwargs)
+            if Path(p) == symlinked_out:
+                return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
+            return st
+
+        symlinked_out.mkdir()
+        with patch.object(registry_tool.os, "lstat", fake_clean_lstat):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
+                registry_tool.build_static_site(reg_path, symlinked_out, clean=True)
+        self.assertTrue((victim_dir / "keep.txt").is_file())
+
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Unanchored"):
+            registry_tool.build_static_site(reg_path, self.root / ".." / "escaped-dist", clean=True)
+
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "overlaps or encloses"):
+            registry_tool.build_static_site(reg_path, reg_dir, clean=True)
+
     def test_s4_path_segments_contributions_and_dangerous_urls(self) -> None:
         # Unsafe id/version path segment (FilePluginArtifactStore parity)
         for bad_id in ("bad/id", "bad:id", ".."):
@@ -677,6 +772,82 @@ class RegistryToolTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(registry_tool.RegistryValidationError, "FormSection"):
             registry_tool.validate_registry(reg_path)
+
+        # S4 parity: explicit "contributions": null, unstripped id/version spaces, and UTF-16 length (>4096)
+        reg_dir, reg_path = self._make_workspace("null_contrib")
+        m_null_c = _base_manifest("demo-community", "js")
+        m_null_c["contributions"] = None
+        pkg_nc = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+        _write_unsigned_package(pkg_nc, m_null_c)
+        _sign_package(pkg_nc, self.ks_a, self.env_a, "alpha")
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", m_null_c)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "JSON array"):
+            registry_tool.validate_registry(reg_path)
+
+        # Unstripped leading/trailing whitespace in id must be rejected (no pre-strip)
+        reg_dir, reg_path = self._make_workspace("space_id")
+        m_space = _base_manifest("demo-community", "js")
+        m_space["id"] = " demo-js "
+        pkg_sp = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+        _write_unsigned_package(pkg_sp, m_space)
+        _sign_package(pkg_sp, self.ks_a, self.env_a, "alpha")
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", m_space)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "unsafe path characters"):
+            registry_tool.validate_registry(reg_path)
+
+        # UTF-16 code unit count boundary: 2049 supplementary-plane emojis = 2049 Python chars, 4098 UTF-16 units
+        reg_dir, reg_path = self._make_workspace("utf16_limit")
+        m_utf16 = _base_manifest("demo-community", "js")
+        m_utf16["contributions"] = [
+            {
+                "kind": "FormSection",
+                "id": "u16-form",
+                "slot": "plan.edit.configuration",
+                "title": "U16",
+                "fields": [{"id": "note", "kind": "text", "label": "N", "value": "\U0001F600" * 2049, "onEvent": "e"}],
+            }
+        ]
+        pkg_u16 = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+        _write_unsigned_package(pkg_u16, m_utf16)
+        _sign_package(pkg_u16, self.ks_a, self.env_a, "alpha")
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", m_utf16)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Invalid text value"):
+            registry_tool.validate_registry(reg_path)
+
+        m_utf16["contributions"][0]["fields"][0]["value"] = "\U0001F600" * 2048  # 4096 UTF-16 units -> valid
+        _write_unsigned_package(pkg_u16, m_utf16)
+        _sign_package(pkg_u16, self.ks_a, self.env_a, "alpha")
+        self.assertEqual(len(registry_tool.validate_registry(reg_path).plugins), 1)
 
         # Dangerous URLs
         bad_urls = [
@@ -779,6 +950,11 @@ assert.strictEqual(app.safeDownloadUrl('https://evil.example.org/artifacts/ok.pl
 assert.strictEqual(app.safeDownloadUrl('https://example.org/other/ok.pljs', 'https://example.org/catalog.json'), null);
 assert.strictEqual(app.safeDownloadUrl('./artifacts/ok.pljs', 'https://example.org/catalog.json'), 'https://example.org/artifacts/ok.pljs');
 assert.strictEqual(app.safeDownloadUrl('https://example.org/sub/artifacts/ok.plp', 'https://example.org/sub/index.html'), 'https://example.org/sub/artifacts/ok.plp');
+assert.strictEqual(app.safeDownloadUrl('https://example.org/other/artifacts/ok.plp', 'https://example.org/sub/index.html'), null);
+assert.strictEqual(app.safeDownloadUrl('https://example.org/sub/artifacts/nested/ok.plp', 'https://example.org/sub/index.html'), null);
+assert.strictEqual(app.safeDownloadUrl('https://example.org/sub/artifacts/ok.plp?v=1', 'https://example.org/sub/index.html'), null);
+assert.strictEqual(app.safeDownloadUrl('https://example.org/sub/artifacts/ok.plp#frag', 'https://example.org/sub/index.html'), null);
+assert.strictEqual(app.safeDownloadUrl('https://example.org/sub/artifacts/bad%20name.plp', 'https://example.org/sub/index.html'), null);
 
 const xssCatalog = {{
   catalogFormatVersion: 1,

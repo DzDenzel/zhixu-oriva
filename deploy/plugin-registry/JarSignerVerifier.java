@@ -1,5 +1,6 @@
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -25,6 +26,9 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Cryptographic JAR verification helper aligned with Android SignedJarPluginPackageVerifier.
@@ -93,10 +97,12 @@ public final class JarSignerVerifier {
         Set<String> seenNames = new HashSet<>();
         Set<String> sfAliases = new TreeSet<>();
         Set<String> sigAliases = new TreeSet<>();
+        Map<String, String> sigEntryByAlias = new LinkedHashMap<>();
         Set<String> ciAliases = new HashSet<>();
         boolean hasManifest = false;
         List<String> metaInfFiles = new ArrayList<>();
         List<PayloadResult> payloads = new ArrayList<>();
+        Map<String, Set<String>> payloadCertsByName = new LinkedHashMap<>();
         Map<String, SignerInfo> signerCatalog = new LinkedHashMap<>();
         Set<String> commonCertSigners = null;
         long totalUncompressed = 0;
@@ -160,10 +166,14 @@ public final class JarSignerVerifier {
                             if (!sigAliases.add(alias)) {
                                 throw new SecurityException("Duplicate signature block for alias: " + alias);
                             }
+                            sigEntryByAlias.put(alias, name);
                         }
                         ciAliases.add(upperAlias);
                     }
                     long metaRead = drainBounded(jar.getInputStream(entry), buffer, name, totalUncompressed);
+                    if (metaRead <= 0) {
+                        throw new SecurityException("Empty META-INF metadata entry is forbidden: " + name);
+                    }
                     totalUncompressed += metaRead;
                     metaInfFiles.add(name);
                     continue;
@@ -203,6 +213,7 @@ public final class JarSignerVerifier {
                 } else {
                     commonCertSigners.retainAll(entryCertSet);
                 }
+                payloadCertsByName.put(name, entryCertSet);
                 payloads.add(new PayloadResult(name, readBytes, sha256Hex(digest.digest()), entrySigners));
             }
         }
@@ -220,11 +231,97 @@ public final class JarSignerVerifier {
         if (!hasPluginJson) {
             throw new SecurityException("Plugin package is missing plugin.json");
         }
+        if (sfAliases.size() > 1) {
+            verifyEverySignaturePairAttributed(target, sfAliases, sigEntryByAlias, payloadCertsByName);
+        }
         if (commonCertSigners == null) {
             commonCertSigners = Collections.emptySet();
         }
 
         return formatJson(payloads, commonCertSigners, signerCatalog, metaInfFiles);
+    }
+
+    /**
+     * When multiple META-INF signature pairs exist, verify each pair independently in an isolated
+     * JAR so JDK cannot silently skip a corrupt, disabled, or unattributed auxiliary signature pair.
+     */
+    private static void verifyEverySignaturePairAttributed(
+        Path target,
+        Set<String> sfAliases,
+        Map<String, String> sigEntryByAlias,
+        Map<String, Set<String>> payloadCertsByName
+    ) throws Exception {
+        byte[] buffer = new byte[65536];
+        try (ZipFile rawZip = new ZipFile(target.toFile())) {
+            for (String alias : sfAliases) {
+                String sfName = "META-INF/" + alias + ".SF";
+                String sigName = sigEntryByAlias.get(alias);
+                if (sigName == null) {
+                    throw new SecurityException("Missing signature block for alias: " + alias);
+                }
+                Path isoJar = Files.createTempFile("oriva-sig-iso-", ".jar");
+                try {
+                    try (ZipOutputStream zout = new ZipOutputStream(Files.newOutputStream(isoJar))) {
+                        Enumeration<? extends ZipEntry> rawEntries = rawZip.entries();
+                        while (rawEntries.hasMoreElements()) {
+                            ZipEntry src = rawEntries.nextElement();
+                            if (src.isDirectory()) {
+                                continue;
+                            }
+                            String name = src.getName();
+                            boolean keep = !name.startsWith("META-INF/")
+                                || name.equals("META-INF/MANIFEST.MF")
+                                || name.equals(sfName)
+                                || name.equals(sigName);
+                            if (!keep) {
+                                continue;
+                            }
+                            ZipEntry dst = new ZipEntry(name);
+                            zout.putNextEntry(dst);
+                            try (InputStream in = rawZip.getInputStream(src)) {
+                                int n;
+                                while ((n = in.read(buffer)) != -1) {
+                                    zout.write(buffer, 0, n);
+                                }
+                            }
+                            zout.closeEntry();
+                        }
+                    }
+
+                    int attributedPayloads = 0;
+                    try (JarFile iso = new JarFile(isoJar.toFile(), true)) {
+                        Enumeration<JarEntry> isoEntries = iso.entries();
+                        while (isoEntries.hasMoreElements()) {
+                            JarEntry entry = isoEntries.nextElement();
+                            if (entry.isDirectory() || entry.getName().startsWith("META-INF/")) {
+                                continue;
+                            }
+                            drainBounded(iso.getInputStream(entry), buffer, entry.getName(), 0);
+                            CodeSigner[] signers = entry.getCodeSigners();
+                            if (signers != null && signers.length > 0) {
+                                attributedPayloads++;
+                                Set<String> fullEntryCerts = payloadCertsByName.getOrDefault(entry.getName(), Collections.emptySet());
+                                for (CodeSigner cs : signers) {
+                                    List<? extends Certificate> certs = cs.getSignerCertPath().getCertificates();
+                                    if (certs.isEmpty() || !(certs.get(0) instanceof X509Certificate leaf)) {
+                                        throw new SecurityException("Auxiliary signature pair lacks X509 leaf: " + alias);
+                                    }
+                                    String certFp = sha256Colon(leaf.getEncoded());
+                                    if (!fullEntryCerts.contains(certFp)) {
+                                        throw new SecurityException("Inconsistent signer attribution for alias: " + alias);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (attributedPayloads <= 0) {
+                        throw new SecurityException("Unattributed or ineffective META-INF signature pair: " + alias);
+                    }
+                } finally {
+                    Files.deleteIfExists(isoJar);
+                }
+            }
+        }
     }
 
     private static void validateEntryName(String name) {
