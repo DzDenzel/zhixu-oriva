@@ -42,7 +42,8 @@ planlock:
     secret: ${PLANLOCK_JWT_SECRET}
     expire-minutes: ${PLANLOCK_JWT_EXPIRE_MINUTES:10080}
   security:
-    max-json-request-bytes: ${PLANLOCK_MAX_JSON_REQUEST_BYTES:524288}
+    max-json-request-bytes: ${PLANLOCK_MAX_JSON_REQUEST_BYTES:65536}
+    max-concurrent-json-buffer-bytes: ${PLANLOCK_MAX_CONCURRENT_JSON_BUFFER_BYTES:67108864}
     json-route-limits:
       - pattern: /api/v1/journals/**
         max-bytes: 524288

@@ -17,13 +17,17 @@ import java.util.List;
 @ConfigurationProperties(prefix = "planlock.security")
 public class JsonBodyLimitProperties {
 
-    public static final long DEFAULT_MAX_JSON_REQUEST_BYTES = 524_288L;
+    public static final long DEFAULT_MAX_JSON_REQUEST_BYTES = 65_536L;
+    public static final long DEFAULT_JOURNAL_MAX_BYTES = 524_288L;
     public static final long DEFAULT_SYNC_PUSH_MAX_BYTES = 16_777_216L;
+    public static final long DEFAULT_MAX_CONCURRENT_JSON_BUFFER_BYTES = 67_108_864L;
 
     private long maxJsonRequestBytes = DEFAULT_MAX_JSON_REQUEST_BYTES;
 
+    private long maxConcurrentJsonBufferBytes = DEFAULT_MAX_CONCURRENT_JSON_BUFFER_BYTES;
+
     private List<RouteLimit> jsonRouteLimits = new ArrayList<>(List.of(
-            new RouteLimit("/api/v1/journals/**", DEFAULT_MAX_JSON_REQUEST_BYTES),
+            new RouteLimit("/api/v1/journals/**", DEFAULT_JOURNAL_MAX_BYTES),
             new RouteLimit("/api/v1/sync/push", DEFAULT_SYNC_PUSH_MAX_BYTES)
     ));
 

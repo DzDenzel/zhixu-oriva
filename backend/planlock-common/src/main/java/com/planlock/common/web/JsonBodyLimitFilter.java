@@ -1,6 +1,8 @@
 package com.planlock.common.web;
 
 import com.planlock.common.ErrorCode;
+import com.planlock.common.auth.JwtUtil;
+import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
@@ -8,8 +10,8 @@ import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
@@ -25,16 +27,18 @@ import java.io.InputStreamReader;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Servlet 级 JSON 请求体预读拦截器：
- * 先拦截已知超限 {@code Content-Length}，再在调用 {@code filterChain.doFilter} 之前
- * 分块有界读取完整请求体；未超限才放入可重放请求体进入 Controller/事务。
+ * <ol>
+ *   <li>受保护 JSON 路由在读取/缓冲任何请求字节之前先行验证 Bearer JWT；</li>
+ *   <li>结合全局并发缓冲配额与按路由单请求上限，以单缓冲零冗余拷贝方式预读后交由下游重放。</li>
+ * </ol>
  */
 @Slf4j
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 10)
-@RequiredArgsConstructor
 public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
     private static final String SAFE_ERROR_JSON = "{\"code\":"
@@ -42,10 +46,27 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             + ",\"message\":\""
             + ErrorCode.INVALID_PARAM.getDefaultMessage()
             + "\"}";
+    private static final String SAFE_UNAUTHORIZED_JSON = "{\"code\":"
+            + ErrorCode.UNAUTHORIZED.getCode()
+            + ",\"message\":\""
+            + ErrorCode.UNAUTHORIZED.getDefaultMessage()
+            + "\"}";
     private static final int CHUNK_SIZE = 8192;
 
     private final JsonBodyLimitProperties properties;
+    private final JwtUtil jwtUtil;
     private final AntPathMatcher pathMatcher = new AntPathMatcher();
+    private final AtomicLong activeBufferedBytes = new AtomicLong(0L);
+
+    @Autowired
+    public JsonBodyLimitFilter(JsonBodyLimitProperties properties, JwtUtil jwtUtil) {
+        this.properties = properties;
+        this.jwtUtil = jwtUtil;
+    }
+
+    public JsonBodyLimitFilter(JsonBodyLimitProperties properties) {
+        this(properties, null);
+    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
@@ -54,38 +75,78 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             filterChain.doFilter(request, response);
             return;
         }
-        long limit = resolveLimit(request);
+        String path = normalizePath(request);
+        if (isProtectedApiRoute(path) && !isAuthorized(request)) {
+            log.warn("rejected unauthenticated json request before body read: method={}, uri={}",
+                    request.getMethod(), request.getRequestURI());
+            writeSafeJsonError(response, SAFE_UNAUTHORIZED_JSON);
+            return;
+        }
+        long limit = resolveLimit(path);
         if (limit <= 0) {
             filterChain.doFilter(request, response);
             return;
         }
         long contentLength = request.getContentLengthLong();
+        boolean hasTransferEncoding = request.getHeader("Transfer-Encoding") != null;
+        if (contentLength == 0L && !hasTransferEncoding) {
+            filterChain.doFilter(request, response);
+            return;
+        }
         if (contentLength > limit) {
             log.warn("rejected oversized request: category=payload_limit, stage=content_length, method={}, uri={}",
                     request.getMethod(), request.getRequestURI());
-            writeSafeLimitError(response);
+            writeSafeJsonError(response, SAFE_ERROR_JSON);
             return;
         }
-        byte[] bodyBytes;
+        long maxConcurrent = properties.getMaxConcurrentJsonBufferBytes();
+        long reserved = 0L;
+        int initialCapacity = contentLength > 0L ? (int) Math.min(contentLength, limit) : 256;
+        DirectByteArrayOutputStream bufferOut = new DirectByteArrayOutputStream(initialCapacity);
         try {
-            bodyBytes = readBoundedBytes(request.getInputStream(), limit);
-        } catch (JsonPayloadTooLargeException ex) {
-            log.warn("rejected oversized request: category=payload_limit, stage=stream, method={}, uri={}",
-                    request.getMethod(), request.getRequestURI());
-            writeSafeLimitError(response);
-            return;
-        }
-        CachedBodyHttpServletRequest wrapped = new CachedBodyHttpServletRequest(request, bodyBytes);
-        try {
+            ServletInputStream in = request.getInputStream();
+            byte[] chunk = new byte[CHUNK_SIZE];
+            long total = 0L;
+            while (true) {
+                long remaining = limit - total;
+                int maxRead = remaining >= chunk.length ? chunk.length : (int) remaining + 1;
+                int count = in.read(chunk, 0, maxRead);
+                if (count == -1) {
+                    break;
+                }
+                total += count;
+                if (total > limit) {
+                    log.warn("rejected oversized request: category=payload_limit, stage=stream, method={}, uri={}",
+                            request.getMethod(), request.getRequestURI());
+                    writeSafeJsonError(response, SAFE_ERROR_JSON);
+                    return;
+                }
+                if (!tryReserveConcurrentBytes(count, maxConcurrent)) {
+                    log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, method={}, uri={}",
+                            request.getMethod(), request.getRequestURI());
+                    writeSafeJsonError(response, SAFE_ERROR_JSON);
+                    return;
+                }
+                reserved += count;
+                bufferOut.write(chunk, 0, count);
+            }
+            if (bufferOut.size() == 0) {
+                filterChain.doFilter(request, response);
+                return;
+            }
+            CachedBodyHttpServletRequest wrapped = new CachedBodyHttpServletRequest(
+                    request, bufferOut.rawBuffer(), bufferOut.size());
             filterChain.doFilter(wrapped, response);
         } catch (Exception ex) {
             if (hasPayloadLimitCause(ex) && !response.isCommitted()) {
                 log.warn("rejected oversized request: category=payload_limit, stage=deserializer, method={}, uri={}",
                         request.getMethod(), request.getRequestURI());
-                writeSafeLimitError(response);
+                writeSafeJsonError(response, SAFE_ERROR_JSON);
                 return;
             }
             throw ex;
+        } finally {
+            releaseConcurrentBytes(reserved);
         }
     }
 
@@ -102,28 +163,61 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         return false;
     }
 
-    private static byte[] readBoundedBytes(ServletInputStream in, long limit) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buffer = new byte[CHUNK_SIZE];
-        long total = 0L;
-        while (true) {
-            long remaining = limit - total;
-            int maxRead = remaining >= buffer.length ? buffer.length : (int) remaining + 1;
-            int count = in.read(buffer, 0, maxRead);
-            if (count == -1) {
-                break;
-            }
-            total += count;
-            if (total > limit) {
-                throw new JsonPayloadTooLargeException();
-            }
-            out.write(buffer, 0, count);
-        }
-        return out.toByteArray();
+    long currentBufferedBytes() {
+        return activeBufferedBytes.get();
     }
 
-    private long resolveLimit(HttpServletRequest request) {
-        String path = normalizePath(request);
+    private boolean isProtectedApiRoute(String path) {
+        if (!pathMatcher.match("/api/v1/**", path)) {
+            return false;
+        }
+        for (String publicPattern : WebConfig.PUBLIC_API_PATTERNS) {
+            if (pathMatcher.match(publicPattern, path)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isAuthorized(HttpServletRequest request) {
+        if (jwtUtil == null) {
+            return true;
+        }
+        String auth = request.getHeader("Authorization");
+        if (auth == null || !auth.startsWith("Bearer ")) {
+            return false;
+        }
+        try {
+            Claims claims = jwtUtil.parse(auth.substring(7));
+            return claims.get("uid", Long.class) != null;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean tryReserveConcurrentBytes(long delta, long maxConcurrent) {
+        if (delta <= 0L || maxConcurrent <= 0L) {
+            return true;
+        }
+        while (true) {
+            long current = activeBufferedBytes.get();
+            long next = current + delta;
+            if (next > maxConcurrent) {
+                return false;
+            }
+            if (activeBufferedBytes.compareAndSet(current, next)) {
+                return true;
+            }
+        }
+    }
+
+    private void releaseConcurrentBytes(long delta) {
+        if (delta > 0L) {
+            activeBufferedBytes.addAndGet(-delta);
+        }
+    }
+
+    private long resolveLimit(String path) {
         if (properties.getJsonRouteLimits() != null) {
             for (JsonBodyLimitProperties.RouteLimit rule : properties.getJsonRouteLimits()) {
                 if (rule != null && rule.getPattern() != null && rule.getMaxBytes() > 0
@@ -162,35 +256,48 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         }
     }
 
-    private static void writeSafeLimitError(HttpServletResponse response) throws IOException {
+    private static void writeSafeJsonError(HttpServletResponse response, String body) throws IOException {
         response.setStatus(HttpServletResponse.SC_OK);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
-        response.getWriter().write(SAFE_ERROR_JSON);
+        response.getWriter().write(body);
+    }
+
+    private static final class DirectByteArrayOutputStream extends ByteArrayOutputStream {
+
+        private DirectByteArrayOutputStream(int initialCapacity) {
+            super(initialCapacity);
+        }
+
+        private byte[] rawBuffer() {
+            return this.buf;
+        }
     }
 
     private static final class CachedBodyHttpServletRequest extends HttpServletRequestWrapper {
 
-        private final byte[] cachedBody;
+        private final byte[] rawBuffer;
+        private final int length;
 
-        private CachedBodyHttpServletRequest(HttpServletRequest request, byte[] cachedBody) {
+        private CachedBodyHttpServletRequest(HttpServletRequest request, byte[] rawBuffer, int length) {
             super(request);
-            this.cachedBody = cachedBody;
+            this.rawBuffer = rawBuffer;
+            this.length = length;
         }
 
         @Override
         public int getContentLength() {
-            return cachedBody.length;
+            return length;
         }
 
         @Override
         public long getContentLengthLong() {
-            return cachedBody.length;
+            return length;
         }
 
         @Override
         public ServletInputStream getInputStream() {
-            return new CachedServletInputStream(cachedBody);
+            return new CachedServletInputStream(rawBuffer, length);
         }
 
         @Override
@@ -205,8 +312,8 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
         private final ByteArrayInputStream delegate;
 
-        private CachedServletInputStream(byte[] cachedBody) {
-            this.delegate = new ByteArrayInputStream(cachedBody);
+        private CachedServletInputStream(byte[] rawBuffer, int length) {
+            this.delegate = new ByteArrayInputStream(rawBuffer, 0, length);
         }
 
         @Override
