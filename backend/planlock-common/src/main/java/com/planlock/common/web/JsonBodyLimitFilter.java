@@ -16,6 +16,7 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.util.AntPathMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.util.ContentCachingResponseWrapper;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -63,14 +64,23 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             return;
         }
         BoundedJsonRequestWrapper wrapped = new BoundedJsonRequestWrapper(request, limit);
+        ContentCachingResponseWrapper responseWrapper = new ContentCachingResponseWrapper(response);
         try {
-            filterChain.doFilter(wrapped, response);
+            filterChain.doFilter(wrapped, responseWrapper);
+            if (!response.isCommitted()) {
+                wrapped.drainRemainingWithinLimit();
+                responseWrapper.copyBodyToResponse();
+            }
         } catch (Exception ex) {
             if (hasPayloadLimitCause(ex) && !response.isCommitted()) {
                 log.warn("rejected oversized request: category=payload_limit, stage=stream, method={}, uri={}",
                         request.getMethod(), request.getRequestURI());
+                responseWrapper.reset();
                 writeSafeLimitError(response);
                 return;
+            }
+            if (!response.isCommitted()) {
+                responseWrapper.copyBodyToResponse();
             }
             throw ex;
         }
@@ -139,7 +149,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
     private static final class BoundedJsonRequestWrapper extends HttpServletRequestWrapper {
 
         private final long maxBytes;
-        private ServletInputStream cachedInputStream;
+        private BoundedServletInputStream cachedInputStream;
         private BufferedReader cachedReader;
 
         private BoundedJsonRequestWrapper(HttpServletRequest request, long maxBytes) {
@@ -164,6 +174,18 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             }
             return cachedReader;
         }
+
+        /** 对未触发过早结束或含尾随字符的请求流执行有界排空检查，超出 limit 立即抛出异常。 */
+        private void drainRemainingWithinLimit() throws IOException {
+            ServletInputStream stream = getInputStream();
+            if (cachedInputStream != null && cachedInputStream.isExceeded()) {
+                throw new JsonPayloadTooLargeException();
+            }
+            byte[] drainBuf = new byte[4096];
+            while (stream.read(drainBuf, 0, drainBuf.length) != -1) {
+                // BoundedServletInputStream enforces maxBytes on every read chunk.
+            }
+        }
     }
 
     private static final class BoundedServletInputStream extends ServletInputStream {
@@ -171,17 +193,26 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         private final ServletInputStream delegate;
         private final long maxBytes;
         private long totalRead;
+        private boolean exceeded;
 
         private BoundedServletInputStream(ServletInputStream delegate, long maxBytes) {
             this.delegate = delegate;
             this.maxBytes = maxBytes;
         }
 
+        private boolean isExceeded() {
+            return exceeded;
+        }
+
         @Override
         public int read() throws IOException {
+            if (exceeded) {
+                throw new JsonPayloadTooLargeException();
+            }
             if (totalRead >= maxBytes) {
                 int peek = delegate.read();
                 if (peek != -1) {
+                    exceeded = true;
                     throw new JsonPayloadTooLargeException();
                 }
                 return -1;
@@ -195,6 +226,9 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
         @Override
         public int read(byte[] b, int off, int len) throws IOException {
+            if (exceeded) {
+                throw new JsonPayloadTooLargeException();
+            }
             if (len == 0) {
                 return 0;
             }
@@ -204,6 +238,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             if (count > 0) {
                 totalRead += count;
                 if (totalRead > maxBytes) {
+                    exceeded = true;
                     throw new JsonPayloadTooLargeException();
                 }
             }

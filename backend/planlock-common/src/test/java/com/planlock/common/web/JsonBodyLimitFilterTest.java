@@ -18,7 +18,9 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -32,7 +34,7 @@ class JsonBodyLimitFilterTest {
         private final AtomicBoolean reached = new AtomicBoolean(false);
 
         @PostMapping("/api/v1/journals")
-        ApiResponse<String> journal(@RequestBody String body) {
+        ApiResponse<String> journal(@RequestBody Map<String, Object> body) {
             reached.set(true);
             return ApiResponse.ok("ok");
         }
@@ -112,6 +114,46 @@ class JsonBodyLimitFilterTest {
         assertThat(controller.reached).isFalse();
     }
 
+    @Test
+    void chunkedValidShortJsonFollowedByOversizedUnreadTailDiscardsBusinessBodyAndStopsEarly() throws Exception {
+        var controller = new EchoController();
+        var props = new JsonBodyLimitProperties();
+        props.setMaxJsonRequestBytes(64L);
+        props.setJsonRouteLimits(List.of());
+        MockMvc mvc = MockMvcBuilders.standaloneSetup(controller)
+                .setControllerAdvice(new GlobalExceptionHandler())
+                .addFilters(new JsonBodyLimitFilter(props))
+                .build();
+
+        byte[] payload = ("{\"ok\":1}" + " ".repeat(4096)).getBytes(StandardCharsets.UTF_8);
+        AtomicInteger bytesConsumed = new AtomicInteger(0);
+        mvc.perform(req -> {
+                    MockHttpServletRequest r = new MockHttpServletRequest("POST", "/api/v1/journals") {
+                        @Override
+                        public long getContentLengthLong() {
+                            return -1L;
+                        }
+
+                        @Override
+                        public int getContentLength() {
+                            return -1;
+                        }
+
+                        @Override
+                        public ServletInputStream getInputStream() {
+                            return new CountingInputStream(payload, bytesConsumed);
+                        }
+                    };
+                    r.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                    return r;
+                })
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(ErrorCode.INVALID_PARAM.getCode()))
+                .andExpect(jsonPath("$.message").value(ErrorCode.INVALID_PARAM.getDefaultMessage()))
+                .andExpect(jsonPath("$.data").doesNotExist());
+        assertThat(bytesConsumed.get()).isEqualTo(65);
+    }
+
     private static final class UnsizedInputStream extends ServletInputStream {
         private final ByteArrayInputStream delegate;
 
@@ -136,6 +178,48 @@ class JsonBodyLimitFilterTest {
         @Override
         public int read() throws IOException {
             return delegate.read();
+        }
+    }
+
+    private static final class CountingInputStream extends ServletInputStream {
+        private final ByteArrayInputStream delegate;
+        private final AtomicInteger counter;
+
+        private CountingInputStream(byte[] bytes, AtomicInteger counter) {
+            this.delegate = new ByteArrayInputStream(bytes);
+            this.counter = counter;
+        }
+
+        @Override
+        public boolean isFinished() {
+            return delegate.available() == 0;
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        @Override
+        public void setReadListener(ReadListener readListener) {
+        }
+
+        @Override
+        public int read() throws IOException {
+            int next = delegate.read();
+            if (next != -1) {
+                counter.incrementAndGet();
+            }
+            return next;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int count = delegate.read(b, off, len);
+            if (count > 0) {
+                counter.addAndGet(count);
+            }
+            return count;
         }
     }
 }

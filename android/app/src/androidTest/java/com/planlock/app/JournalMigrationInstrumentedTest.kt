@@ -356,6 +356,44 @@ class JournalMigrationInstrumentedTest {
             assertEquals(802L, reboundConflict.id)
             assertEquals("游客离线编辑", reboundConflict.localJournal?.content)
             assertEquals("云端版本2", reboundConflict.remoteJournal?.content)
+            store.resolveConfirmation(reboundConflict, keepMine = false)
+
+            // v1.3 A7-07 #1: Dual-pending offline edits on same clientId/equivalent content must BOTH survive cleanly
+            db.journalSnapshotDao().upsertAll(
+                listOf(
+                    JournalSnapshotEntity(901L, 0L, "dual-edit-cid", "2026-11-26", "平静", null, "原正文", 1, 0L, scope = guestScope),
+                    JournalSnapshotEntity(902L, 1L, "dual-edit-cid", "2026-11-26", "平静", null, "原正文", 1, 0L, scope = activeScope),
+                )
+            )
+            store.forScope(guestScope).saveJournalChange("2026-11-26", "平静", emptyList(), "游客离线新改", id = 901L)
+            store.saveJournalChange("2026-11-26", "专注", emptyList(), "目标离线新改", id = 902L)
+            store.acceptGuestData(listOf(guestScope))
+            val dualContents = store.journals().map { it.content }
+            assertTrue("游客离线新改" in dualContents)
+            assertTrue("目标离线新改" in dualContents)
+            assertEquals(2, store.pending().count { it.type == "journal_upsert" && it.payload?.contains("离线新改") == true })
+
+            // v1.3 A7-07 #2: Coincidental baseVersion == targetRemote.version (both 0L) with different content MUST still force SyncConfirmation
+            val isolatedScope = "instance\n99"
+            val isolatedStore = store.forScope(isolatedScope)
+            db.journalSnapshotDao().upsertAll(
+                listOf(
+                    JournalSnapshotEntity(910L, 99L, "coincidental-v0-cid", "2026-11-26", "平静", null, "旧正文", 1, 0L, scope = isolatedScope),
+                )
+            )
+            isolatedStore.saveJournalChange("2026-11-26", "平静", emptyList(), "本地离线改写v0", id = 910L)
+            isolatedStore.saveSnapshots(
+                plans = emptyList(),
+                strategies = emptyList(),
+                schedules = emptyList(),
+                journals = listOf(
+                    SyncJournalView(920L, 99L, "coincidental-v0-cid", "2026-11-26", "开心", emptyList(), "目标另一端v0内容", 1, 0L),
+                ),
+            )
+            val coincidentalConflict = isolatedStore.confirmations().single { it.kind == "journal" }
+            assertEquals(920L, coincidentalConflict.id)
+            assertEquals("本地离线改写v0", coincidentalConflict.localJournal?.content)
+            assertEquals("目标另一端v0内容", coincidentalConflict.remoteJournal?.content)
         }
     }
 }

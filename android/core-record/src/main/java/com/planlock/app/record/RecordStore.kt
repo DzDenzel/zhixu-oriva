@@ -209,7 +209,6 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         for (source in scopes.distinct().filter { it != destination }) {
             val sourcePlans = database.planSnapshotDao().all(source)
             val sourceSchedules = database.scheduleSnapshotDao().all(source)
-            val sourceJournals = database.journalSnapshotDao().all(source)
             val destinationTypes = typeDao.all(destination).associateBy { it.typeKey }
             typeDao.all(source).forEach { type ->
                 val existing = destinationTypes[type.typeKey]
@@ -241,6 +240,14 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         val sourceJournals = srcJournalDao.all(source)
         val destJournals = journalDao.all()
         val destPending = pendingDao.all()
+        val sourcePendingLocalIds = srcPendingDao.all(source)
+            .filter { it.type == "journal_upsert" }
+            .map { Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).localId }
+            .toSet()
+        val destPendingLocalIds = destPending
+            .filter { it.type == "journal_upsert" }
+            .map { Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).localId }
+            .toSet()
         val usedIds = (destJournals.map { it.id } + sourceJournals.map { it.id }).toMutableSet()
         val usedClientIds = (destJournals.mapNotNull { it.clientId } + sourceJournals.mapNotNull { it.clientId }).toMutableSet()
 
@@ -269,7 +276,8 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
             val byId = destJournals.firstOrNull { it.id == guest.id }
             val byClientId = guest.clientId?.takeIf { it.isNotBlank() }?.let { cid -> destJournals.firstOrNull { it.clientId == cid } }
             val match = byId ?: byClientId ?: continue
-            val equivalentPositive = guest.id > 0 && match.id > 0 && sameJournalContent(guest, match)
+            val dualPendingEdit = guest.id in sourcePendingLocalIds && match.id in destPendingLocalIds
+            val equivalentPositive = !dualPendingEdit && guest.id > 0 && match.id > 0 && sameJournalContent(guest, match)
             if (equivalentPositive) {
                 srcJournalDao.delete(source, guest.id)
                 srcPendingDao.all(source).forEach { row ->
@@ -294,9 +302,9 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
                         }
                     }
                 }
-            } else if (guest.id == match.id || (guest.id < 0 && byClientId != null)) {
-                val targetId = if (guest.id == match.id) nextUniqueLocalId() else guest.id
-                val targetClientId = if (guest.clientId == null || byClientId != null) nextUniqueClientId() else guest.clientId
+            } else if (dualPendingEdit || guest.id == match.id || (guest.id < 0 && byClientId != null)) {
+                val targetId = if (dualPendingEdit || guest.id == match.id) nextUniqueLocalId() else guest.id
+                val targetClientId = if (dualPendingEdit || guest.clientId == null || byClientId != null) nextUniqueClientId() else guest.clientId
                 val updatedGuest = guest.copy(
                     id = targetId,
                     clientId = targetClientId,

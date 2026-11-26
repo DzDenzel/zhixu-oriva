@@ -146,15 +146,48 @@ class JournalF37Test {
         var targetCreated = journals.create(503L, targetToDelete);
         journals.delete(503L, targetCreated.getId(), targetCreated.getVersion());
 
+        // Scenario A3: collation-equal under utf8mb4_unicode_ci (case, accent, trailing space) must still be treated as divergent under BINARY
+        var guestCase = new JournalUpsertRequest();
+        guestCase.setClientId("ci-case-cid");
+        guestCase.setEntryDate(LocalDate.of(2026, 11, 26));
+        guestCase.setMood("Morning");
+        guestCase.setContent("Case Note");
+        journals.create(501L, guestCase);
+        var ownerCase = new JournalUpsertRequest();
+        ownerCase.setClientId("ci-case-cid");
+        ownerCase.setEntryDate(LocalDate.of(2026, 11, 26));
+        ownerCase.setMood("morning");
+        ownerCase.setContent("case note");
+        journals.create(503L, ownerCase);
+
+        var guestAccent = new JournalUpsertRequest();
+        guestAccent.setClientId("ci-accent-cid");
+        guestAccent.setEntryDate(LocalDate.of(2026, 11, 26));
+        guestAccent.setContent("café");
+        journals.create(501L, guestAccent);
+        var ownerAccent = new JournalUpsertRequest();
+        ownerAccent.setClientId("ci-accent-cid");
+        ownerAccent.setEntryDate(LocalDate.of(2026, 11, 26));
+        ownerAccent.setContent("cafe");
+        journals.create(503L, ownerAccent);
+
+        // Trailing space inserted directly via SQL since JournalRules.normalizeContent trims trailing spaces
+        try (var c = connection(schema); var s = c.createStatement()) {
+            s.execute("INSERT INTO journal_entries(user_id, client_id, entry_date, content, status, version) VALUES "
+                    + "(501, 'ci-space-cid', '2026-11-26', 'note ', 1, 0), "
+                    + "(503, 'ci-space-cid', '2026-11-26', 'note', 1, 0)");
+        }
+
         int rekeyed = mergeMapper.rekeyConflictingGuestJournals(501L, 503L);
         int transferred = mergeMapper.transferJournals(501L, 503L);
         mergeMapper.clearDuplicateGuestJournals(501L, 503L);
-        assertThat(rekeyed).isEqualTo(2);
-        assertThat(transferred).isEqualTo(3);
+        assertThat(rekeyed).isEqualTo(5);
+        assertThat(transferred).isEqualTo(6);
         assertThat(journals.list(501L, null, null, null)).isEmpty();
         var ownerJournals = journals.list(503L, null, null, null);
         assertThat(ownerJournals).extracting("content")
-                .contains("F37 第一条日记", "游客重复条目", "游客版本正文", "账号版本正文", "同一clientId内容");
+                .contains("F37 第一条日记", "游客重复条目", "游客版本正文", "账号版本正文", "同一clientId内容",
+                        "Case Note", "case note", "café", "cafe", "note ", "note");
 
         // Idempotent repeat merge returns 0
         assertThat(mergeMapper.rekeyConflictingGuestJournals(501L, 503L)).isZero();

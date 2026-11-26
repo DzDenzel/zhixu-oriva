@@ -120,7 +120,15 @@ internal class SnapshotReconciler(
                     if (queued.localId !in remoteJournalIds) {
                         val targetRemote = queued.item.clientId?.let { remoteJournalByClientId[it] }
                         if (targetRemote != null) {
-                            if (queued.item.status == 0 && targetRemote.status == 0) {
+                            val hasConcurrentDestPending = pending.all().any { other ->
+                                other.type == "journal_upsert" &&
+                                    other.id != row.id &&
+                                    Json.decodeFromString<JournalPendingUpsert>(other.payload.orEmpty()).localId == targetRemote.id
+                            }
+                            if (hasConcurrentDestPending) {
+                                // Never overwrite an existing uncommitted edit on targetRemote.id; flag conflict on current row instead.
+                                markConflict(row, remote)
+                            } else if (queued.item.status == 0 && targetRemote.status == 0) {
                                 val key = requireNotNull(row.syncEntityKey())
                                 pending.delete(pending.all().filter { it.syncEntityKey() == key && it.id <= row.id }.map { it.id })
                                 pending.deleteByClientId("conflict:$key")
@@ -129,32 +137,35 @@ internal class SnapshotReconciler(
                                 val oldKey = requireNotNull(row.syncEntityKey())
                                 val localSnapshot = journals.byId(queued.localId)
                                 journals.delete(queued.localId)
-                                val baselineMatches = queued.baseVersion == targetRemote.version
                                 val sameState = sameJournalContent(queued.item, targetRemote)
-                                if (localSnapshot != null) {
-                                    journals.upsertAll(
-                                        listOf(
-                                            localSnapshot.copy(
-                                                id = targetRemote.id,
-                                                version = if (sameState) targetRemote.version else localSnapshot.version,
-                                            )
-                                        )
-                                    )
-                                }
                                 pending.deleteByClientId("conflict:$oldKey")
-                                if (!baselineMatches && sameState) {
+                                if (sameState) {
+                                    journals.upsertAll(listOf(targetRemote.toSnapshot()))
                                     pending.delete(listOf(row.id))
                                 } else {
+                                    if (localSnapshot != null) {
+                                        journals.upsertAll(
+                                            listOf(
+                                                localSnapshot.copy(
+                                                    id = targetRemote.id,
+                                                    clientId = targetRemote.clientId ?: localSnapshot.clientId,
+                                                )
+                                            )
+                                        )
+                                    }
                                     val reboundQueued = queued.copy(
                                         localId = targetRemote.id,
                                         baseVersion = targetRemote.version,
-                                        item = queued.item.copy(id = targetRemote.id, baseVersion = targetRemote.version),
+                                        item = queued.item.copy(
+                                            id = targetRemote.id,
+                                            baseVersion = targetRemote.version,
+                                            clientId = targetRemote.clientId ?: queued.item.clientId,
+                                        ),
                                     )
                                     val reboundRow = row.copy(payload = Json.encodeToString(reboundQueued))
                                     pending.update(reboundRow)
-                                    if (!baselineMatches) {
-                                        markConflict(reboundRow, remote)
-                                    }
+                                    // Never skip conflict confirmation on coincidental version equality.
+                                    markConflict(reboundRow, remote)
                                 }
                             }
                         } else if (queued.item.status == 0) {
