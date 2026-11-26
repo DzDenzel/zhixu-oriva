@@ -146,6 +146,14 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
                     if (effectiveMaxConcurrent > 0L) {
                         int granted = tryReserveAtMost(desiredSlab, effectiveMaxConcurrent);
                         if (granted <= 0) {
+                            // Admitted streams that filled their reserved capacity must still probe EOF cleanly;
+                            // unadmitted streams (total == 0 / in == null) reject before touching getInputStream().
+                            if (total > 0 && in != null) {
+                                int eofProbe = in.read();
+                                if (eofProbe == -1) {
+                                    break;
+                                }
+                            }
                             log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, stage=stream, method={}, uri={}",
                                     request.getMethod(), request.getRequestURI());
                             writeSafeJsonError(response, SAFE_ERROR_JSON);

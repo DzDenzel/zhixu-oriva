@@ -1255,6 +1255,97 @@ class JsonBodyLimitFilterTest {
         assertThat(filter.getActiveBufferedBytes()).isZero();
     }
 
+    @Test
+    void admittedFullBudgetKnownLengthAndChunkedStreamsAcceptCleanEofWhileRejectingExtraByteAndUnadmittedRequests() throws Exception {
+        var props = new JsonBodyLimitProperties();
+        props.setMaxConcurrentJsonBufferBytes(100L);
+        props.setMaxJsonRequestBytes(200L);
+        props.setSmallPayloadReserveBytes(0L);
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+
+        byte[] exact100 = ("{\"body\":\"" + "z".repeat(89) + "\"}").getBytes(StandardCharsets.UTF_8);
+        assertThat(exact100.length).isEqualTo(100);
+
+        // 1. Fixed Content-Length = 100 (== concurrent budget < 200 routeMaxBytes) reaches EOF cleanly -> 200 OK & full 100 B replay.
+        MockHttpServletRequest knownExactReq = new MockHttpServletRequest("POST", "/api/v1/auth/login");
+        knownExactReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        knownExactReq.setContent(exact100);
+        MockHttpServletResponse knownExactRes = new MockHttpServletResponse();
+        AtomicLong knownActiveInside = new AtomicLong(-1L);
+        AtomicBoolean knownReached = new AtomicBoolean(false);
+        filter.doFilter(knownExactReq, knownExactRes, (r, s) -> {
+            knownReached.set(true);
+            knownActiveInside.set(filter.getActiveBufferedBytes());
+            assertThat(r.getInputStream().readAllBytes()).isEqualTo(exact100);
+        });
+        assertThat(knownReached.get()).isTrue();
+        assertThat(knownExactRes.getStatus()).isEqualTo(200);
+        assertThat(knownExactRes.getContentAsString()).isEmpty();
+        assertThat(knownActiveInside.get()).isEqualTo(100L);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 2. Chunked 100 B (== concurrent budget < 200 routeMaxBytes) across multi-chunks reaches EOF cleanly -> 200 OK & full 100 B replay.
+        MockHttpServletRequest chunkedExactReq = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() {
+                return new ChunkedDeliveryInputStream(exact100, 13);
+            }
+        };
+        chunkedExactReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        MockHttpServletResponse chunkedExactRes = new MockHttpServletResponse();
+        AtomicLong chunkedActiveInside = new AtomicLong(-1L);
+        AtomicBoolean chunkedReached = new AtomicBoolean(false);
+        filter.doFilter(chunkedExactReq, chunkedExactRes, (r, s) -> {
+            chunkedReached.set(true);
+            chunkedActiveInside.set(filter.getActiveBufferedBytes());
+            assertThat(r.getInputStream().readAllBytes()).isEqualTo(exact100);
+        });
+        assertThat(chunkedReached.get()).isTrue();
+        assertThat(chunkedExactRes.getStatus()).isEqualTo(200);
+        assertThat(chunkedExactRes.getContentAsString()).isEmpty();
+        assertThat(chunkedActiveInside.get()).isEqualTo(100L);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 3a. Chunked 101 B (1 byte over concurrent budget 100 B < 200 routeMaxBytes) -> SAFE_ERROR_JSON, no extra array, counter == 0.
+        byte[] over101 = ("{\"body\":\"" + "z".repeat(90) + "\"}").getBytes(StandardCharsets.UTF_8);
+        assertThat(over101.length).isEqualTo(101);
+        AtomicInteger maxObservedChunkedArray = new AtomicInteger(0);
+        MockHttpServletRequest chunked101Req = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() {
+                return new ObservingMaxLenInputStream(over101, maxObservedChunkedArray);
+            }
+        };
+        chunked101Req.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        MockHttpServletResponse chunked101Res = new MockHttpServletResponse();
+        AtomicBoolean chunked101Reached = new AtomicBoolean(false);
+        filter.doFilter(chunked101Req, chunked101Res, (r, s) -> chunked101Reached.set(true));
+        assertThat(chunked101Reached.get()).isFalse();
+        assertThat(chunked101Res.getContentAsString()).contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
+        assertThat(maxObservedChunkedArray.get()).isLessThanOrEqualTo(100);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 3b. Fixed Content-Length = 100 whose stream still delivers a 101st byte -> SAFE_ERROR_JSON, no extra array, counter == 0.
+        AtomicInteger maxObservedKnownArray = new AtomicInteger(0);
+        MockHttpServletRequest known101Req = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+            @Override public long getContentLengthLong() { return 100L; }
+            @Override public int getContentLength() { return 100; }
+            @Override public ServletInputStream getInputStream() {
+                return new ObservingMaxLenInputStream(over101, maxObservedKnownArray);
+            }
+        };
+        known101Req.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        MockHttpServletResponse known101Res = new MockHttpServletResponse();
+        AtomicBoolean known101Reached = new AtomicBoolean(false);
+        filter.doFilter(known101Req, known101Res, (r, s) -> known101Reached.set(true));
+        assertThat(known101Reached.get()).isFalse();
+        assertThat(known101Res.getContentAsString()).contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
+        assertThat(maxObservedKnownArray.get()).isLessThanOrEqualTo(100);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+    }
+
     private static MockHttpServletRequest blockingDeclaredLengthRequest(
             String uri, long declaredLength, CountDownLatch readStarted, CountDownLatch release, boolean throwOnRelease) {
         MockHttpServletRequest req = new MockHttpServletRequest("POST", uri) {
