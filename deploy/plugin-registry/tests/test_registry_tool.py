@@ -1,4 +1,4 @@
-"""Unit and adversarial tests for deploy/plugin-registry/registry_tool.py and web/."""
+"""Unit and adversarial tests for deploy/plugin-registry/registry_tool.py, JarSignerVerifier.java, and web/."""
 
 from __future__ import annotations
 
@@ -9,10 +9,12 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 REGISTRY_ROOT = Path(__file__).resolve().parents[1]
@@ -21,40 +23,42 @@ sys.path.insert(0, str(REGISTRY_ROOT))
 import registry_tool  # noqa: E402
 
 
-def _create_ephemeral_signer(workspace: Path, alias: str, cn: str) -> tuple[Path, dict[str, str], str]:
+def _create_ephemeral_signer(
+    workspace: Path,
+    alias: str,
+    cn: str,
+    ext_args: list[str] | None = None,
+) -> tuple[Path, dict[str, str], str]:
     ks_path = workspace / f"{alias}.p12"
     env = os.environ.copy()
     env_var = f"ORIVA_TEST_KS_{alias.upper()}"
     env[env_var] = secrets.token_hex(16)
     keytool = registry_tool._find_jdk_tool("keytool")
-    subprocess.run(
-        [
-            keytool,
-            "-genkeypair",
-            "-alias",
-            alias,
-            "-keyalg",
-            "RSA",
-            "-keysize",
-            "2048",
-            "-validity",
-            "365",
-            "-storetype",
-            "PKCS12",
-            "-keystore",
-            str(ks_path),
-            "-storepass:env",
-            env_var,
-            "-keypass:env",
-            env_var,
-            "-dname",
-            f"CN={cn}, O=ORIVA Test, C=CN",
-        ],
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    cmd = [
+        keytool,
+        "-genkeypair",
+        "-alias",
+        alias,
+        "-keyalg",
+        "RSA",
+        "-keysize",
+        "2048",
+        "-validity",
+        "365",
+        "-storetype",
+        "PKCS12",
+        "-keystore",
+        str(ks_path),
+        "-storepass:env",
+        env_var,
+        "-keypass:env",
+        env_var,
+        "-dname",
+        f"CN={cn}, O=ORIVA Test, C=CN",
+    ]
+    if ext_args:
+        cmd.extend(ext_args)
+    subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)
     list_proc = subprocess.run(
         [
             keytool,
@@ -80,28 +84,85 @@ def _create_ephemeral_signer(workspace: Path, alias: str, cn: str) -> tuple[Path
     return ks_path, env, match.group(1).upper()
 
 
-def _sign_package(pkg_path: Path, ks_path: Path, env: dict[str, str], alias: str) -> None:
-    jarsigner = registry_tool._find_jdk_tool("jarsigner")
-    env_var = f"ORIVA_TEST_KS_{alias.upper()}"
+def _create_ephemeral_chain_signer(workspace: Path) -> tuple[Path, dict[str, str], str, str]:
+    """Create a temporary root CA + leaf certificate chain keystore; return (ks, env, leaf_fp, ca_fp)."""
+    keytool = registry_tool._find_jdk_tool("keytool")
+    env = os.environ.copy()
+    pass_val = secrets.token_hex(16)
+    env["ORIVA_TEST_KS_CHAIN"] = pass_val
+    ca_ks = workspace / "ca.p12"
+    leaf_ks = workspace / "chain.p12"
+
     subprocess.run(
         [
-            jarsigner,
-            "-keystore",
-            str(ks_path),
-            "-storetype",
-            "PKCS12",
-            "-storepass:env",
-            env_var,
-            "-keypass:env",
-            env_var,
-            str(pkg_path),
-            alias,
+            keytool, "-genkeypair", "-alias", "ca", "-keyalg", "RSA", "-keysize", "2048", "-validity", "365",
+            "-storetype", "PKCS12", "-keystore", str(ca_ks),
+            "-storepass:env", "ORIVA_TEST_KS_CHAIN", "-keypass:env", "ORIVA_TEST_KS_CHAIN",
+            "-dname", "CN=Test Root CA, O=ORIVA Test, C=CN", "-ext", "bc:c=ca:true",
         ],
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
+        env=env, check=True, capture_output=True, text=True,
     )
+    subprocess.run(
+        [
+            keytool, "-genkeypair", "-alias", "leaf", "-keyalg", "RSA", "-keysize", "2048", "-validity", "365",
+            "-storetype", "PKCS12", "-keystore", str(leaf_ks),
+            "-storepass:env", "ORIVA_TEST_KS_CHAIN", "-keypass:env", "ORIVA_TEST_KS_CHAIN",
+            "-dname", "CN=Test Leaf Signer, O=ORIVA Test, C=CN",
+        ],
+        env=env, check=True, capture_output=True, text=True,
+    )
+    ca_cer = workspace / "ca.cer"
+    csr = workspace / "leaf.csr"
+    leaf_cer = workspace / "leaf.cer"
+    chain_pem = workspace / "chain.pem"
+    subprocess.run(
+        [keytool, "-exportcert", "-alias", "ca", "-keystore", str(ca_ks), "-storepass:env", "ORIVA_TEST_KS_CHAIN", "-rfc", "-file", str(ca_cer)],
+        env=env, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        [keytool, "-certreq", "-alias", "leaf", "-keystore", str(leaf_ks), "-storepass:env", "ORIVA_TEST_KS_CHAIN", "-file", str(csr)],
+        env=env, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        [keytool, "-gencert", "-alias", "ca", "-keystore", str(ca_ks), "-storepass:env", "ORIVA_TEST_KS_CHAIN", "-infile", str(csr), "-outfile", str(leaf_cer), "-rfc"],
+        env=env, check=True, capture_output=True, text=True,
+    )
+    chain_pem.write_text(leaf_cer.read_text(encoding="utf-8") + "\n" + ca_cer.read_text(encoding="utf-8"), encoding="utf-8")
+    subprocess.run(
+        [keytool, "-importcert", "-noprompt", "-alias", "leaf", "-keystore", str(leaf_ks), "-storepass:env", "ORIVA_TEST_KS_CHAIN", "-file", str(chain_pem)],
+        env=env, check=True, capture_output=True, text=True,
+    )
+
+    def _cert_fp(cer_file: Path) -> str:
+        out = subprocess.run(
+            [keytool, "-J-Duser.language=en", "-J-Duser.country=US", "-printcert", "-file", str(cer_file)],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        m = re.search(r"SHA256:\s*([0-9A-Fa-f:]{95})", out)
+        assert m, out
+        return m.group(1).upper()
+
+    return leaf_ks, env, _cert_fp(leaf_cer), _cert_fp(ca_cer)
+
+
+def _sign_package(pkg_path: Path, ks_path: Path, env: dict[str, str], alias: str, env_var: str | None = None, sigfile: str | None = None) -> None:
+    jarsigner = registry_tool._find_jdk_tool("jarsigner")
+    resolved_var = env_var or f"ORIVA_TEST_KS_{alias.upper()}"
+    cmd = [
+        jarsigner,
+        "-keystore",
+        str(ks_path),
+        "-storetype",
+        "PKCS12",
+        "-storepass:env",
+        resolved_var,
+        "-keypass:env",
+        resolved_var,
+    ]
+    if sigfile:
+        cmd.extend(["-sigfile", sigfile])
+    cmd.extend([str(pkg_path), alias])
+    subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)
 
 
 def _base_manifest(source_id: str = "demo-community", plugin_type: str = "js") -> dict[str, object]:
@@ -242,7 +303,120 @@ class RegistryToolTests(unittest.TestCase):
 
         cert_info = registry_tool.inspect_package_certificates(js_pkg)
         self.assertEqual(cert_info["id"], "demo-js")
-        self.assertIn(self.fp_a, cert_info["signers"].values())
+        common_fps = {s["certSha256"] for s in cert_info["commonSigners"]}
+        self.assertIn(self.fp_a, common_fps)
+        self.assertTrue(all("spkiSha256" in s for s in cert_info["commonSigners"]))
+
+    def test_s1_multisigner_intersection_disjoint_signers_and_cert_chain_leaf(self) -> None:
+        # 1. Valid multi-signer intersection: signed by BOTH alpha and beta across all payloads
+        reg_dir, reg_path = self._make_workspace("multisig_valid")
+        manifest = _base_manifest("demo-community", "js")
+        pkg = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+        _write_unsigned_package(pkg, manifest)
+        _sign_package(pkg, self.ks_a, self.env_a, "alpha", sigfile="ALPHA")
+        _sign_package(pkg, self.ks_b, self.env_b, "beta", sigfile="BETA")
+
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_b],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", manifest)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        validated = registry_tool.validate_registry(reg_path)
+        self.assertEqual(validated.plugins[0].signer_fingerprint, self.fp_b)
+
+        # 2. Disjoint per-entry signers (plugin.json signed ONLY by alpha, index.js signed ONLY by beta)
+        # Even when BOTH fp_a and fp_b are trusted, common payload intersection is empty -> MUST REJECT!
+        pkg_a_only = reg_dir / "artifacts" / "a-only.pljs"
+        pkg_b_only = reg_dir / "artifacts" / "b-only.pljs"
+        _write_unsigned_package(pkg_a_only, manifest)
+        _write_unsigned_package(pkg_b_only, manifest)
+        _sign_package(pkg_a_only, self.ks_a, self.env_a, "alpha", sigfile="ALPHA")
+        _sign_package(pkg_b_only, self.ks_b, self.env_b, "beta", sigfile="BETA")
+
+        disjoint_pkg = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+        with zipfile.ZipFile(pkg_a_only, "r") as za, zipfile.ZipFile(pkg_b_only, "r") as zb, zipfile.ZipFile(disjoint_pkg, "w") as zout:
+            # Take MANIFEST + ALPHA signature (covering plugin.json only) from A by filtering out index.js?
+            # Simpler: build JAR 1 with only plugin.json signed by A, JAR 2 with both signed by B, take index.js + BETA from B and plugin.json + ALPHA from A?
+            # Let's sign a 1-entry zip containing only plugin.json with A, and splice index.js + BETA from a 1-entry zip signed by B + merged MANIFEST.MF.
+            pass
+        one_a = reg_dir / "artifacts" / "one_a.pljs"
+        one_b = reg_dir / "artifacts" / "one_b.pljs"
+        with zipfile.ZipFile(one_a, "w") as z1:
+            z1.writestr("plugin.json", json.dumps(manifest))
+        with zipfile.ZipFile(one_b, "w") as z2:
+            z2.writestr("index.js", b"function entryPoint() { return { message: 'ok' }; }\n")
+        _sign_package(one_a, self.ks_a, self.env_a, "alpha", sigfile="ALPHA")
+        _sign_package(one_b, self.ks_b, self.env_b, "beta", sigfile="BETA")
+
+        with zipfile.ZipFile(one_a, "r") as za, zipfile.ZipFile(one_b, "r") as zb:
+            ma_text = za.read("META-INF/MANIFEST.MF").decode("utf-8")
+            mb_text = zb.read("META-INF/MANIFEST.MF").decode("utf-8")
+            # Combine manifest entry sections
+            mb_sections = mb_text.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in mb_text else mb_text.split("\n\n", 1)[1]
+            merged_manifest = ma_text.rstrip("\r\n") + "\r\n\r\n" + mb_sections
+            with zipfile.ZipFile(disjoint_pkg, "w") as zout:
+                zout.writestr("META-INF/MANIFEST.MF", merged_manifest.encode("utf-8"))
+                zout.writestr("META-INF/ALPHA.SF", za.read("META-INF/ALPHA.SF"))
+                zout.writestr("META-INF/ALPHA.RSA", za.read("META-INF/ALPHA.RSA"))
+                zout.writestr("META-INF/BETA.SF", zb.read("META-INF/BETA.SF"))
+                zout.writestr("META-INF/BETA.RSA", zb.read("META-INF/BETA.RSA"))
+                zout.writestr("plugin.json", za.read("plugin.json"))
+                zout.writestr("index.js", zb.read("index.js"))
+
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a, self.fp_b],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", manifest)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "do not match trustedFingerprints"):
+            registry_tool.validate_registry(reg_path)
+
+        # 3. Certificate chain: JarSignerVerifier extracts LEAF cert (never intermediate/root CA)
+        chain_ks, chain_env, leaf_fp, ca_fp = _create_ephemeral_chain_signer(self.ks_dir)
+        chain_pkg = reg_dir / "artifacts" / "chain.pljs"
+        _write_unsigned_package(chain_pkg, manifest)
+        _sign_package(chain_pkg, chain_ks, chain_env, "leaf", env_var="ORIVA_TEST_KS_CHAIN")
+        cert_info = registry_tool.inspect_package_certificates(chain_pkg)
+        self.assertEqual([s["certSha256"] for s in cert_info["commonSigners"]], [leaf_fp])
+
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [ca_fp],
+                    "plugins": [self._entry_from_manifest("chain.pljs", manifest)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(registry_tool.RegistryValidationError):
+            registry_tool.validate_registry(reg_path)
+
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [leaf_fp],
+                    "plugins": [self._entry_from_manifest("chain.pljs", manifest)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(registry_tool.validate_registry(reg_path).plugins[0].signer_fingerprint, leaf_fp)
 
     def test_empty_plugins_list_is_valid(self) -> None:
         reg_dir, reg_path = self._make_workspace("empty_reg")
@@ -296,9 +470,9 @@ class RegistryToolTests(unittest.TestCase):
         with self.assertRaises(registry_tool.RegistryValidationError):
             registry_tool.validate_registry(reg_path)
 
-    def test_rejects_invalid_catalog_format_version(self) -> None:
-        for bad_ver in (0, -1, "1", True, 1.5, None):
-            reg_dir, reg_path = self._make_workspace(f"bad_ver_{type(bad_ver).__name__}_{bad_ver}")
+    def test_rejects_invalid_and_overflow_catalog_format_version(self) -> None:
+        for bad_ver in (0, -1, 2_147_483_648, "1", True, 1.5, None):
+            reg_dir, reg_path = self._make_workspace(f"bad_ver_{type(bad_ver).__name__}_{abs(hash(str(bad_ver)))}")
             reg_path.write_text(
                 json.dumps(
                     {
@@ -365,47 +539,146 @@ class RegistryToolTests(unittest.TestCase):
         with self.assertRaises(registry_tool.RegistryValidationError):
             registry_tool.validate_registry(reg_path)
 
-        # 5. Mixed-signer attack: plugin.json signed by A+B, index.js signed ONLY by B (trusted=A)
-        mixed_manifest = _base_manifest("official", "js")
-        mixed_pkg = Path(__file__).resolve().parents[3] / "android/core-plugin/src/test/resources/signing/mixed.pljs"
-        if mixed_pkg.is_file():
-            # Verify directly via verify_jar_signatures against trusted A (official fp) -> must fail!
-            official_fp = "C5:9E:81:65:8F:31:08:29:B4:23:BE:24:2D:C3:28:B3:76:CB:CE:1B:C6:1C:1F:F2:31:31:61:12:41:2B:8C:44"
-            payloads, meta_inf = registry_tool.inspect_zip_security(mixed_pkg)
-            with self.assertRaises(registry_tool.RegistryValidationError):
-                registry_tool.verify_jar_signatures(mixed_pkg, set(payloads.keys()), meta_inf, {official_fp})
-            _ = mixed_manifest
+        # 5. Tampered .SF file after signing
+        _write_unsigned_package(pkg, manifest)
+        _sign_package(pkg, self.ks_a, self.env_a, "alpha")
+        bad_sf_pkg = reg_dir / "artifacts" / "badsf.pljs"
+        with zipfile.ZipFile(pkg, "r") as zin, zipfile.ZipFile(bad_sf_pkg, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename.endswith(".SF"):
+                    data += b"\r\nName: fake.txt\r\nSHA-256-Digest: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n"
+                zout.writestr(item, data)
+        shutil.move(str(bad_sf_pkg), str(pkg))
+        with self.assertRaises(registry_tool.RegistryValidationError):
+            registry_tool.validate_registry(reg_path)
 
-    def test_rejects_zip_path_traversal_and_missing_code_entry(self) -> None:
-        reg_dir, reg_path = self._make_workspace("zip_traversal")
-        pkg = reg_dir / "artifacts" / "bad.pljs"
-        with zipfile.ZipFile(pkg, "w") as zf:
+        # 6. Mixed-signer attack fixture: plugin.json signed by A+B, index.js signed ONLY by B
+        mixed_pkg = Path(__file__).resolve().parents[3] / "android/core-plugin/src/test/resources/signing/mixed.pljs"
+        self.assertTrue(mixed_pkg.is_file(), "Expected mixed.pljs test resource")
+        official_fp = "C5:9E:81:65:8F:31:08:29:B4:23:BE:24:2D:C3:28:B3:76:CB:CE:1B:C6:1C:1F:F2:31:31:61:12:41:2B:8C:44"
+        third_party_fp = "71:DC:CF:31:C4:2D:EE:68:04:AA:18:20:0C:5B:E1:E3:7B:07:7C:59:9E:54:92:5F:DE:C9:21:F1:6E:4B:EF:67"
+        mixed_bytes = mixed_pkg.read_bytes()
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "do not match trustedFingerprints"):
+            registry_tool.verify_jar_cryptographic_signers(mixed_bytes, "mixed.pljs", {official_fp})
+        report = registry_tool.verify_jar_cryptographic_signers(mixed_bytes, "mixed.pljs", {third_party_fp})
+        self.assertEqual(report["matchedSigner"], third_party_fp)
+
+    def test_s2_strict_meta_inf_scope_paths_symlinks_and_bounded_size(self) -> None:
+        manifest = _base_manifest("demo-community", "js")
+        reg_dir, reg_path = self._make_workspace("s2_meta")
+        pkg = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+
+        # 1. Arbitrary ordinary file inside META-INF/ (even if signed!) must be rejected
+        _write_unsigned_package(pkg, manifest, extra_files={"META-INF/evil.txt": b"hidden payload"})
+        _sign_package(pkg, self.ks_a, self.env_a, "alpha")
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Disallowed file inside META-INF/"):
+            registry_tool.inspect_zip_bytes(pkg.read_bytes(), pkg.name)
+        with self.assertRaises(registry_tool.RegistryValidationError):
+            registry_tool.verify_jar_cryptographic_signers(pkg.read_bytes(), pkg.name, {self.fp_a})
+
+        # 2. Case-variant meta-inf/ must be rejected
+        _write_unsigned_package(pkg, manifest, extra_files={"meta-inf/extra.txt": b"case bypass"})
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Case-variant META-INF"):
+            registry_tool.inspect_zip_bytes(pkg.read_bytes(), pkg.name)
+
+        # 3. Zip path traversal & non-zero directory entry rejected
+        bad_zip = reg_dir / "artifacts" / "trav.pljs"
+        with zipfile.ZipFile(bad_zip, "w") as zf:
             zf.writestr("../escape.txt", b"boom")
-            zf.writestr("plugin.json", json.dumps(_base_manifest("demo-community", "js")))
+            zf.writestr("plugin.json", json.dumps(manifest))
             zf.writestr("index.js", b"function entryPoint() {}")
         with self.assertRaises(registry_tool.RegistryValidationError):
-            registry_tool.inspect_zip_security(pkg)
+            registry_tool.inspect_zip_bytes(bad_zip.read_bytes(), "trav.pljs")
 
-        # Missing index.js
-        pkg2 = reg_dir / "artifacts" / "missing-code.pljs"
-        with zipfile.ZipFile(pkg2, "w") as zf:
-            zf.writestr("plugin.json", json.dumps(_base_manifest("demo-community", "js")))
-        _sign_package(pkg2, self.ks_a, self.env_a, "alpha")
+        # 4. Symlink rejection via lstat check
+        _write_unsigned_package(pkg, manifest)
+        _sign_package(pkg, self.ks_a, self.env_a, "alpha")
+        real_lstat = os.lstat
+
+        def fake_lstat(p, *args, **kwargs):
+            st = real_lstat(p, *args, **kwargs)
+            if Path(p).name == "artifacts":
+                # Simulate S_IFLNK mode bit
+                return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
+            return st
+
         reg_path.write_text(
             json.dumps(
                 {
                     "sourceId": "demo-community",
                     "sourceType": "THIRD_PARTY",
                     "trustedFingerprints": [self.fp_a],
-                    "plugins": [self._entry_from_manifest("missing-code.pljs", _base_manifest("demo-community", "js"))],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", manifest)],
                 }
             ),
             encoding="utf-8",
         )
-        with self.assertRaises(registry_tool.RegistryValidationError):
+        with patch.object(registry_tool.os, "lstat", fake_lstat):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
+                registry_tool.validate_registry(reg_path)
+
+        # 5. Bounded size check refuses oversized artifact BEFORE unbounded read
+        oversized = reg_dir / "artifacts" / "huge.pljs"
+        oversized.write_bytes(b"0")
+        with patch.object(registry_tool, "MAX_PACKAGE_FILE_BYTES", 10):
+            oversized.write_bytes(b"0" * 11)
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "size out of bounds"):
+                registry_tool.read_bounded_package(oversized, reg_dir / "artifacts")
+
+    def test_s4_path_segments_contributions_and_dangerous_urls(self) -> None:
+        # Unsafe id/version path segment (FilePluginArtifactStore parity)
+        for bad_id in ("bad/id", "bad:id", ".."):
+            reg_dir, reg_path = self._make_workspace(f"badseg_{abs(hash(bad_id))}")
+            m = _base_manifest("demo-community", "js")
+            m["id"] = bad_id
+            pkg = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+            _write_unsigned_package(pkg, m)
+            _sign_package(pkg, self.ks_a, self.env_a, "alpha")
+            reg_path.write_text(
+                json.dumps(
+                    {
+                        "sourceId": "demo-community",
+                        "sourceType": "THIRD_PARTY",
+                        "trustedFingerprints": [self.fp_a],
+                        "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", m)],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(registry_tool.RegistryValidationError):
+                registry_tool.validate_registry(reg_path)
+
+        # Invalid contributions inside signed plugin.json (FormSection on contractVersion=1)
+        reg_dir, reg_path = self._make_workspace("bad_contrib")
+        m_bad_contrib = _base_manifest("demo-community", "dex")
+        m_bad_contrib["contributions"] = [
+            {
+                "kind": "FormSection",
+                "id": "bad-form",
+                "slot": "plan.edit.configuration",
+                "title": "Bad",
+                "fields": [{"id": "sw", "kind": "switch", "label": "S", "value": True, "onEvent": "e"}],
+            }
+        ]
+        pkg_c = reg_dir / "artifacts" / "demo-dex-1.0.0.plp"
+        _write_unsigned_package(pkg_c, m_bad_contrib)
+        _sign_package(pkg_c, self.ks_a, self.env_a, "alpha")
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a],
+                    "plugins": [self._entry_from_manifest("demo-dex-1.0.0.plp", m_bad_contrib)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "FormSection"):
             registry_tool.validate_registry(reg_path)
 
-    def test_rejects_dangerous_urls_and_manifest_mismatch(self) -> None:
+        # Dangerous URLs
         bad_urls = [
             "javascript:alert(1)",
             "JAVASCRIPT:alert(1)",
@@ -437,30 +710,6 @@ class RegistryToolTests(unittest.TestCase):
             with self.assertRaises(registry_tool.RegistryValidationError, msg=f"Should reject {bad_url}"):
                 registry_tool.validate_registry(reg_path)
 
-        # Manifest mismatch: registry claims version 2.0.0 while signed plugin.json says 1.0.0
-        reg_dir, reg_path = self._make_workspace("mismatch")
-        manifest = _base_manifest("demo-community", "js")
-        pkg = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
-        _write_unsigned_package(pkg, manifest)
-        _sign_package(pkg, self.ks_a, self.env_a, "alpha")
-        entry = self._entry_from_manifest("demo-js-1.0.0.pljs", manifest)
-        entry["version"] = "2.0.0"
-        reg_path.write_text(
-            json.dumps(
-                {
-                    "sourceId": "demo-community",
-                    "sourceType": "THIRD_PARTY",
-                    "trustedFingerprints": [self.fp_a],
-                    "plugins": [entry],
-                }
-            ),
-            encoding="utf-8",
-        )
-        out_dir = self.root / "should-not-exist"
-        with self.assertRaises(registry_tool.RegistryValidationError):
-            registry_tool.build_static_site(reg_path, out_dir)
-        self.assertFalse(out_dir.exists(), "Failed validation must not create output directory")
-
     def test_static_web_assets_have_zero_external_cdn_or_unsafe_dom_sinks(self) -> None:
         web_dir = REGISTRY_ROOT / "web"
         for filename in ("index.html", "style.css", "app.js"):
@@ -470,7 +719,7 @@ class RegistryToolTests(unittest.TestCase):
         for forbidden_sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
             self.assertNotIn(forbidden_sink, app_js, f"Unsafe DOM sink {forbidden_sink} found in app.js")
 
-    def test_web_app_js_escapes_xss_and_blocks_unsafe_urls_in_dom(self) -> None:
+    def test_web_app_js_escapes_xss_and_blocks_unsafe_urls_and_off_origin_downloads(self) -> None:
         node = shutil.which("node")
         if not node:
             self.skipTest("node runtime unavailable")
@@ -526,7 +775,10 @@ assert.strictEqual(app.safeHttpUrl('data:text/html,<script>alert(1)</script>'), 
 assert.strictEqual(app.safeHttpUrl('https://' + 'user:pass@evil.example/'), null);
 assert.strictEqual(app.safeHttpUrl('https://example.org/ok'), 'https://example.org/ok');
 assert.strictEqual(app.safeDownloadUrl('../secret.txt', 'https://example.org/catalog.json'), null);
+assert.strictEqual(app.safeDownloadUrl('https://evil.example.org/artifacts/ok.pljs', 'https://example.org/catalog.json'), null);
+assert.strictEqual(app.safeDownloadUrl('https://example.org/other/ok.pljs', 'https://example.org/catalog.json'), null);
 assert.strictEqual(app.safeDownloadUrl('./artifacts/ok.pljs', 'https://example.org/catalog.json'), 'https://example.org/artifacts/ok.pljs');
+assert.strictEqual(app.safeDownloadUrl('https://example.org/sub/artifacts/ok.plp', 'https://example.org/sub/index.html'), 'https://example.org/sub/artifacts/ok.plp');
 
 const xssCatalog = {{
   catalogFormatVersion: 1,

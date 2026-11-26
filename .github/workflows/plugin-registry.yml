@@ -24,21 +24,109 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout candidate tree
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Checkout trusted base verifier for pull requests
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: _trusted_verifier
+          persist-credentials: false
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: '21'
-      - name: Run plugin registry unit and adversarial tests
-        run: python3 -m unittest discover -s deploy/plugin-registry/tests -v
-      - name: Validate registry manifest and signed artifacts
-        run: python3 deploy/plugin-registry/registry_tool.py validate --registry deploy/plugin-registry/registry.json --json
+
+      - name: Resolve verifier root and audit governance changes
+        id: verifier
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+
+          event = os.environ["EVENT_NAME"]
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          trusted_dir = Path("_trusted_verifier/deploy/plugin-registry")
+          candidate_dir = Path("deploy/plugin-registry")
+
+          if event == "pull_request":
+              if (trusted_dir / "registry_tool.py").is_file() and (trusted_dir / "JarSignerVerifier.java").is_file():
+                  verifier_root = trusted_dir.resolve()
+                  trusted_source = f"trusted base ({os.environ['BASE_SHA'][:12]})"
+              else:
+                  verifier_root = candidate_dir.resolve()
+                  trusted_source = "bootstrap candidate (base lacks deploy/plugin-registry; maintainer review mandatory)"
+                  print("::warning::Bootstrap PR: base branch does not yet contain deploy/plugin-registry; maintainer audit required.")
+
+              changed = subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{os.environ['BASE_SHA']}...HEAD"],
+                  text=True,
+              ).splitlines()
+              privileged_prefixes = (
+                  ".github/workflows/plugin-registry.yml",
+                  "deploy/plugin-registry/registry_tool.py",
+                  "deploy/plugin-registry/JarSignerVerifier.java",
+                  "deploy/plugin-registry/web/",
+                  "deploy/plugin-registry/tests/",
+              )
+              privileged_hits = [p for p in changed if p == privileged_prefixes[0] or p.startswith(privileged_prefixes[1:])]
+
+              anchor_changed = False
+              base_reg = trusted_dir / "registry.json"
+              cand_reg = candidate_dir / "registry.json"
+              if base_reg.is_file() and cand_reg.is_file():
+                  b_doc = json.loads(base_reg.read_text(encoding="utf-8"))
+                  c_doc = json.loads(cand_reg.read_text(encoding="utf-8"))
+                  for key in ("trustedFingerprints", "sourceId", "sourceType", "catalogFormatVersion"):
+                      if b_doc.get(key) != c_doc.get(key):
+                          anchor_changed = True
+              elif cand_reg.is_file():
+                  anchor_changed = True
+
+              lines = [
+                  "### Plugin Registry Verification Governance",
+                  f"- Verifier source: `{trusted_source}`",
+                  f"- Privileged code/workflow files changed: `{len(privileged_hits)}`",
+                  f"- Trust anchor / source metadata changed: `{anchor_changed}`",
+              ]
+              if privileged_hits or anchor_changed:
+                  print("::warning::PR modifies privileged verifier/workflow/web files or trust anchors; CODEOWNERS maintainer approval required before merge.")
+                  lines.append("- **Action Required**: Maintainer / CODEOWNERS explicit approval required before merging.")
+                  for item in privileged_hits:
+                      lines.append(f"  - `{item}`")
+              summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          else:
+              verifier_root = candidate_dir.resolve()
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"root={verifier_root}\n")
+          PY
+
+      - name: Run plugin registry unit and adversarial tests (from trusted verifier)
+        run: python3 -m unittest discover -s "${{ steps.verifier.outputs.root }}/tests" -v
+
+      - name: Validate candidate registry manifest and signed artifacts
+        run: python3 "${{ steps.verifier.outputs.root }}/registry_tool.py" validate --registry deploy/plugin-registry/registry.json --json
+
       - name: Build deterministic static plugin registry site
-        run: python3 deploy/plugin-registry/registry_tool.py build --registry deploy/plugin-registry/registry.json --output deploy/plugin-registry/dist --clean
+        run: python3 "${{ steps.verifier.outputs.root }}/registry_tool.py" build --registry deploy/plugin-registry/registry.json --web-dir "${{ steps.verifier.outputs.root }}/web" --output deploy/plugin-registry/dist --clean
+
       - name: Verify generated SHA256SUMS
         working-directory: deploy/plugin-registry/dist
         run: sha256sum -c SHA256SUMS
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload preview static site artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: plugin-registry-site
           path: deploy/plugin-registry/dist/

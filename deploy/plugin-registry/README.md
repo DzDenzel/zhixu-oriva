@@ -8,7 +8,8 @@
 
 ```text
 deploy/plugin-registry/
-├── registry_tool.py          # 校验与确定性静态生成 CLI（Python 3 标准库 + JDK jarsigner/keytool）
+├── registry_tool.py          # 校验与确定性静态生成 CLI（Python 3 标准库 + JDK JarSignerVerifier）
+├── JarSignerVerifier.java    # JDK JarFile(file, true) 逐条目真实签名者与公钥 SPKI 核验器
 ├── registry.json             # 源清单（Morphology A 输入：含 sourceId / trustedFingerprints / 插件列表）
 ├── artifacts/                # 已签名的 .pljs / .plp 插件包
 ├── web/                      # 墨序（ORIVA Ink）纯静态零外链展示站点前端（index.html / style.css / app.js）
@@ -19,14 +20,16 @@ deploy/plugin-registry/
 ## 前置环境
 
 - Python 3.10+（仅使用标准库）
-- JDK 17+（需要 `jarsigner` 与 `keytool`，在 `PATH` 或 `JAVA_HOME/bin` 中可用）
+- JDK 17+（需要 `java` 运行 `JarSignerVerifier.java`，以及在生成/签发测试包时使用 `jarsigner` / `keytool`，在 `PATH` 或 `JAVA_HOME/bin` 中可用）
 
 ## 一、提交新插件的 PR 流程
 
 1. **打包插件**：
    - JS 插件（`type: "js"`）：`contractVersion` 须为 `2`，ZIP 根目录须包含 `plugin.json` 与 `index.js`，`entryPoint` 须为合法 JS 函数名。
    - DEX 插件（`type: "dex"`）：ZIP 根目录须包含 `plugin.json` 与有效的 `classes.dex`。
+   - `id` 与 `version` 须符合客户端落盘路径段白名单（`[A-Za-z0-9._-]+`，且不为 `.` 或 `..`）。
    - 包内 `plugin.json` 的 `sourceId` 必须与目标源 `registry.json` 的 `sourceId` 一致，且 `sourceType` 必须为 `"THIRD_PARTY"`（禁止冒用保留 ID `official` / `third-party`）。
+   - 严禁在 `META-INF/` 下放置除 `MANIFEST.MF` 与配对 `*.SF` / `*.(RSA|DSA|EC)` 之外的普通文件，且 `META-INF/` 须严格大写。
 2. **使用作者签名证书签名（本地私钥绝不入库）**：
    ```sh
    # 生成签名证书（若已有签名密钥库可跳过）
@@ -40,9 +43,10 @@ deploy/plugin-registry/
    ```sh
    python3 deploy/plugin-registry/registry_tool.py inspect-cert --package deploy/plugin-registry/artifacts/my-plugin-1.0.0.pljs
    ```
-   将签名包放入 `deploy/plugin-registry/artifacts/`（严禁提交 `.p12` / `.jks` / `.keystore` / `.pem` / `.key` 等私钥文件），并在 `registry.json` 中登记插件条目（`trustedFingerprints` 须包含签名证书 SHA-256 指纹）。
-4. **登记可选安全元数据（W3）**：
-   - 支持可选 `author`、`license`（纯文本 ≤ 200 字符，无控制字符）及 `homepage`、`repository`（仅限 `http://` 或 `https://`，禁止 `javascript:` / `data:` / `file:` / 内嵌凭据）。
+   将签名包放入 `deploy/plugin-registry/artifacts/`（严禁提交 `.p12` / `.jks` / `.keystore` / `.pem` / `.key` 等私钥文件），并在 `registry.json` 中登记插件条目（`trustedFingerprints` 须包含全负载共签叶证书 SHA-256 指纹）。
+4. **字段对齐与目录编辑权规则（W3）**：
+   - **强对齐核心字段**：`id`、`name`、`version`、`contractVersion`（`1..2147483647`）、`type`、`entryPoint`、`requiredCapabilities`、`sourceId`、`sourceType` 必须与签名包内 `plugin.json` 完全一致。
+   - **`description` 与可选元数据**：`description` 在目录和签名包内各自校验（无控制字符），`registry.json` 中的 `description` 用于下载前目录展示（安装后详情页仍以已验签包内 `plugin.json` 为准）；可选元数据 `author`、`license`（纯文本 ≤ 200 字符，无控制字符）及 `homepage`、`repository`（仅限 `http://` 或 `https://`，禁止 `javascript:` / `data:` / `file:` / 内嵌凭据）可在 `registry.json` 中为既有旧包补充或省略，若目录与签名包内同时提供非空值则必须一致。
 
 ## 二、本地校验与静态站构建
 
@@ -71,8 +75,11 @@ python3 -m http.server 8080 --directory deploy/plugin-registry/dist
    - **来源 ID**：填入站点显示的 `sourceId`（配置信任锚时必填，须与目录及签名包一致）；
    - **信任锚指纹**：粘贴站点显示的 64 位 SHA-256 指纹（若留空，客户端仅允许浏览发现目录，绝不会跳过签名校验安装）。
 
-## 四、CI 自动校验
+## 四、CI 自动校验与仓库保护门禁（S3）
 
-`.github/workflows/plugin-registry.yml` 使用最小权限（`permissions: contents: read`）：
-- PR 修改 `deploy/plugin-registry/**` 时自动运行全量单测、`validate` 与 `build` 干跑，校验 `SHA256SUMS`，并上传 `plugin-registry-site` 预览产物；
-- 任何 ZIP 路径穿越、未签名/篡改/错证书/混签包、保留 `sourceId`、危险 URL 或清单字段不一致均直接失败阻断合并。
+`.github/workflows/plugin-registry.yml` 固定全部 Action 到完整 40 位官方提交 SHA、禁用 `persist-credentials` 并保持最小权限（`permissions: contents: read`）：
+- **可信校验基线**：对 `pull_request` 事件，工作流从受保护的 `github.event.pull_request.base.sha` 检出 `_trusted_verifier/`，使用**基线提交中的校验器、Java 验签助手与测试**去验证 PR 提交的 `registry.json` 与 `.plp`/`.pljs`，避免 PR 通过自改校验代码批准自己。
+- **高敏感变更告警与人工审批门禁**：若 PR 修改了 `.github/workflows/plugin-registry.yml`、`registry_tool.py`、`JarSignerVerifier.java`、`web/`、`tests/` 或变更了 `trustedFingerprints`/`sourceId`/`sourceType`/`catalogFormatVersion`，工作流会在 Summary 与 Annotations 中显式发出 **CODEOWNERS / 维护者人工审批告警**。
+- **仓库维护者必配分支保护**：启用托管时须在 GitHub Repository Settings → Rulesets / Branch Protection 为 `main` 开启：
+  1. Require status check `validate-and-build` to pass；
+  2. Require pull request reviews before merging + Require review from Code Owners（将 `.github/workflows/plugin-registry.yml` 与 `deploy/plugin-registry/` 纳入 `CODEOWNERS`），确保新增信任锚与校验器修改必须由维护者显式批准。

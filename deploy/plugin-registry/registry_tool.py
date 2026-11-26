@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """ORIVA open plugin registry validator and deterministic static site builder.
 
-Uses Python 3 standard library plus JDK `jarsigner` and `keytool` (invoked
-without a shell and with bounded timeouts). Implements Morphology B catalog
-output compatible with `PluginCatalogCodec` and `PluginSourcePolicy`.
+Uses Python 3 standard library plus JDK `java` executing `JarSignerVerifier.java`
+(JarFile(file, true) cryptographic per-entry CodeSigner verification aligned with
+Android `SignedJarPluginPackageVerifier`). Implements Morphology B catalog output
+compatible with `PluginCatalogCodec` and `PluginSourcePolicy`.
 """
 
 from __future__ import annotations
@@ -11,11 +12,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import io
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +26,7 @@ import urllib.parse
 import zipfile
 
 CURRENT_PLUGIN_CONTRACT_VERSION = 2
+MAX_JAVA_INT = 2_147_483_647
 RESERVED_SOURCE_IDS = frozenset({"official", "third-party"})
 VALID_CAPABILITIES = frozenset(
     {
@@ -40,31 +44,35 @@ VALID_CAPABILITIES = frozenset(
         "QUERY_REPORT",
     }
 )
+SYSTEM_CAPABILITIES = frozenset(
+    {"USAGE_STATS", "ACCESSIBILITY", "DND", "NOTIFICATIONS", "LOCATION"}
+)
 VALID_PLUGIN_TYPES = frozenset({"dex", "js"})
+REGISTERED_SLOTS = frozenset({"plan.detail.protection", "plan.edit.configuration"})
+CONTRIBUTION_TONES = frozenset({"neutral", "active", "warn"})
+CONTRIBUTION_INPUTS = frozenset({"NONE", "APPLICATION_SINGLE"})
 
 SOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+SAFE_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 ARTIFACT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 JS_ENTRY_PATTERN = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 HEX64_PATTERN = re.compile(r"^[0-9A-F]{64}$")
+META_SIG_PATTERN = re.compile(r"^META-INF/([A-Za-z0-9_-]{1,64})\.(SF|RSA|DSA|EC)$")
 
 MAX_ARCHIVE_MEMBERS = 2048
 MAX_ENTRY_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 MAX_PACKAGE_FILE_BYTES = 25 * 1024 * 1024
+READ_CHUNK_BYTES = 256 * 1024
 MAX_TEXT_METADATA_LEN = 200
 MAX_URL_LEN = 2048
 TOOL_TIMEOUT_SECONDS = 30
 
-JARSIGNER_ENTRY_LINE = re.compile(
-    r"^\s*([smkiXa]+)\s+(\d+)\s+[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\S+\s+\d{4}\s+(.+?)\r?$"
-)
-KEYTOOL_SHA256_LINE = re.compile(r"SHA256:\s*([0-9A-Fa-f:]{95}|[0-9A-Fa-f]{64})")
-SIG_BLOCK_PATTERN = re.compile(r"^META-INF/(.+)\.(RSA|DSA|EC)$", re.IGNORECASE)
-SF_FILE_PATTERN = re.compile(r"^META-INF/(.+)\.SF$", re.IGNORECASE)
+VERIFIER_JAVA_PATH = Path(__file__).resolve().with_name("JarSignerVerifier.java")
 
 
 class RegistryValidationError(ValueError):
-    """Raised when registry metadata, URLs, archives, or signatures fail validation."""
+    """Raised when registry metadata, URLs, paths, archives, or signatures fail validation."""
 
 
 @dataclass(frozen=True)
@@ -78,9 +86,9 @@ class ValidatedPlugin:
     required_capabilities: tuple[str, ...]
     description: str
     artifact: str
-    artifact_path: Path
     sha256: str
     signer_fingerprint: str
+    verified_bytes: bytes
     author: str | None
     homepage: str | None
     repository: str | None
@@ -146,11 +154,16 @@ def has_control_chars(value: str) -> bool:
     return any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value)
 
 
-def require_strict_int(value: object, field: str, minimum: int = 1) -> int:
+def require_strict_int(
+    value: object,
+    field: str,
+    minimum: int = 1,
+    maximum: int = MAX_JAVA_INT,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise RegistryValidationError(f"{field} must be a JSON integer, not {type(value).__name__}")
-    if value < minimum:
-        raise RegistryValidationError(f"{field} must be >= {minimum}, got {value}")
+    if value < minimum or value > maximum:
+        raise RegistryValidationError(f"{field} must be in {minimum}..{maximum}, got {value}")
     return value
 
 
@@ -161,6 +174,15 @@ def require_non_blank_str(obj: dict[str, object], field: str) -> str:
     if has_control_chars(value):
         raise RegistryValidationError(f"Control characters are not allowed in {field}")
     return value.strip()
+
+
+def validate_path_segment(value: str, field: str) -> str:
+    """Enforce FilePluginArtifactStore.safeSegment() rules for id and version."""
+    if value in {".", ".."} or not SAFE_SEGMENT_PATTERN.fullmatch(value):
+        raise RegistryValidationError(
+            f"{field} contains unsafe path characters (must match [A-Za-z0-9._-]+ and not be '.'/'..'): {value!r}"
+        )
+    return value
 
 
 def sanitize_optional_text(
@@ -195,10 +217,9 @@ def validate_http_url(raw: object, field: str) -> str | None:
         raise RegistryValidationError(f"Unsafe URL scheme for {field}: only http:// and https:// are allowed")
     try:
         parsed = urllib.parse.urlsplit(trimmed)
-        port = parsed.port
+        _ = parsed.port
     except ValueError as exc:
         raise RegistryValidationError(f"Malformed URL for {field}: {exc}") from exc
-    _ = port
     scheme = (parsed.scheme or "").lower()
     if scheme not in {"http", "https"}:
         raise RegistryValidationError(f"Unsafe URL scheme for {field}")
@@ -241,6 +262,77 @@ def validate_artifact_name(raw: object) -> str:
     return raw
 
 
+def _lstat_no_symlink(path: Path, label: str) -> os.stat_result:
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise RegistryValidationError(f"{label} is not accessible: {exc}") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise RegistryValidationError(f"Symbolic link is forbidden for {label}: {path.name}")
+    return st
+
+
+def ensure_no_symlinks_to(target: Path, anchor: Path) -> None:
+    """Verify anchor and every path segment from anchor to target are non-symlinks."""
+    _lstat_no_symlink(anchor, "trusted root")
+    try:
+        rel = target.relative_to(anchor)
+    except ValueError as exc:
+        raise RegistryValidationError(f"Path escapes trusted root: {target.name}") from exc
+    current = anchor
+    for part in rel.parts:
+        current = current / part
+        _lstat_no_symlink(current, f"path segment '{part}'")
+    real_anchor = os.path.realpath(anchor)
+    real_target = os.path.realpath(target)
+    if os.path.commonpath([real_anchor, real_target]) != real_anchor:
+        raise RegistryValidationError(f"Real path escapes trusted root: {target.name}")
+
+
+def read_bounded_package(artifact_path: Path, artifacts_dir: Path) -> tuple[bytes, str]:
+    """Read a non-symlink artifact once within MAX_PACKAGE_FILE_BYTES and compute SHA-256."""
+    ensure_no_symlinks_to(artifact_path, artifacts_dir)
+    st = _lstat_no_symlink(artifact_path, f"artifact {artifact_path.name}")
+    if not stat.S_ISREG(st.st_mode):
+        raise RegistryValidationError(f"Artifact is not a regular file: {artifact_path.name}")
+    if st.st_size <= 0 or st.st_size > MAX_PACKAGE_FILE_BYTES:
+        raise RegistryValidationError(
+            f"Artifact size out of bounds (1..{MAX_PACKAGE_FILE_BYTES} bytes): {artifact_path.name}"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(artifact_path, flags)
+    except OSError as exc:
+        raise RegistryValidationError(f"Cannot open artifact {artifact_path.name}: {exc}") from exc
+
+    hasher = hashlib.sha256()
+    buf = bytearray()
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > MAX_PACKAGE_FILE_BYTES:
+            raise RegistryValidationError(f"Artifact descriptor invalid or oversized: {artifact_path.name}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1  # owned by stream now
+            while True:
+                chunk = stream.read(READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if len(buf) + len(chunk) > MAX_PACKAGE_FILE_BYTES:
+                    raise RegistryValidationError(
+                        f"Artifact stream exceeded maximum size ({MAX_PACKAGE_FILE_BYTES} bytes): {artifact_path.name}"
+                    )
+                buf.extend(chunk)
+                hasher.update(chunk)
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+    if not buf:
+        raise RegistryValidationError(f"Artifact file is empty: {artifact_path.name}")
+    return bytes(buf), hasher.hexdigest().upper()
+
+
 def _find_jdk_tool(name: str) -> str:
     found = shutil.which(name)
     if found:
@@ -254,7 +346,7 @@ def _find_jdk_tool(name: str) -> str:
     raise RegistryValidationError(f"Required JDK tool '{name}' not found on PATH or in JAVA_HOME")
 
 
-def _run_jdk_tool(args: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_tool(args: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             args,
@@ -267,26 +359,24 @@ def _run_jdk_tool(args: list[str]) -> subprocess.CompletedProcess[str]:
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RegistryValidationError(f"JDK tool timed out: {Path(args[0]).name}") from exc
+        raise RegistryValidationError(f"JDK verifier timed out after {TOOL_TIMEOUT_SECONDS}s") from exc
 
 
-def inspect_zip_security(pkg_path: Path) -> tuple[dict[str, bytes], dict[str, bytes]]:
-    """Verify ZIP member safety and extract payload & META-INF entries."""
-    if not pkg_path.is_file():
-        raise RegistryValidationError(f"Artifact file does not exist: {pkg_path.name}")
-    if pkg_path.stat().st_size > MAX_PACKAGE_FILE_BYTES:
-        raise RegistryValidationError(f"Artifact exceeds maximum size ({MAX_PACKAGE_FILE_BYTES} bytes): {pkg_path.name}")
-
+def inspect_zip_bytes(pkg_bytes: bytes, label: str) -> dict[str, bytes]:
+    """Validate raw ZIP structure, strict uppercase META-INF scope, and bounded payload extraction."""
     payload_entries: dict[str, bytes] = {}
-    meta_inf_entries: dict[str, bytes] = {}
     seen_names: set[str] = set()
+    sf_aliases: set[str] = set()
+    sig_aliases: set[str] = set()
+    ci_aliases: set[str] = set()
+    has_manifest = False
     total_uncompressed = 0
 
     try:
-        with zipfile.ZipFile(pkg_path, "r") as zf:
+        with zipfile.ZipFile(io.BytesIO(pkg_bytes), "r") as zf:
             infos = zf.infolist()
             if len(infos) > MAX_ARCHIVE_MEMBERS:
-                raise RegistryValidationError(f"Archive has too many entries ({len(infos)}): {pkg_path.name}")
+                raise RegistryValidationError(f"Archive has too many entries ({len(infos)}): {label}")
 
             for info in infos:
                 name = info.filename
@@ -299,15 +389,23 @@ def inspect_zip_security(pkg_path: Path) -> tuple[dict[str, bytes], dict[str, by
                 if unix_mode == 0o120000:
                     raise RegistryValidationError(f"Symbolic link entry forbidden in archive: {name!r}")
 
-                posix = PurePosixPath(name)
-                if ".." in posix.parts:
-                    raise RegistryValidationError(f"Path traversal entry forbidden in archive: {name!r}")
+                trimmed = name[:-1] if name.endswith("/") else name
+                parts = trimmed.split("/")
+                if any(part in {"", ".", ".."} for part in parts):
+                    raise RegistryValidationError(f"Unsafe or traversal path segment in archive: {name!r}")
 
                 if name in seen_names:
                     raise RegistryValidationError(f"Duplicate archive entry: {name!r}")
                 seen_names.add(name)
 
                 if info.is_dir():
+                    if name.lower().startswith("meta-inf/") and not name.startswith("META-INF/"):
+                        raise RegistryValidationError(f"Case-variant META-INF directory forbidden: {name!r}")
+                    if info.file_size > 0 or info.compress_size > 0:
+                        raise RegistryValidationError(f"Directory entry has non-zero size: {name!r}")
+                    with zf.open(info, "r") as dstream:
+                        if dstream.read(1):
+                            raise RegistryValidationError(f"Directory entry contains payload bytes: {name!r}")
                     continue
 
                 if info.file_size > MAX_ENTRY_BYTES:
@@ -319,124 +417,76 @@ def inspect_zip_security(pkg_path: Path) -> tuple[dict[str, bytes], dict[str, by
                     raise RegistryValidationError(f"Archive entry actual stream exceeds size limit: {name!r}")
                 total_uncompressed += len(data)
                 if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES:
-                    raise RegistryValidationError(f"Archive exceeds total uncompressed limit: {pkg_path.name}")
+                    raise RegistryValidationError(f"Archive exceeds total uncompressed limit: {label}")
 
-                if name.upper().startswith("META-INF/"):
-                    meta_inf_entries[name] = data
+                if name.lower().startswith("meta-inf/"):
+                    if not name.startswith("META-INF/"):
+                        raise RegistryValidationError(f"Case-variant META-INF entry forbidden: {name!r}")
+                    if name == "META-INF/MANIFEST.MF":
+                        has_manifest = True
+                    else:
+                        sig_match = META_SIG_PATTERN.fullmatch(name)
+                        if not sig_match:
+                            raise RegistryValidationError(f"Disallowed file inside META-INF/: {name!r}")
+                        alias, ext = sig_match.groups()
+                        if ext == "SF":
+                            sf_aliases.add(alias)
+                        else:
+                            if alias in sig_aliases:
+                                raise RegistryValidationError(f"Duplicate signature block for alias: {alias!r}")
+                            sig_aliases.add(alias)
+                        ci_aliases.add(alias.upper())
                 else:
                     if not data:
                         raise RegistryValidationError(f"Empty signed payload entry is forbidden: {name!r}")
                     payload_entries[name] = data
     except zipfile.BadZipFile as exc:
-        raise RegistryValidationError(f"Corrupt or non-ZIP plugin archive {pkg_path.name}: {exc}") from exc
+        raise RegistryValidationError(f"Corrupt or non-ZIP plugin archive {label}: {exc}") from exc
 
+    if not has_manifest:
+        raise RegistryValidationError(f"Plugin package {label} is missing META-INF/MANIFEST.MF")
+    if not sf_aliases or sf_aliases != sig_aliases or len(ci_aliases) != len(sf_aliases):
+        raise RegistryValidationError(f"Plugin package {label} has mismatched or missing META-INF signature pairs")
     if "plugin.json" not in payload_entries:
-        raise RegistryValidationError(f"Plugin package {pkg_path.name} is missing plugin.json")
+        raise RegistryValidationError(f"Plugin package {label} is missing plugin.json")
 
-    return payload_entries, meta_inf_entries
-
-
-def _parse_sf_covered_entries(sf_bytes: bytes) -> set[str]:
-    text = sf_bytes.decode("utf-8", errors="strict")
-    # Unfold RFC-822 manifest continuation lines ("\r\n " or "\n ").
-    unfolded = text.replace("\r\n ", "").replace("\n ", "")
-    sections = re.split(r"\r?\n\r?\n+", unfolded.strip())
-    covered: set[str] = set()
-    for section in sections[1:]:
-        for line in section.splitlines():
-            if line.startswith("Name: "):
-                covered.add(line[6:].strip())
-    return covered
+    return payload_entries
 
 
-def _extract_leaf_cert_fingerprint(sig_block_bytes: bytes, keytool_bin: str) -> str:
-    with tempfile.TemporaryDirectory(prefix="oriva-cert-") as tmp_dir:
-        sig_path = Path(tmp_dir) / "SIGNER.RSA"
-        sig_path.write_bytes(sig_block_bytes)
-        proc = _run_jdk_tool(
-            [keytool_bin, "-J-Duser.language=en", "-J-Duser.country=US", "-printcert", "-file", str(sig_path)]
-        )
+def verify_jar_cryptographic_signers(
+    pkg_bytes: bytes,
+    label: str,
+    trusted_fingerprints: set[str] | None = None,
+) -> dict[str, object]:
+    """Run JDK JarFile(file, true) verifier over the exact verified bytes and match trusted anchors."""
+    if not VERIFIER_JAVA_PATH.is_file():
+        raise RegistryValidationError(f"Missing JarSignerVerifier helper: {VERIFIER_JAVA_PATH}")
+    java_bin = _find_jdk_tool("java")
+
+    with tempfile.TemporaryDirectory(prefix="oriva-jar-verify-") as tmp_dir:
+        tmp_pkg = Path(tmp_dir) / "package.jar"
+        tmp_pkg.write_bytes(pkg_bytes)
+        proc = _run_tool([java_bin, str(VERIFIER_JAVA_PATH), str(tmp_pkg)])
+
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()
-        raise RegistryValidationError(f"Cannot parse JAR signature certificate: {detail}")
-    match = KEYTOOL_SHA256_LINE.search(proc.stdout)
-    if not match:
-        raise RegistryValidationError("Certificate SHA-256 fingerprint missing from keytool output")
-    return normalize_fingerprint(match.group(1))
+        raise RegistryValidationError(f"Cryptographic JAR verification failed for {label}: {detail}")
 
+    try:
+        report = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RegistryValidationError(f"Invalid verifier output for {label}: {exc}") from exc
 
-def _parse_jarsigner_entries(stdout: str) -> dict[str, str]:
-    entries: dict[str, str] = {}
-    for line in stdout.splitlines():
-        match = JARSIGNER_ENTRY_LINE.match(line)
-        if match:
-            flags, _size, entry_name = match.groups()
-            entries[entry_name] = flags
-    return entries
-
-
-def verify_jar_signatures(
-    pkg_path: Path,
-    payload_names: set[str],
-    meta_inf_entries: dict[str, bytes],
-    trusted_fingerprints: set[str],
-) -> str:
-    """Verify JAR signatures via JDK tools and match signer intersection to trusted anchors."""
-    jarsigner_bin = _find_jdk_tool("jarsigner")
-    keytool_bin = _find_jdk_tool("keytool")
-
-    sf_by_alias: dict[str, bytes] = {}
-    sig_by_alias: dict[str, bytes] = {}
-    for name, data in meta_inf_entries.items():
-        sf_match = SF_FILE_PATTERN.fullmatch(name)
-        if sf_match:
-            sf_by_alias[sf_match.group(1).upper()] = data
-            continue
-        sig_match = SIG_BLOCK_PATTERN.fullmatch(name)
-        if sig_match:
-            sig_by_alias[sig_match.group(1).upper()] = data
-
-    common_aliases = sorted(set(sf_by_alias) & set(sig_by_alias))
-    if not common_aliases:
-        raise RegistryValidationError(f"Plugin package {pkg_path.name} has no valid META-INF signature block")
-
-    proc = _run_jdk_tool(
-        [jarsigner_bin, "-J-Duser.language=en", "-J-Duser.country=US", "-verify", "-verbose", "-certs", str(pkg_path)]
-    )
-    combined = proc.stdout + "\n" + proc.stderr
-    if proc.returncode != 0 or "jar verified." not in proc.stdout or "jar is unsigned" in combined.lower():
-        raise RegistryValidationError(f"JAR signature verification failed for {pkg_path.name}: {combined.strip()}")
-
-    verified_entries = _parse_jarsigner_entries(proc.stdout)
-    for payload_name in sorted(payload_names):
-        flags = verified_entries.get(payload_name)
-        if not flags or "s" not in flags or "m" not in flags or "i" in flags or "X" in flags:
+    common_signers = report.get("commonSigners", [])
+    if trusted_fingerprints is not None:
+        common_fps = {normalize_fingerprint(s["certSha256"]) for s in common_signers}
+        matched = sorted(common_fps & trusted_fingerprints)
+        if not matched:
             raise RegistryValidationError(
-                f"Payload entry {payload_name!r} in {pkg_path.name} is not fully signed and manifest-verified (flags={flags!r})"
+                f"Plugin package {label} common payload signer(s) {sorted(common_fps)} do not match trustedFingerprints"
             )
-
-    signers_per_entry: dict[str, set[str]] = {name: set() for name in payload_names}
-    for alias in common_aliases:
-        fp = _extract_leaf_cert_fingerprint(sig_by_alias[alias], keytool_bin)
-        covered = _parse_sf_covered_entries(sf_by_alias[alias])
-        for entry_name in payload_names:
-            if entry_name in covered:
-                signers_per_entry[entry_name].add(fp)
-
-    common_signers: set[str] | None = None
-    for entry_name in sorted(payload_names):
-        entry_signers = signers_per_entry[entry_name]
-        if not entry_signers:
-            raise RegistryValidationError(f"Unsigned plugin payload entry {entry_name!r} in {pkg_path.name}")
-        common_signers = entry_signers if common_signers is None else (common_signers & entry_signers)
-
-    assert common_signers is not None
-    matched = sorted(common_signers & trusted_fingerprints)
-    if not matched:
-        raise RegistryValidationError(
-            f"Plugin package {pkg_path.name} signer(s) {sorted(common_signers)} do not match trustedFingerprints"
-        )
-    return matched[0]
+        report["matchedSigner"] = matched[0]
+    return report
 
 
 def _validate_capabilities(raw: object, field: str = "requiredCapabilities") -> tuple[str, ...]:
@@ -472,6 +522,110 @@ def _validate_plugin_type_and_contract(
     return plugin_type
 
 
+def validate_contributions(
+    raw_contributions: object,
+    contract_version: int,
+    declared_capabilities: set[str],
+) -> None:
+    """Validate optional manifest contributions aligned with Android PluginContribution.kt."""
+    if raw_contributions is None:
+        return
+    if not isinstance(raw_contributions, list):
+        raise RegistryValidationError("plugin.json contributions must be a JSON array")
+
+    contrib_ids: set[str] = set()
+    field_ids: set[str] = set()
+
+    for idx, item in enumerate(raw_contributions):
+        if not isinstance(item, dict):
+            raise RegistryValidationError(f"contributions[{idx}] must be a JSON object")
+        cid = require_non_blank_str(item, "id")
+        if cid in contrib_ids:
+            raise RegistryValidationError(f"Duplicate contribution id: {cid!r}")
+        contrib_ids.add(cid)
+
+        slot = item.get("slot")
+        if not isinstance(slot, str) or slot not in REGISTERED_SLOTS:
+            raise RegistryValidationError(f"Unsupported contribution slot: {slot!r}")
+
+        shape_version = item.get("shapeVersion", 1)
+        if require_strict_int(shape_version, f"contributions[{cid}].shapeVersion") != 1:
+            raise RegistryValidationError(f"Unsupported contribution shapeVersion: {shape_version!r}")
+
+        kind = item.get("kind")
+        if kind == "FormSection":
+            if contract_version < 2 or slot != "plan.edit.configuration":
+                raise RegistryValidationError(f"FormSection {cid!r} requires contractVersion >= 2 and plan.edit.configuration slot")
+            require_non_blank_str(item, "title")
+            fields = item.get("fields")
+            if not isinstance(fields, list) or not fields or len(fields) > 32:
+                raise RegistryValidationError(f"FormSection {cid!r} must define 1..32 fields")
+            local_field_ids: set[str] = set()
+            for field in fields:
+                if not isinstance(field, dict):
+                    raise RegistryValidationError(f"FormSection {cid!r} field must be an object")
+                fid = require_non_blank_str(field, "id")
+                if fid in local_field_ids or fid in field_ids:
+                    raise RegistryValidationError(f"Duplicate plugin form field: {fid!r}")
+                local_field_ids.add(fid)
+                field_ids.add(fid)
+                require_non_blank_str(field, "label")
+                require_non_blank_str(field, "onEvent")
+                fkind = field.get("kind")
+                fval = field.get("value")
+                if fkind == "switch":
+                    if not isinstance(fval, bool):
+                        raise RegistryValidationError(f"Invalid switch value in form field {fid!r}")
+                elif fkind == "text":
+                    if not isinstance(fval, str) or len(fval) > 4096:
+                        raise RegistryValidationError(f"Invalid text value in form field {fid!r}")
+                elif fkind == "choice":
+                    options = field.get("options")
+                    if not isinstance(fval, str) or not isinstance(options, list) or not options or len(options) > 64:
+                        raise RegistryValidationError(f"Invalid choice options in form field {fid!r}")
+                    opt_values: set[str] = set()
+                    for opt in options:
+                        if not isinstance(opt, dict):
+                            raise RegistryValidationError(f"Invalid choice option in form field {fid!r}")
+                        oval = require_non_blank_str(opt, "value")
+                        require_non_blank_str(opt, "label")
+                        if oval in opt_values:
+                            raise RegistryValidationError(f"Duplicate choice option value {oval!r} in {fid!r}")
+                        opt_values.add(oval)
+                    if fval not in opt_values:
+                        raise RegistryValidationError(f"Choice default value {fval!r} missing from options in {fid!r}")
+                else:
+                    raise RegistryValidationError(f"Invalid form field kind {fkind!r} in {fid!r}")
+
+        elif kind == "StatusLine":
+            require_non_blank_str(item, "text")
+            tone = item.get("tone", "neutral")
+            if not isinstance(tone, str) or tone not in CONTRIBUTION_TONES:
+                raise RegistryValidationError(f"Unsupported StatusLine tone: {tone!r}")
+            req_cap = item.get("requiresCapability")
+            if req_cap is not None:
+                if not isinstance(req_cap, str) or req_cap not in SYSTEM_CAPABILITIES or req_cap not in declared_capabilities:
+                    raise RegistryValidationError(f"Undeclared StatusLine capability: {req_cap!r}")
+                require_non_blank_str(item, "unavailableText")
+
+        elif kind == "ActionRow":
+            require_non_blank_str(item, "label")
+            require_non_blank_str(item, "actionId")
+            inp = item.get("input", "NONE")
+            if not isinstance(inp, str) or inp not in CONTRIBUTION_INPUTS:
+                raise RegistryValidationError(f"Unsupported ActionRow input: {inp!r}")
+
+        elif kind == "CapabilityRequest":
+            require_non_blank_str(item, "reason")
+            require_non_blank_str(item, "actionId")
+            cap_id = item.get("capabilityId")
+            if not isinstance(cap_id, str) or cap_id not in SYSTEM_CAPABILITIES or cap_id not in declared_capabilities:
+                raise RegistryValidationError(f"Undeclared or unsupported CapabilityRequest capabilityId: {cap_id!r}")
+
+        else:
+            raise RegistryValidationError(f"Unsupported contribution kind: {kind!r}")
+
+
 def validate_package_against_entry(
     pkg_manifest_bytes: bytes,
     payload_entries: dict[str, bytes],
@@ -485,9 +639,9 @@ def validate_package_against_entry(
     if not isinstance(pkg_manifest, dict):
         raise RegistryValidationError("Package plugin.json must be a JSON object")
 
-    pkg_id = require_non_blank_str(pkg_manifest, "id")
+    pkg_id = validate_path_segment(require_non_blank_str(pkg_manifest, "id"), "plugin.json id")
     pkg_name = require_non_blank_str(pkg_manifest, "name")
-    pkg_version = require_non_blank_str(pkg_manifest, "version")
+    pkg_version = validate_path_segment(require_non_blank_str(pkg_manifest, "version"), "plugin.json version")
     pkg_entry = require_non_blank_str(pkg_manifest, "entryPoint")
     pkg_source_id = require_non_blank_str(pkg_manifest, "sourceId")
     pkg_source_type = require_non_blank_str(pkg_manifest, "sourceType")
@@ -506,10 +660,11 @@ def validate_package_against_entry(
         )
 
     pkg_caps = _validate_capabilities(pkg_manifest.get("requiredCapabilities", []), "plugin.json requiredCapabilities")
+    validate_contributions(pkg_manifest.get("contributions"), pkg_contract, set(pkg_caps))
 
     pkg_desc = pkg_manifest.get("description", "")
-    if not isinstance(pkg_desc, str):
-        raise RegistryValidationError("plugin.json description must be a string")
+    if not isinstance(pkg_desc, str) or has_control_chars(pkg_desc):
+        raise RegistryValidationError("plugin.json description must be a valid string without control chars")
 
     code_entry = "index.js" if pkg_type == "js" else "classes.dex"
     if code_entry not in payload_entries:
@@ -517,13 +672,11 @@ def validate_package_against_entry(
     if pkg_type == "dex" and not payload_entries["classes.dex"].startswith(b"dex\n"):
         raise RegistryValidationError(f"Package {pkg_id} classes.dex does not have a valid DEX header")
 
-    # Validate optional metadata inside plugin.json too.
     pkg_author = sanitize_optional_text(pkg_manifest.get("author"), "plugin.json author")
     pkg_license = sanitize_optional_text(pkg_manifest.get("license"), "plugin.json license")
     pkg_homepage = validate_http_url(pkg_manifest.get("homepage"), "plugin.json homepage")
     pkg_repository = validate_http_url(pkg_manifest.get("repository"), "plugin.json repository")
 
-    # Cross-check registry entry vs package plugin.json.
     mismatches: list[str] = []
     if pkg_id != entry_meta["id"]:
         mismatches.append(f"id ({entry_meta['id']!r} != {pkg_id!r})")
@@ -555,10 +708,15 @@ def validate_package_against_entry(
 
 
 def validate_registry(registry_path: Path) -> ValidatedRegistry:
-    """Validate registry.json, all referenced packages, signatures, and metadata fail-closed."""
+    """Validate registry.json, paths, bounded packages, cryptographic signers, and metadata."""
+    _lstat_no_symlink(registry_path, "registry.json")
     resolved_registry = registry_path.resolve()
     if not resolved_registry.is_file():
         raise RegistryValidationError(f"Registry manifest not found: {registry_path}")
+
+    base_dir = resolved_registry.parent
+    _lstat_no_symlink(base_dir, "registry directory")
+    artifacts_dir = base_dir / "artifacts"
 
     try:
         raw_doc = json.loads(resolved_registry.read_text(encoding="utf-8"))
@@ -596,8 +754,10 @@ def validate_registry(registry_path: Path) -> ValidatedRegistry:
     if not isinstance(raw_plugins, list):
         raise RegistryValidationError("plugins must be a JSON array")
 
-    base_dir = resolved_registry.parent
-    artifacts_dir = (base_dir / "artifacts").resolve()
+    if raw_plugins:
+        ensure_no_symlinks_to(artifacts_dir, base_dir)
+        if not artifacts_dir.is_dir():
+            raise RegistryValidationError(f"Missing artifacts directory: {artifacts_dir}")
 
     seen_ids: set[str] = set()
     validated_plugins: list[ValidatedPlugin] = []
@@ -607,13 +767,13 @@ def validate_registry(registry_path: Path) -> ValidatedRegistry:
             raise RegistryValidationError(f"plugins[{idx}] must be a JSON object")
 
         artifact = validate_artifact_name(entry.get("artifact"))
-        plugin_id = require_non_blank_str(entry, "id")
+        plugin_id = validate_path_segment(require_non_blank_str(entry, "id"), "id")
         if plugin_id in seen_ids:
             raise RegistryValidationError(f"Duplicate plugin id in registry: {plugin_id!r}")
         seen_ids.add(plugin_id)
 
         name = require_non_blank_str(entry, "name")
-        version = require_non_blank_str(entry, "version")
+        version = validate_path_segment(require_non_blank_str(entry, "version"), f"{plugin_id}.version")
         entry_point = require_non_blank_str(entry, "entryPoint")
         contract_version = require_strict_int(entry.get("contractVersion"), f"{plugin_id}.contractVersion", minimum=1)
         plugin_type = _validate_plugin_type_and_contract(
@@ -633,11 +793,9 @@ def validate_registry(registry_path: Path) -> ValidatedRegistry:
         if "downloadUrl" in entry and entry["downloadUrl"] is not None:
             validate_http_url(entry["downloadUrl"], f"{plugin_id}.downloadUrl")
 
-        artifact_path = (artifacts_dir / artifact).resolve()
-        if artifact_path.parent != artifacts_dir or not artifact_path.is_file():
-            raise RegistryValidationError(f"Artifact missing or outside artifacts/: {artifact}")
+        artifact_path = artifacts_dir / artifact
+        pkg_bytes, actual_sha256 = read_bounded_package(artifact_path, artifacts_dir)
 
-        actual_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest().upper()
         declared_sha = entry.get("sha256")
         if declared_sha is not None:
             if not isinstance(declared_sha, str) or not HEX64_PATTERN.fullmatch(declared_sha.strip().upper()):
@@ -647,10 +805,10 @@ def validate_registry(registry_path: Path) -> ValidatedRegistry:
                     f"{plugin_id}.sha256 mismatch: declared {declared_sha.strip().upper()}, actual {actual_sha256}"
                 )
 
-        payload_entries, meta_inf_entries = inspect_zip_security(artifact_path)
-        signer_fp = verify_jar_signatures(
-            artifact_path, set(payload_entries.keys()), meta_inf_entries, trusted_fp_set
-        )
+        payload_entries = inspect_zip_bytes(pkg_bytes, artifact)
+        verifier_report = verify_jar_cryptographic_signers(pkg_bytes, artifact, trusted_fp_set)
+        signer_fp = str(verifier_report["matchedSigner"])
+
         validate_package_against_entry(
             payload_entries["plugin.json"],
             payload_entries,
@@ -681,9 +839,9 @@ def validate_registry(registry_path: Path) -> ValidatedRegistry:
                 required_capabilities=required_caps,
                 description=description,
                 artifact=artifact,
-                artifact_path=artifact_path,
                 sha256=actual_sha256,
                 signer_fingerprint=signer_fp,
+                verified_bytes=pkg_bytes,
                 author=author,
                 homepage=homepage,
                 repository=repository,
@@ -716,7 +874,7 @@ def build_static_site(
     web_dir: Path | None = None,
     clean: bool = False,
 ) -> ValidatedRegistry:
-    """Validate registry fail-closed, then deterministically emit static site + catalog.json."""
+    """Validate registry fail-closed, then deterministically emit static site from verified bytes."""
     validated = validate_registry(registry_path)
     resolved_web = (web_dir or (Path(__file__).resolve().parent / "web")).resolve()
     required_web_files = ("index.html", "style.css", "app.js")
@@ -732,7 +890,7 @@ def build_static_site(
     artifacts_out = resolved_out / "artifacts"
     artifacts_out.mkdir(parents=True, exist_ok=True)
     for plugin in validated.plugins:
-        (artifacts_out / plugin.artifact).write_bytes(plugin.artifact_path.read_bytes())
+        (artifacts_out / plugin.artifact).write_bytes(plugin.verified_bytes)
 
     for asset_name in required_web_files:
         (resolved_out / asset_name).write_bytes((resolved_web / asset_name).read_bytes())
@@ -757,35 +915,20 @@ def build_static_site(
 
 
 def inspect_package_certificates(pkg_path: Path) -> dict[str, object]:
-    """Extract package SHA-256 and per-alias leaf certificate SHA-256 fingerprints."""
+    """Extract package SHA-256 and cryptographic CodeSigner certificate/SPKI fingerprints via JarSignerVerifier."""
+    _lstat_no_symlink(pkg_path, f"package {pkg_path.name}")
     resolved = pkg_path.resolve()
-    payload_entries, meta_inf_entries = inspect_zip_security(resolved)
-    keytool_bin = _find_jdk_tool("keytool")
-    jarsigner_bin = _find_jdk_tool("jarsigner")
-
-    proc = _run_jdk_tool(
-        [jarsigner_bin, "-J-Duser.language=en", "-J-Duser.country=US", "-verify", "-verbose", "-certs", str(resolved)]
-    )
-    if proc.returncode != 0 or "jar verified." not in proc.stdout:
-        raise RegistryValidationError(f"Package failed jarsigner verification: {(proc.stdout + proc.stderr).strip()}")
-
-    signers: dict[str, str] = {}
-    for name, data in sorted(meta_inf_entries.items()):
-        sig_match = SIG_BLOCK_PATTERN.fullmatch(name)
-        if sig_match:
-            alias = sig_match.group(1).upper()
-            signers[alias] = _extract_leaf_cert_fingerprint(data, keytool_bin)
-
-    if not signers:
-        raise RegistryValidationError(f"No certificate blocks found in {pkg_path.name}")
-
+    pkg_bytes, pkg_sha256 = read_bounded_package(resolved, resolved.parent)
+    payload_entries = inspect_zip_bytes(pkg_bytes, resolved.name)
+    report = verify_jar_cryptographic_signers(pkg_bytes, resolved.name, trusted_fingerprints=None)
     pkg_manifest = json.loads(payload_entries["plugin.json"].decode("utf-8"))
     return {
         "package": resolved.name,
-        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest().upper(),
+        "sha256": pkg_sha256,
         "id": pkg_manifest.get("id"),
         "sourceId": pkg_manifest.get("sourceId"),
-        "signers": signers,
+        "commonSigners": report["commonSigners"],
+        "payloadEntries": report["payloadEntries"],
     }
 
 
@@ -810,7 +953,8 @@ def _build_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--clean", action="store_true", help="Remove existing output directory before writing")
 
     inspect_parser = subparsers.add_parser(
-        "inspect-cert", help="Print leaf signer certificate SHA-256 fingerprint(s) for a signed .plp/.pljs package."
+        "inspect-cert",
+        help="Print cryptographic per-entry and common leaf signer SHA-256/SPKI fingerprints for a .plp/.pljs package.",
     )
     inspect_parser.add_argument("--package", type=Path, required=True, help="Path to .plp or .pljs package")
 

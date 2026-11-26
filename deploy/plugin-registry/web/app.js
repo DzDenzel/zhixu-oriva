@@ -31,6 +31,13 @@
     }
   }
 
+  var SAFE_ARTIFACT_REL_PATTERN = /^(?:\.\/)?artifacts\/([A-Za-z0-9._-]+)$/;
+
+  function isSafeArtifactFilename(name) {
+    if (!name || name === "." || name === "..") return false;
+    return name.endsWith(".plp") || name.endsWith(".pljs");
+  }
+
   function safeDownloadUrl(raw, baseHref) {
     if (typeof raw !== "string") return null;
     var trimmed = raw.trim();
@@ -38,25 +45,36 @@
     if (hasControlOrWhitespace(trimmed) || trimmed.indexOf("\\") !== -1) return null;
     if (trimmed.startsWith("//")) return null;
 
-    var schemeBoundary = trimmed.search(/[/?#]/);
-    var colonIndex = trimmed.indexOf(":");
-    if (colonIndex !== -1 && (schemeBoundary === -1 || colonIndex < schemeBoundary)) {
-      return safeHttpUrl(trimmed);
+    var relMatch = SAFE_ARTIFACT_REL_PATTERN.exec(trimmed);
+    if (relMatch) {
+      if (!isSafeArtifactFilename(relMatch[1])) return null;
+      if (baseHref && (baseHref.startsWith("http://") || baseHref.startsWith("https://"))) {
+        try {
+          var base = new URL(baseHref);
+          var resolved = new URL(trimmed, base);
+          if (resolved.origin !== base.origin) return null;
+          return safeHttpUrl(resolved.href);
+        } catch (_err) {
+          return null;
+        }
+      }
+      return "./artifacts/" + relMatch[1];
     }
 
-    var segments = trimmed.split("/");
-    for (var i = 0; i < segments.length; i += 1) {
-      if (segments[i] === "..") return null;
+    var safeAbs = safeHttpUrl(trimmed);
+    if (!safeAbs || !baseHref) return null;
+    try {
+      var targetUrl = new URL(safeAbs);
+      var originUrl = new URL(baseHref);
+      if (targetUrl.origin !== originUrl.origin) return null;
+      var pathParts = targetUrl.pathname.split("/");
+      var fname = pathParts[pathParts.length - 1];
+      var parentDir = pathParts.length >= 2 ? pathParts[pathParts.length - 2] : "";
+      if (parentDir !== "artifacts" || !isSafeArtifactFilename(fname)) return null;
+      return targetUrl.href;
+    } catch (_err) {
+      return null;
     }
-    if (baseHref && (baseHref.startsWith("http://") || baseHref.startsWith("https://"))) {
-      try {
-        var resolved = new URL(trimmed, baseHref);
-        return safeHttpUrl(resolved.href);
-      } catch (_err) {
-        return null;
-      }
-    }
-    return trimmed;
   }
 
   function filterPlugins(plugins, query, typeFilter) {
@@ -319,8 +337,8 @@
     document.body.appendChild(area);
     area.select();
     try {
-      document.execCommand("copy");
-      showToast(label);
+      var copied = Boolean(document.execCommand("copy"));
+      showToast(copied ? label : "复制失败，请手动选中复制");
     } catch (_err) {
       showToast("复制失败，请手动选中复制");
     } finally {
