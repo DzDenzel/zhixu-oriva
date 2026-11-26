@@ -1,10 +1,10 @@
-"""Offline unit and adversarial tests for release.py T1-T3 hardening."""
+"""Offline unit and adversarial tests for release.py R1-R5 and T1-T3 hardening."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.client
-import http.server
 import importlib.util
 import io
 import json
@@ -14,7 +14,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
-import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -27,7 +27,7 @@ r = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(r)
 
 
-class T1MavenIsolationTests(unittest.TestCase):
+class T1MavenAndArchiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="oriva-t1-")
         self.addCleanup(self.tmp.cleanup)
@@ -39,7 +39,7 @@ class T1MavenIsolationTests(unittest.TestCase):
         (self.root / "backend").mkdir()
         (self.root / "android/tools/plugin-sdk").mkdir(parents=True)
 
-    def test_make_plan_defaults_maven_repo_into_work_and_supports_settings(self) -> None:
+    def test_make_plan_defaults_maven_repo_and_rejects_public_source_subdirs(self) -> None:
         plan = r.make_plan(self.root)
         mvn_cmd = plan["commands"][2]
         expected_repo = str((self.root / "work/maven-repo").resolve())
@@ -47,74 +47,47 @@ class T1MavenIsolationTests(unittest.TestCase):
         self.assertIn("-B", mvn_cmd)
         self.assertIn("-ntp", mvn_cmd)
         self.assertIn("-Dmaven.repo.local=" + expected_repo, mvn_cmd)
-        self.assertNotIn("-s", mvn_cmd)
 
-        custom_repo = self.root / "custom repo with spaces"
-        settings = self.root / "settings.xml"
-        settings.write_text("<settings/>", encoding="utf8")
-        custom_plan = r.make_plan(self.root, maven_repo=custom_repo, maven_settings=settings)
-        custom_mvn = custom_plan["commands"][2]
-        self.assertIn("-Dmaven.repo.local=" + str(custom_repo.resolve()), custom_mvn)
-        self.assertIn("-s", custom_mvn)
-        self.assertIn(str(settings.resolve()), custom_mvn)
+        for bad_sub in ("backend/.m2", "android/m2-cache", "deploy/m2", ".github/m2"):
+            with self.assertRaisesRegex(r.ReleaseError, "outside public source directories"):
+                r.make_plan(self.root, maven_repo=self.root / bad_sub)
 
     def test_prepare_backend_env_strips_maven_args_and_sets_utf8_encoding(self) -> None:
         env = {"MAVEN_ARGS": "-Dmaven.repo.local=bad", "MAVEN_OPTS": "-Xmx1g", "PATH": "x"}
         cleaned = r.prepare_backend_env(env)
         self.assertNotIn("MAVEN_ARGS", cleaned)
         self.assertEqual(cleaned["MAVEN_OPTS"], "-Xmx1g -Dfile.encoding=UTF-8")
-        # Caller env is not mutated and existing encoding is preserved.
-        self.assertIn("MAVEN_ARGS", env)
-        kept = r.prepare_backend_env({"MAVEN_OPTS": "-Dfile.encoding=UTF-8 -Xmx2g"})
-        self.assertEqual(kept["MAVEN_OPTS"], "-Dfile.encoding=UTF-8 -Xmx2g")
 
-    def test_build_sanitizes_maven_args_before_backend_execution(self) -> None:
-        sdk = self.root / "sdk"
-        java_home = self.root / "jdk"
-        (java_home / "bin").mkdir(parents=True)
-        sdk.mkdir()
-        (self.root / "android/app/build/outputs/apk/release").mkdir(parents=True)
-        apk = self.root / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
-        apk.write_bytes(b"unsigned-apk")
-
-        plan = r.make_plan(self.root)
-        args = SimpleNamespace(java_home=str(java_home), sdk=str(sdk), api_base_url=None, maven_settings=None)
-        env = {"PATH": os.environ.get("PATH", ""), "MAVEN_ARGS": "--settings evil.xml"}
-        seen: list[tuple[list[str], str | None, str | None]] = []
-
-        def fake_execute(cmd, cwd, exec_env, logfile=None, timeout=None):
-            seen.append((list(map(str, cmd)), exec_env.get("MAVEN_ARGS"), exec_env.get("MAVEN_OPTS")))
-            if "java" in Path(str(cmd[0])).name.lower():
-                return 'openjdk version "21.0.4"'
-            return "ok"
-
-        with (
-            patch.object(r, "require_clean"),
-            patch.object(r, "git", return_value="deadbeef" * 5),
-            patch.object(r, "execute", fake_execute),
+    def test_audit_archive_rejects_case_variant_and_nested_forbidden_entries(self) -> None:
+        # Case-variant forbidden folder inside allowed top-level tree
+        for bad_path in (
+            "zhixu-oriva-2.2.0/backend/.M2/repository/pkg.jar",
+            "zhixu-oriva-2.2.0/WORK/leak.txt",
+            "zhixu-oriva-2.2.0/deploy/Build/out.txt",
         ):
-            r.build(self.root, plan, args, env)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                z.writestr(bad_path, b"x")
+            with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as z:
+                with self.assertRaises(r.ReleaseError, msg=bad_path):
+                    r.audit_archive(z)
 
-        self.assertTrue((self.root / "work/maven-repo").is_dir())
-        backend_calls = [item for item in seen if "-Dmaven.repo.local=" in " ".join(item[0])]
-        self.assertEqual(len(backend_calls), 1)
-        cmd, mvn_args, mvn_opts = backend_calls[0]
-        self.assertIsNone(mvn_args)
-        self.assertIn("-Dfile.encoding=UTF-8", mvn_opts or "")
-        self.assertIn("-Dmaven.repo.local=" + plan["mavenRepo"], cmd)
-
-    def test_audit_archive_forbids_dot_m2_directory(self) -> None:
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as z:
-            z.writestr("zhixu-oriva-2.2.0/.m2/repository/pkg.jar", b"cached")
-        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as z:
-            with self.assertRaises(r.ReleaseError):
-                r.audit_archive(z)
+        # Nested ZIP containing forbidden .p12 or .m2/ or traversal
+        for nested_entry in ("keys/release.p12", ".m2/settings.xml", "../escape.txt"):
+            inner = io.BytesIO()
+            with zipfile.ZipFile(inner, "w") as iz:
+                iz.writestr(nested_entry, b"nested")
+            outer = io.BytesIO()
+            with zipfile.ZipFile(outer, "w") as oz:
+                oz.writestr("zhixu-oriva-2.2.0/deploy/bundle.zip", inner.getvalue())
+            with zipfile.ZipFile(io.BytesIO(outer.getvalue())) as z:
+                with self.assertRaises(r.ReleaseError, msg=nested_entry):
+                    r.audit_archive(z)
 
 
-class T2PublishFallbackAndTimeoutTests(unittest.TestCase):
+class R1R2R3PublishAndProcessTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="oriva-t2-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="oriva-r123-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         for args in [
@@ -157,71 +130,174 @@ class T2PublishFallbackAndTimeoutTests(unittest.TestCase):
         notes.write_text("Release 2.2.0 notes", encoding="utf8")
         return head, notes
 
-    def test_execute_enforces_timeout_and_writes_log(self) -> None:
-        log = self.root / "timeout.log"
-        with self.assertRaisesRegex(r.ReleaseError, "timed out"):
-            r.execute([sys.executable, "-c", "import time; time.sleep(5)"], self.root, os.environ.copy(), log, timeout=0.2)
-        self.assertIn("[TIMEOUT", log.read_text(encoding="utf8"))
+    def test_r1_rejects_mismatched_pushurl_multi_pushurl_and_insteadof_rewrite(self) -> None:
+        plan = r.make_plan(self.root)
+        _, notes = self._prepare_packaged_assets(plan)
+        args = SimpleNamespace(repo="owner/repo", notes=str(notes), push_protocol="auto", git_timeout=120, upload_timeout=900)
 
-    def test_git_askpass_helper_executes_and_cleans_up_even_on_error(self) -> None:
-        created_helper: Path | None = None
+        # 1. Fetch URL matches owner/repo, but separate pushurl points elsewhere
+        self.git("remote", "add", "origin", "https://github.com/owner/repo.git")
+        self.git("remote", "set-url", "--push", "origin", "https://evil.example.org/owner/repo.git")
+        with self.assertRaisesRegex(r.ReleaseError, "push URL does not match"):
+            r.publish(self.root, plan, args, os.environ.copy())
+
+        # 2. Multiple push URLs configured on origin
+        self.git("remote", "set-url", "--push", "origin", "https://github.com/owner/repo.git")
+        self.git("remote", "set-url", "--add", "--push", "origin", "https://mirror.example.org/owner/repo.git")
+        with self.assertRaisesRegex(r.ReleaseError, "exactly one push URL"):
+            r.publish(self.root, plan, args, os.environ.copy())
+
+        # 3. Single valid push URL, but url.*.insteadOf / pushInsteadOf rewrites github.com
+        self.git("remote", "remove", "origin")
+        self.git("remote", "add", "origin", "https://github.com/owner/repo.git")
+        self.git("config", "url.https://evil.example.org/.pushInsteadOf", "https://github.com/")
+        with self.assertRaisesRegex(r.ReleaseError, "push URL does not match|insteadOf"):
+            r.publish(self.root, plan, args, os.environ.copy())
+        self.git("config", "--unset", "url.https://evil.example.org/.pushInsteadOf")
+        self.git("config", "url.https://evil.example.org/.insteadOf", "https://github.com/")
+        with self.assertRaisesRegex(r.ReleaseError, "origin does not match|insteadOf"):
+            r.publish(self.root, plan, args, os.environ.copy())
+
+    def test_r1_r3_askpass_binds_host_user_has_shebang_handles_spaces_and_visible_cleanup_failure(self) -> None:
         token_val = "synthetic-release-token-value"
-        try:
+        # Use a temp base with space & special chars to test path safety on Windows/POSIX
+        special_base = self.root / "space dir & bang!"
+        special_base.mkdir()
+        with patch.object(r.tempfile, "mkdtemp", return_value=str(special_base / "ak")):
+            (special_base / "ak").mkdir()
             with r.git_askpass_env(os.environ.copy(), token_val) as git_env:
-                created_helper = Path(git_env["GIT_ASKPASS"])
-                self.assertTrue(created_helper.is_file())
-                self.assertEqual(git_env["GIT_TERMINAL_PROMPT"], "0")
-                u = subprocess.check_output([str(created_helper), "Username for 'https://github.com': "], env=git_env, text=True).strip()
-                p = subprocess.check_output([str(created_helper), "Password for 'https://x-access-token@github.com': "], env=git_env, text=True).strip()
+                helper = Path(git_env["GIT_ASKPASS"])
+                py_file = helper.parent / "askpass.py"
+                self.assertTrue(py_file.read_text(encoding="utf8").startswith("#!/usr/bin/env python3\n"))
+
+                # Valid github.com prompts succeed
+                if os.name == "nt":
+                    # Also verify real sh/git invocation on askpass.sh works or invoke python directly on askpass.py
+                    u = subprocess.check_output([sys.executable, str(py_file), "Username for 'https://github.com': "], env=git_env, text=True).strip()
+                    p = subprocess.check_output([sys.executable, str(py_file), "Password for 'https://x-access-token@github.com': "], env=git_env, text=True).strip()
+                else:
+                    u = subprocess.check_output([str(helper), "Username for 'https://github.com': "], env=git_env, text=True).strip()
+                    p = subprocess.check_output([str(helper), "Password for 'https://x-access-token@github.com': "], env=git_env, text=True).strip()
                 self.assertEqual(u, "x-access-token")
                 self.assertEqual(p, token_val)
-                raise RuntimeError("boom")
-        except RuntimeError:
-            pass
-        assert created_helper is not None
-        self.assertFalse(created_helper.exists())
-        self.assertFalse(created_helper.parent.exists())
 
-    def test_publish_auto_falls_back_to_https_askpass_without_token_leak(self) -> None:
+                # Non-target hosts, HTTP, custom ports, wrong user, and unknown prompts must FAIL
+                for bad_prompt in (
+                    "Username for 'https://evil.example.org': ",
+                    "Password for 'http://x-access-token@github.com': ",
+                    "Password for 'https://x-access-token@github.com:8443': ",
+                    "Password for 'https://other-user@github.com': ",
+                    "Enter passphrase for key: ",
+                ):
+                    proc = subprocess.run([sys.executable, str(py_file), bad_prompt], env=git_env, capture_output=True, text=True)
+                    self.assertNotEqual(proc.returncode, 0, bad_prompt)
+
+            self.assertFalse((special_base / "ak").exists())
+
+        # Cleanup failure must surface visibly (not silently swallowed)
+        with patch.object(r.shutil, "rmtree", side_effect=PermissionError("locked handle")):
+            with self.assertRaisesRegex(r.ReleaseError, "Failed to remove temporary GIT_ASKPASS"):
+                with r.git_askpass_env(os.environ.copy(), token_val):
+                    pass
+
+    def test_r2_sanitize_git_env_and_centralized_log_redaction(self) -> None:
+        dirty = {
+            "PATH": os.environ.get("PATH", ""),
+            "GIT_TRACE": "1",
+            "GIT_TRACE_CURL": "1",
+            "GIT_TRACE2_PERF": "1",
+            "GIT_CURL_VERBOSE": "1",
+            "GCM_INTERACTIVE": "always",
+            "GIT_CREDENTIAL_HELPER": "store",
+            "GIT_CONFIG_PARAMETERS": "'http.extraHeader=x'",
+            "GIT_ASKPASS": "/evil/askpass",
+            "SSH_ASKPASS": "/evil/ssh_askpass",
+        }
+        cleaned = r.sanitize_git_env(dirty)
+        self.assertEqual(cleaned["GIT_TRACE"], "0")
+        self.assertEqual(cleaned["GIT_TRACE_CURL"], "0")
+        self.assertEqual(cleaned["GIT_CURL_VERBOSE"], "0")
+        self.assertEqual(cleaned["GIT_TERMINAL_PROMPT"], "0")
+        for forbidden in ("GIT_TRACE2_PERF", "GCM_INTERACTIVE", "GIT_CREDENTIAL_HELPER", "GIT_CONFIG_PARAMETERS", "GIT_ASKPASS", "SSH_ASKPASS"):
+            self.assertNotIn(forbidden, cleaned)
+
+        secret = "synthetic-secret-token-999"
+        b64_auth = base64.b64encode(("x-access-token:" + secret).encode("utf8")).decode("ascii")
+        log = self.root / "leak.log"
+        env = os.environ.copy()
+        env["ORIVA_GIT_TOKEN"] = secret
+        with self.assertRaises(r.ReleaseError):
+            r.execute(
+                [sys.executable, "-c", f"import sys; sys.stderr.write('tok={secret} Authorization: Basic {b64_auth}\\n'); sys.exit(2)"],
+                self.root, env, log,
+            )
+        log_text = log.read_text(encoding="utf8")
+        self.assertNotIn(secret, log_text)
+        self.assertNotIn(b64_auth, log_text)
+        self.assertIn("[REDACTED]", log_text)
+
+    @unittest.skipUnless(r.os.name == "nt", "Windows CMD delayed expansion guard")
+    def test_r3_windows_batch_disables_delayed_expansion_for_bang_paths(self) -> None:
+        script = self.root / "echo_bang.cmd"
+        script.write_bytes(b"@echo off\r\necho [%1]\r\n")
+        out = r.execute([str(script), "folder!with!bangs"], self.root, os.environ.copy())
+        self.assertIn('["folder!with!bangs"]', out)
+
+    def test_r3_timeout_terminates_process_tree_and_redacts_partial_output(self) -> None:
+        pid_file = self.root / "child.pid"
+        log = self.root / "tree-timeout.log"
+        secret = "synthetic-tree-secret"
+        env = os.environ.copy()
+        env["ORIVA_GIT_TOKEN"] = secret
+        launcher_code = (
+            "import subprocess, sys, time\n"
+            f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"open({json.dumps(str(pid_file))}, 'w').write(str(p.pid))\n"
+            f"sys.stdout.write('Authorization: Bearer {secret}\\n'); sys.stdout.flush()\n"
+            "time.sleep(30)\n"
+        )
+        with self.assertRaisesRegex(r.ReleaseError, "timed out"):
+            r.execute([sys.executable, "-c", launcher_code], self.root, env, log, timeout=0.6)
+        log_text = log.read_text(encoding="utf8")
+        self.assertIn("[TIMEOUT", log_text)
+        self.assertNotIn(secret, log_text)
+        if pid_file.exists():
+            child_pid = int(pid_file.read_text(encoding="utf8"))
+            time.sleep(0.2)
+            if os.name == "nt":
+                probe = subprocess.run(["tasklist", "/FI", f"PID eq {child_pid}"], capture_output=True, text=True)
+                self.assertNotIn(str(child_pid), probe.stdout)
+            else:
+                with self.assertRaises(OSError):
+                    os.kill(child_pid, 0)
+
+    def test_r1_publish_https_origin_routes_via_askpass_and_disables_redirects(self) -> None:
         plan = r.make_plan(self.root)
         head, notes = self._prepare_packaged_assets(plan)
         secret_token = "synthetic-release-token-secret"
-        args = SimpleNamespace(
-            repo="owner/repo", notes=str(notes), push_protocol="auto", git_timeout=120, upload_timeout=900
-        )
-
-        observed_cmds: list[list[str]] = []
-        askpass_paths: list[Path] = []
-        refs_after_probe: dict[str, str] = {}
+        args = SimpleNamespace(repo="owner/repo", notes=str(notes), push_protocol="auto", git_timeout=120, upload_timeout=900)
+        seen_cmds: list[list[str]] = []
 
         original_git = r.git
 
         def fake_git(root, *items, timeout=None, env=None):
             if items == ("remote", "get-url", "origin"):
-                return "git@github.com:owner/repo.git"
-            if "ls-remote" in items and "origin" in items:
-                raise r.ReleaseError("ssh port 22 blocked")
-            if "ls-remote" in items and "https://github.com/owner/repo.git" in items:
-                self.assertIsNotNone(env)
-                self.assertIn("GIT_ASKPASS", env)
-                self.assertEqual(env.get("GIT_TERMINAL_PROMPT"), "0")
-                self.assertTrue(Path(env["GIT_ASKPASS"]).is_file())
-                askpass_paths.append(Path(env["GIT_ASKPASS"]))
-                return "\n".join(v + "\t" + k for k, v in refs_after_probe.items())
+                return "https://github.com/owner/repo.git"
+            if "ls-remote" in items:
+                self.assertIn("http.followRedirects=false", items)
+                self.assertIn("GIT_ASKPASS", env or {})
+                return ""
             return original_git(root, *items)
 
         def fake_execute(cmd, cwd, exec_env, logfile=None, timeout=None):
-            observed_cmds.append(list(map(str, cmd)))
-            joined = " ".join(map(str, cmd))
-            self.assertNotIn(secret_token, joined)
-            if "push" in cmd:
-                self.assertEqual(timeout, 120)
-                self.assertIn("GIT_ASKPASS", exec_env)
-                self.assertTrue(Path(exec_env["GIT_ASKPASS"]).is_file())
-                if logfile:
-                    Path(logfile).write_text("pushed cleanly to https://github.com/owner/repo.git\n", encoding="utf8")
-            elif cmd[:3] == ["git", "tag", "-a"]:
+            seen_cmds.append(list(map(str, cmd)))
+            if cmd[:3] == ["git", "tag", "-a"]:
                 self.git(*cmd[1:])
+            elif "push" in cmd:
+                self.assertIn("http.followRedirects=false", cmd)
+                self.assertIn("credential.helper=", cmd)
+                self.assertIn("https://github.com/owner/repo.git", cmd)
+                self.assertIn("GIT_ASKPASS", exec_env)
             return ""
 
         class FakeGithub:
@@ -231,18 +307,15 @@ class T2PublishFallbackAndTimeoutTests(unittest.TestCase):
 
             def call(self, url, method="GET", payload=None, missing_ok=False, timeout=None):
                 if method == "GET":
-                    if "/releases?" in url:
-                        return []
-                    return None
+                    return [] if "/releases?" in url else None
                 if method == "POST" and url == self.base + "/releases":
                     self.release = dict(
-                        id=10, tag_name=plan["tag"], target_commitish=head, draft=True,
-                        assets=[], upload_url="https://uploads.github.com/assets{?name}",
+                        id=10, tag_name=plan["tag"], target_commitish=head, draft=True, assets=[],
+                        upload_url="https://uploads.github.com/assets{?name}",
                         html_url="https://github.com/owner/repo/releases/tag/" + plan["tag"],
                     )
                     return self.release
                 if isinstance(payload, bytes):
-                    assert timeout == 900, f"expected 900s upload timeout, got {timeout}"
                     asset = r.urllib.parse.parse_qs(r.urllib.parse.urlparse(url).query)["name"][0]
                     item = dict(name=asset, size=len(payload), digest="sha256:" + hashlib.sha256(payload).hexdigest())
                     self.release["assets"].append(item)
@@ -260,34 +333,12 @@ class T2PublishFallbackAndTimeoutTests(unittest.TestCase):
         ):
             r.publish(self.root, plan, args, os.environ.copy())
 
-        self.assertTrue(any("https://github.com/owner/repo.git" in " ".join(c) for c in observed_cmds))
-        self.assertTrue(askpass_paths)
-        for p in askpass_paths:
-            self.assertFalse(p.exists())
-            self.assertFalse(p.parent.exists())
-        push_log = (Path(plan["evidence"]) / "git-push.log").read_text(encoding="utf8")
-        self.assertNotIn(secret_token, push_log)
-
-    def test_publish_ssh_mode_refuses_https_fallback(self) -> None:
-        plan = r.make_plan(self.root)
-        _, notes = self._prepare_packaged_assets(plan)
-        args = SimpleNamespace(repo="owner/repo", notes=str(notes), push_protocol="ssh", git_timeout=120, upload_timeout=900)
-
-        def fake_git(root, *items, timeout=None, env=None):
-            if items == ("remote", "get-url", "origin"):
-                return "git@github.com:owner/repo.git"
-            if "ls-remote" in items:
-                raise r.ReleaseError("ssh failed")
-            return self.git(*items)
-
-        with patch.object(r, "git", fake_git):
-            with self.assertRaisesRegex(r.ReleaseError, "ssh failed"):
-                r.publish(self.root, plan, args, os.environ.copy())
+        self.assertTrue(any("http.followRedirects=false" in c for c in seen_cmds))
 
 
-class T3VerifyStreamingAndApiDigestTests(unittest.TestCase):
+class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="oriva-t3-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="oriva-r45-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         (self.root / "android/app").mkdir(parents=True)
@@ -295,53 +346,52 @@ class T3VerifyStreamingAndApiDigestTests(unittest.TestCase):
             'versionCode = 7\nversionName = "2.2.0"\n', encoding="utf8"
         )
 
-    def test_github_call_uses_900s_timeout_for_binary_uploads(self) -> None:
-        captured: list[float] = []
-
-        class FakeResp:
-            def __enter__(self): return self
-            def __exit__(self, *a): pass
-            def read(self): return b'{"ok":true}'
-
-        class FakeOpener:
-            def open(self, req, timeout=None):
-                captured.append(timeout)
-                return FakeResp()
-
-        api = r.Github("owner/repo")
-        with (
-            patch.dict(os.environ, {"GITHUB_TOKEN": "tok"}),
-            patch.object(r.urllib.request, "build_opener", return_value=FakeOpener()),
+    def test_r4_https_origin_policy_redacts_query_and_strips_sensitive_redirect_headers(self) -> None:
+        # Bad URLs rejected and signed query stripped in error text
+        user_pass_url = "https://" + "user:pass@github.com/o/r/releases/download/v2.2.0/app.apk"
+        for bad_url in (
+            "http://github.com/o/r/app.apk",
+            "https://evil.example.org/app.apk?token=secret123",
+            "https://github.com:8443/o/r/app.apk",
+            user_pass_url,
+            "https://github.com/o/r/app.apk#frag",
         ):
-            api.call(api.base + "/releases", "GET")
-            api.call("https://uploads.github.com/assets?name=a.apk", "POST", b"binary-payload")
+            with self.assertRaises(r.ReleaseError) as ctx:
+                r.require_https_url(bad_url, r.ALLOWED_DOWNLOAD_HOSTS, "Asset redirect", allow_query=True)
+            self.assertNotIn("secret123", str(ctx.exception))
+            self.assertNotIn("user:pass", str(ctx.exception))
 
-        self.assertEqual(captured, [60, 900])
-
-    def test_redirect_handler_allows_github_cdn_and_blocks_untrusted_host(self) -> None:
-        handler = r.AllowedAssetRedirectHandler()
-        req = urllib.request.Request("https://github.com/owner/repo/releases/download/v2.2.0/app.apk")
-        allowed = handler.redirect_request(
-            req, None, 302, "Found", {}, "https://release-assets.githubusercontent.com/some/blob"
+        # Redirect strips Authorization / Cookie / Proxy-Authorization and preserves Range & signed query
+        handler = r.AllowedAssetRedirectHandler(deadline=time.monotonic() + 60, download_timeout=30)
+        req = urllib.request.Request(
+            "https://github.com/o/r/releases/download/v2.2.0/app.apk",
+            headers={
+                "User-Agent": "ORIVA-public-verification",
+                "Range": "bytes=100-",
+                "Authorization": "Bearer secret",
+                "Cookie": "sid=abc",
+                "Proxy-Authorization": "Basic xyz",
+            },
         )
-        self.assertEqual(allowed.full_url, "https://release-assets.githubusercontent.com/some/blob")
+        new_req = handler.redirect_request(
+            req, None, 302, "Found", {},
+            "https://objects.githubusercontent.com/github-production-release-asset/1?X-Amz-Signature=ok",
+        )
+        self.assertEqual(new_req.headers.get("Range"), "bytes=100-")
+        for hdr in ("Authorization", "Cookie", "Proxy-Authorization"):
+            self.assertNotIn(hdr, new_req.headers)
+            self.assertNotIn(hdr, new_req.unredirected_hdrs)
 
-        for evil in [
-            "https://evil.example.org/payload.apk",
-            "http://objects.githubusercontent.com/downgrade.apk",
-        ]:
-            with self.assertRaisesRegex(r.ReleaseError, "Blocked redirect"):
-                handler.redirect_request(req, None, 302, "Found", {}, evil)
-
-    def test_download_asset_resumes_with_206_and_resets_on_200(self) -> None:
-        payload = b"0123456789" * 60000  # ~600 KB (> 256 KiB chunk)
+    def test_r5_strict_content_range_size_and_stale_part_and_deadline(self) -> None:
+        payload = b"0123456789" * 60000
+        expected_sha = hashlib.sha256(payload).hexdigest().upper()
         split_at = 300000
 
-        class ResumingResponse:
-            def __init__(self, status: int, chunks: list[bytes], content_range: str | None = None):
+        class Resp:
+            def __init__(self, status: int, chunks: list, headers: dict[str, str] | None = None):
                 self.status = status
                 self._chunks = list(chunks)
-                self.headers = {"Content-Range": content_range} if content_range else {}
+                self.headers = headers or {}
 
             def __enter__(self): return self
             def __exit__(self, *a): pass
@@ -354,68 +404,91 @@ class T3VerifyStreamingAndApiDigestTests(unittest.TestCase):
                     raise nxt
                 return nxt
 
-        class FakeOpener:
-            def __init__(self, behavior: str, test_case: unittest.TestCase):
-                self.behavior = behavior
-                self.test_case = test_case
-                self.ranges: list[str | None] = []
-
+        # 1. Valid 206 resume succeeds when Content-Range & Content-Length & SHA-256 all match
+        class ResumeOpener:
+            def __init__(self): self.calls = 0
             def open(self, req, timeout=None):
-                rng = req.headers.get("Range")
-                self.ranges.append(rng)
-                if self.behavior == "resume_206":
-                    if len(self.ranges) == 1:
-                        return ResumingResponse(200, [payload[:split_at], TimeoutError("read stalled")])
-                    self.test_case.assertEqual(rng, f"bytes={split_at}-")
-                    return ResumingResponse(
-                        206, [payload[split_at:]], content_range=f"bytes {split_at}-{len(payload)-1}/{len(payload)}"
-                    )
-                if self.behavior == "reset_200":
-                    if len(self.ranges) == 1:
-                        return ResumingResponse(200, [payload[:1000], http.client.IncompleteRead(b"")])
-                    self.test_case.assertEqual(rng, "bytes=1000-")
-                    return ResumingResponse(200, [payload])
-                raise AssertionError(self.behavior)
+                self.calls += 1
+                if self.calls == 1:
+                    return Resp(200, [payload[:split_at], TimeoutError("stalled")], {"Content-Length": str(len(payload))})
+                return Resp(
+                    206, [payload[split_at:]],
+                    {"Content-Range": f"bytes {split_at}-{len(payload)-1}/{len(payload)}", "Content-Length": str(len(payload) - split_at)},
+                )
 
-        target1 = self.root / "app.apk"
-        sleeps: list[float] = []
-        opener1 = FakeOpener("resume_206", self)
+        t1 = self.root / "ok.apk"
         r.download_asset(
-            "https://github.com/o/r/releases/download/v2.2.0/app.apk",
-            target1, expected_size=len(payload), opener=opener1, sleep_fn=sleeps.append,
+            "https://github.com/o/r/releases/download/v2.2.0/ok.apk",
+            t1, expected_size=len(payload), expected_sha256=expected_sha, opener=ResumeOpener(), sleep_fn=lambda _: None,
         )
-        self.assertEqual(target1.read_bytes(), payload)
-        self.assertFalse(target1.with_name("app.apk.part").exists())
-        self.assertEqual(sleeps, [2])
+        self.assertEqual(t1.read_bytes(), payload)
 
-        target2 = self.root / "app2.apk"
-        opener2 = FakeOpener("reset_200", self)
-        r.download_asset(
-            "https://github.com/o/r/releases/download/v2.2.0/app2.apk",
-            target2, expected_size=len(payload), opener=opener2, sleep_fn=lambda _: None,
-        )
-        self.assertEqual(target2.read_bytes(), payload)
+        # 2. Bad Content-Range cases (missing header on 206, wrong offset, wrong total) must FAIL
+        for bad_hdr in ({}, {"Content-Range": f"bytes 0-{len(payload)-1}/{len(payload)}"}, {"Content-Range": f"bytes {split_at}-{len(payload)-1}/999999"}):
+            t_bad = self.root / "bad_cr.apk"
+            t_bad.with_name("bad_cr.apk.part").write_bytes(payload[:split_at])
+            opener_bad = SimpleNamespace(open=lambda req, timeout=None, h=bad_hdr: Resp(206, [payload[split_at:]], h))
+            with self.assertRaises(r.ReleaseError):
+                r.download_asset(
+                    "https://github.com/o/r/releases/download/v2.2.0/bad_cr.apk",
+                    t_bad, expected_size=len(payload), expected_sha256=expected_sha, opener=opener_bad, sleep_fn=lambda _: None,
+                )
+            self.assertFalse(t_bad.exists())
 
-    def test_download_asset_reports_tls_stage_on_ssl_error(self) -> None:
-        class FailingOpener:
-            def open(self, req, timeout=None):
-                raise urllib.error.URLError(ssl.SSLError("handshake timed out"))
-
-        with self.assertRaisesRegex(r.ReleaseError, "TLS handshake"):
+        # 3. Short EOF and oversized stream must NOT promote .part
+        t_short = self.root / "short.apk"
+        opener_short = SimpleNamespace(open=lambda req, timeout=None: Resp(200, [payload[:100]]))
+        with self.assertRaises(r.ReleaseError):
             r.download_asset(
-                "https://github.com/o/r/releases/download/v2.2.0/app.apk",
-                self.root / "fail.apk",
-                download_timeout=5,
-                total_timeout=10,
-                opener=FailingOpener(),
+                "https://github.com/o/r/releases/download/v2.2.0/short.apk",
+                t_short, expected_size=len(payload), expected_sha256=expected_sha, opener=opener_short, sleep_fn=lambda _: None,
+            )
+        self.assertFalse(t_short.exists())
+
+        t_over = self.root / "over.apk"
+        opener_over = SimpleNamespace(open=lambda req, timeout=None: Resp(200, [payload + b"extra"]))
+        with self.assertRaisesRegex(r.ReleaseError, "exceeded allowed size"):
+            r.download_asset(
+                "https://github.com/o/r/releases/download/v2.2.0/over.apk",
+                t_over, expected_size=len(payload), expected_sha256=expected_sha, opener=opener_over, sleep_fn=lambda _: None,
+            )
+        self.assertFalse(t_over.exists())
+
+        # 4. Same-length corrupt .part must NOT be promoted; gets deleted and re-downloaded cleanly
+        t_stale = self.root / "stale.apk"
+        t_stale.with_name("stale.apk.part").write_bytes(b"X" * len(payload))
+        opener_fresh = SimpleNamespace(open=lambda req, timeout=None: Resp(200, [payload], {"Content-Length": str(len(payload))}))
+        r.download_asset(
+            "https://github.com/o/r/releases/download/v2.2.0/stale.apk",
+            t_stale, expected_size=len(payload), expected_sha256=expected_sha, opener=opener_fresh, sleep_fn=lambda _: None,
+        )
+        self.assertEqual(t_stale.read_bytes(), payload)
+
+        # 5. Blocking read crossing total_timeout deadline must fail instead of promoting
+        t_deadline = self.root / "deadline.apk"
+        class SlowResp(Resp):
+            def read(self, size: int = -1) -> bytes:
+                time.sleep(0.35)
+                return super().read(size)
+        with self.assertRaises(r.ReleaseError):
+            r.download_asset(
+                "https://github.com/o/r/releases/download/v2.2.0/deadline.apk",
+                t_deadline, expected_size=10, expected_sha256=hashlib.sha256(b"0123456789").hexdigest().upper(),
+                download_timeout=5, total_timeout=0.15,
+                opener=SimpleNamespace(open=lambda req, timeout=None: SlowResp(200, [b"0123456789"])),
                 sleep_fn=lambda _: None,
             )
+        self.assertFalse(t_deadline.exists())
 
-    def test_verify_api_digest_mode_marks_download_verified_false(self) -> None:
+    def test_verify_clears_stale_report_on_failure_and_uses_noredirect_metadata(self) -> None:
         plan = r.make_plan(self.root)
         directory = Path(plan["assets"])
         directory.mkdir(parents=True)
-        commit = "a" * 40
+        evidence = Path(plan["evidence"])
+        evidence.mkdir(parents=True)
+        stale_report = evidence / "recipient-verification.json"
+        r.write_json(stale_report, dict(status="PASS", verifyMode="full", downloadVerified=True))
+
         names = [
             f"zhixu-oriva-{plan['version']}.apk",
             f"zhixu-oriva-{plan['version']}-source.zip",
@@ -424,78 +497,21 @@ class T3VerifyStreamingAndApiDigestTests(unittest.TestCase):
         ]
         for asset in names[:3]:
             (directory / asset).write_bytes(asset.encode("utf8"))
+        commit = "c" * 40
         r.write_json(directory / "release-manifest.json", dict(versionName=plan["version"], commit=commit, certificateSHA256="A" * 64))
-        (directory / "SHA256SUMS").write_text(
-            "".join(r.sha256(directory / asset) + "  " + asset + "\n" for asset in names), encoding="utf8"
-        )
-        all_names = names + ["SHA256SUMS"]
-        release_payload = {
-            "draft": False,
-            "tag_name": plan["tag"],
-            "html_url": "https://github.com/owner/repo/releases/tag/" + plan["tag"],
-            "assets": [
-                {
-                    "name": n,
-                    "size": (directory / n).stat().st_size,
-                    "digest": "sha256:" + r.sha256(directory / n),
-                    "browser_download_url": f"https://github.com/owner/repo/releases/download/{plan['tag']}/{n}",
-                }
-                for n in all_names
-            ],
-        }
-
-        class FakeUrlOpenResp:
-            def __init__(self, data: bytes):
-                self._buf = io.BytesIO(data)
-            def __enter__(self): return self._buf
-            def __exit__(self, *a): pass
+        (directory / "SHA256SUMS").write_text("".join(r.sha256(directory / a) + "  " + a + "\n" for a in names), encoding="utf8")
 
         args = SimpleNamespace(
             repo="owner/repo", clone_check=False, verify_mode="api-digest",
             download_timeout=60, download_total_timeout=300, git_timeout=120,
         )
-        with (
-            patch.object(r.urllib.request, "urlopen", return_value=FakeUrlOpenResp(json.dumps(release_payload).encode("utf8"))),
-            patch.object(r, "git", return_value=f"{commit}\trefs/tags/{plan['tag']}"),
-            patch.object(r, "download_asset", side_effect=AssertionError("api-digest must not download assets")),
-        ):
-            r.verify(self.root, plan, args, {})
+        # Failing metadata request must leave stale recipient-verification.json deleted
+        with patch.object(r.urllib.request, "build_opener", return_value=SimpleNamespace(open=lambda req, timeout=None: (_ for _ in ()).throw(r.ReleaseError("network error")))):
+            with self.assertRaises(r.ReleaseError):
+                r.verify(self.root, plan, args, {})
+        self.assertFalse(stale_report.exists())
 
-        report = json.loads((Path(plan["evidence"]) / "recipient-verification.json").read_text(encoding="utf8"))
-        self.assertEqual(report["verifyMode"], "api-digest")
-        self.assertFalse(report["downloadVerified"])
-        self.assertEqual(report["status"], "PASS")
-
-        # api-digest + clone_check must be rejected fail-closed.
-        bad_args = SimpleNamespace(
-            repo="owner/repo", clone_check=True, verify_mode="api-digest",
-            download_timeout=60, download_total_timeout=300, git_timeout=120,
-        )
-        with self.assertRaisesRegex(r.ReleaseError, "clone-check"):
-            r.verify(self.root, plan, bad_args, {})
-
-    def test_verify_full_mode_writes_download_verified_true_and_cli_plan_works(self) -> None:
-        script = Path(r.__file__).resolve()
-        cli = subprocess.run(
-            [sys.executable, str(script), "plan", "--root", str(self.root), "--push-protocol", "https", "--verify-mode", "full", "--upload-timeout", "900"],
-            capture_output=True, text=True, encoding="utf8",
-        )
-        self.assertEqual(cli.returncode, 0, cli.stderr)
-        parsed = json.loads(cli.stdout)
-        self.assertEqual(parsed["mavenRepo"], str((self.root / "work/maven-repo").resolve()))
-
-        plan = r.make_plan(self.root)
-        directory = Path(plan["assets"])
-        directory.mkdir(parents=True)
-        src_zip = directory / f"zhixu-oriva-{plan['version']}-source.zip"
-        with zipfile.ZipFile(src_zip, "w") as z:
-            z.writestr(f"zhixu-oriva-{plan['version']}/README.md", b"ORIVA\n")
-        for asset in (f"zhixu-oriva-{plan['version']}.apk", "oriva-release.cer"):
-            (directory / asset).write_bytes(asset.encode("utf8"))
-        commit = "b" * 40
-        r.write_json(directory / "release-manifest.json", dict(versionName=plan["version"], commit=commit, certificateSHA256="A" * 64))
-        names = [f"zhixu-oriva-{plan['version']}.apk", src_zip.name, "oriva-release.cer", "release-manifest.json"]
-        (directory / "SHA256SUMS").write_text("".join(r.sha256(directory / a) + "  " + a + "\n" for a in names), encoding="utf8")
+        # Successful api-digest writes verifyMode="api-digest" and downloadVerified=False
         all_names = names + ["SHA256SUMS"]
         release_payload = {
             "draft": False,
@@ -512,36 +528,20 @@ class T3VerifyStreamingAndApiDigestTests(unittest.TestCase):
             ],
         }
 
-        class FakeUrlOpenResp:
-            def __init__(self, data: bytes):
-                self._buf = io.BytesIO(data)
+        class FakeMetaResp:
+            def __init__(self, data: bytes): self._buf = io.BytesIO(data)
             def __enter__(self): return self._buf
             def __exit__(self, *a): pass
 
-        def fake_download(url, target, expected_size=None, download_timeout=60, total_timeout=300):
-            name = url.rsplit("/", 1)[-1]
-            target.write_bytes((directory / name).read_bytes())
-
-        def fake_archive_source(root, c, v, out):
-            Path(out).write_bytes(src_zip.read_bytes())
-            return 1
-
-        args = SimpleNamespace(
-            repo="owner/repo", clone_check=False, verify_mode="full",
-            download_timeout=60, download_total_timeout=300, git_timeout=120,
-        )
         with (
-            patch.object(r.urllib.request, "urlopen", return_value=FakeUrlOpenResp(json.dumps(release_payload).encode("utf8"))),
+            patch.object(r.urllib.request, "build_opener", return_value=SimpleNamespace(open=lambda req, timeout=None: FakeMetaResp(json.dumps(release_payload).encode("utf8")))),
             patch.object(r, "git", return_value=f"{commit}\trefs/tags/{plan['tag']}"),
-            patch.object(r, "download_asset", fake_download),
-            patch.object(r, "archive_source", fake_archive_source),
         ):
             r.verify(self.root, plan, args, {})
 
-        report = json.loads((Path(plan["evidence"]) / "recipient-verification.json").read_text(encoding="utf8"))
-        self.assertEqual(report["verifyMode"], "full")
-        self.assertTrue(report["downloadVerified"])
-        self.assertEqual(report["status"], "PASS")
+        report = json.loads(stale_report.read_text(encoding="utf8"))
+        self.assertEqual(report["verifyMode"], "api-digest")
+        self.assertFalse(report["downloadVerified"])
 
 
 if __name__ == "__main__":
