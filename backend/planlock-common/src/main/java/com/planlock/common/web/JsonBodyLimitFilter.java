@@ -20,20 +20,22 @@ import org.springframework.util.AntPathMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Servlet 级 JSON 请求体预读拦截器：
  * <ol>
  *   <li>受保护 JSON 路由在读取/缓冲任何请求字节之前先行验证 Bearer JWT；</li>
- *   <li>结合全局并发缓冲配额与按路由单请求上限，以单缓冲零冗余拷贝方式预读后交由下游重放。</li>
+ *   <li>所有堆缓冲分配严格遵循「预算先于分配」：已知长度先 CAS 预留再定容分配，未知长度（chunked）按分段 slab 先预留再分配，杜绝扩容倍增峰值与未计账预分配；</li>
+ *   <li>结合大路由上限隔离与小载荷保底配额，防止慢速大包饿死公共登录与常规小请求；所有退出与异常路径均经 {@code finally} 精确归还。</li>
  * </ol>
  */
 @Slf4j
@@ -51,7 +53,8 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             + ",\"message\":\""
             + ErrorCode.UNAUTHORIZED.getDefaultMessage()
             + "\"}";
-    private static final int CHUNK_SIZE = 8192;
+    static final int CHUNK_SIZE = 8192;
+    private static final int MAX_BUFFER_ARRAY_BYTES = Integer.MAX_VALUE - 8;
 
     private final JsonBodyLimitProperties properties;
     private final JwtUtil jwtUtil;
@@ -60,12 +63,8 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
     @Autowired
     public JsonBodyLimitFilter(JsonBodyLimitProperties properties, JwtUtil jwtUtil) {
-        this.properties = properties;
-        this.jwtUtil = jwtUtil;
-    }
-
-    public JsonBodyLimitFilter(JsonBodyLimitProperties properties) {
-        this(properties, null);
+        this.properties = Objects.requireNonNull(properties, "properties must not be null");
+        this.jwtUtil = Objects.requireNonNull(jwtUtil, "jwtUtil must not be null");
     }
 
     @Override
@@ -83,7 +82,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             return;
         }
         long limit = resolveLimit(path);
-        if (limit <= 0) {
+        if (limit <= 0L) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -99,20 +98,42 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             writeSafeJsonError(response, SAFE_ERROR_JSON);
             return;
         }
-        long maxConcurrent = properties.getMaxConcurrentJsonBufferBytes();
+
+        int maxLimit = (int) Math.min(limit, MAX_BUFFER_ARRAY_BYTES);
+        long effectiveMaxConcurrent = resolveEffectiveConcurrentLimit(limit);
         long reserved = 0L;
-        int initialCapacity = contentLength > 0L ? (int) Math.min(contentLength, limit) : 256;
-        DirectByteArrayOutputStream bufferOut = new DirectByteArrayOutputStream(initialCapacity);
+        List<byte[]> segments = new ArrayList<>();
+        byte[] currentSlab = null;
+        int currentSlabOffset = 0;
+        long total = 0L;
+
         try {
+            // Known positive Content-Length without Transfer-Encoding: reserve BEFORE allocating.
+            if (contentLength > 0L && !hasTransferEncoding) {
+                int preallocateCap = (int) Math.min(contentLength, maxLimit);
+                if (!tryReserveConcurrentBytes(preallocateCap, effectiveMaxConcurrent)) {
+                    log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, stage=preallocate, method={}, uri={}",
+                            request.getMethod(), request.getRequestURI());
+                    writeSafeJsonError(response, SAFE_ERROR_JSON);
+                    return;
+                }
+                reserved += preallocateCap;
+                currentSlab = new byte[preallocateCap];
+                segments.add(currentSlab);
+            }
+
             ServletInputStream in = request.getInputStream();
-            byte[] chunk = new byte[CHUNK_SIZE];
-            long total = 0L;
+            int scratchSize = (int) Math.min(CHUNK_SIZE, Math.min(limit + 1L, MAX_BUFFER_ARRAY_BYTES));
+            byte[] scratch = new byte[Math.max(1, scratchSize)];
             while (true) {
                 long remaining = limit - total;
-                int maxRead = remaining >= chunk.length ? chunk.length : (int) remaining + 1;
-                int count = in.read(chunk, 0, maxRead);
+                int maxRead = remaining >= scratch.length ? scratch.length : (int) remaining + 1;
+                int count = in.read(scratch, 0, maxRead);
                 if (count == -1) {
                     break;
+                }
+                if (count == 0) {
+                    continue;
                 }
                 total += count;
                 if (total > limit) {
@@ -121,21 +142,47 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
                     writeSafeJsonError(response, SAFE_ERROR_JSON);
                     return;
                 }
-                if (!tryReserveConcurrentBytes(count, maxConcurrent)) {
-                    log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, method={}, uri={}",
-                            request.getMethod(), request.getRequestURI());
-                    writeSafeJsonError(response, SAFE_ERROR_JSON);
-                    return;
+                int srcOffset = 0;
+                int remainingToStore = count;
+                while (remainingToStore > 0) {
+                    if (currentSlab == null || currentSlabOffset >= currentSlab.length) {
+                        long storedSoFar = total - remainingToStore;
+                        long remainingForRequest = maxLimit - storedSoFar;
+                        int slabCap = computeNextSlabCapacity(
+                                segments.isEmpty(), remainingToStore, remainingForRequest, effectiveMaxConcurrent);
+                        if (!tryReserveConcurrentBytes(slabCap, effectiveMaxConcurrent)) {
+                            if (slabCap > remainingToStore
+                                    && tryReserveConcurrentBytes(remainingToStore, effectiveMaxConcurrent)) {
+                                slabCap = remainingToStore;
+                            } else {
+                                log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, stage=stream, method={}, uri={}",
+                                        request.getMethod(), request.getRequestURI());
+                                writeSafeJsonError(response, SAFE_ERROR_JSON);
+                                return;
+                            }
+                        }
+                        reserved += slabCap;
+                        currentSlab = new byte[slabCap];
+                        currentSlabOffset = 0;
+                        segments.add(currentSlab);
+                    }
+                    int writable = Math.min(remainingToStore, currentSlab.length - currentSlabOffset);
+                    System.arraycopy(scratch, srcOffset, currentSlab, currentSlabOffset, writable);
+                    currentSlabOffset += writable;
+                    srcOffset += writable;
+                    remainingToStore -= writable;
                 }
-                reserved += count;
-                bufferOut.write(chunk, 0, count);
             }
-            if (bufferOut.size() == 0) {
+            if (total == 0L) {
+                currentSlab = null;
+                segments.clear();
+                releaseConcurrentBytes(reserved);
+                reserved = 0L;
                 filterChain.doFilter(request, response);
                 return;
             }
             CachedBodyHttpServletRequest wrapped = new CachedBodyHttpServletRequest(
-                    request, bufferOut.rawBuffer(), bufferOut.size());
+                    request, segments, (int) total);
             filterChain.doFilter(wrapped, response);
         } catch (Exception ex) {
             if (hasPayloadLimitCause(ex) && !response.isCommitted()) {
@@ -163,13 +210,52 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         return false;
     }
 
+    public long getActiveBufferedBytes() {
+        return activeBufferedBytes.get();
+    }
+
     long currentBufferedBytes() {
         return activeBufferedBytes.get();
     }
 
-    private boolean isProtectedApiRoute(String path) {
+    long resolveEffectiveConcurrentLimit(long routeLimit) {
+        long maxConcurrent = properties.getMaxConcurrentJsonBufferBytes();
+        if (maxConcurrent <= 0L) {
+            return 0L;
+        }
+        long defaultLimit = properties.getMaxJsonRequestBytes();
+        boolean isLargeRoute = defaultLimit > 0L && routeLimit > defaultLimit;
+        if (!isLargeRoute) {
+            return maxConcurrent;
+        }
+        long configuredReserve = properties.getSmallPayloadReserveBytes();
+        if (configuredReserve <= 0L || configuredReserve >= maxConcurrent) {
+            return maxConcurrent;
+        }
+        return maxConcurrent - configuredReserve;
+    }
+
+    private static int computeNextSlabCapacity(
+            boolean firstSegment, int remainingToStore, long remainingForRequest, long effectiveMaxConcurrent) {
+        if (firstSegment) {
+            return remainingToStore;
+        }
+        long desired = Math.min(CHUNK_SIZE, remainingForRequest);
+        if (effectiveMaxConcurrent > 0L && desired > effectiveMaxConcurrent) {
+            desired = effectiveMaxConcurrent;
+        }
+        if (desired < remainingToStore) {
+            desired = remainingToStore;
+        }
+        return (int) desired;
+    }
+
+    boolean isProtectedApiRoute(String path) {
         if (!pathMatcher.match("/api/v1/**", path)) {
             return false;
+        }
+        if (hasSuspiciousPublicPathToken(path)) {
+            return true;
         }
         for (String publicPattern : WebConfig.PUBLIC_API_PATTERNS) {
             if (pathMatcher.match(publicPattern, path)) {
@@ -179,10 +265,11 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         return true;
     }
 
+    private static boolean hasSuspiciousPublicPathToken(String path) {
+        return path.contains("..") || path.indexOf(';') >= 0 || path.indexOf('%') >= 0 || path.indexOf('\\') >= 0;
+    }
+
     private boolean isAuthorized(HttpServletRequest request) {
-        if (jwtUtil == null) {
-            return true;
-        }
         String auth = request.getHeader("Authorization");
         if (auth == null || !auth.startsWith("Bearer ")) {
             return false;
@@ -201,6 +288,9 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         }
         while (true) {
             long current = activeBufferedBytes.get();
+            if (current > Long.MAX_VALUE - delta) {
+                return false;
+            }
             long next = current + delta;
             if (next > maxConcurrent) {
                 return false;
@@ -217,7 +307,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         }
     }
 
-    private long resolveLimit(String path) {
+    long resolveLimit(String path) {
         if (properties.getJsonRouteLimits() != null) {
             for (JsonBodyLimitProperties.RouteLimit rule : properties.getJsonRouteLimits()) {
                 if (rule != null && rule.getPattern() != null && rule.getMaxBytes() > 0
@@ -263,25 +353,14 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         response.getWriter().write(body);
     }
 
-    private static final class DirectByteArrayOutputStream extends ByteArrayOutputStream {
-
-        private DirectByteArrayOutputStream(int initialCapacity) {
-            super(initialCapacity);
-        }
-
-        private byte[] rawBuffer() {
-            return this.buf;
-        }
-    }
-
     private static final class CachedBodyHttpServletRequest extends HttpServletRequestWrapper {
 
-        private final byte[] rawBuffer;
+        private final List<byte[]> segments;
         private final int length;
 
-        private CachedBodyHttpServletRequest(HttpServletRequest request, byte[] rawBuffer, int length) {
+        private CachedBodyHttpServletRequest(HttpServletRequest request, List<byte[]> segments, int length) {
             super(request);
-            this.rawBuffer = rawBuffer;
+            this.segments = segments;
             this.length = length;
         }
 
@@ -297,7 +376,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
         @Override
         public ServletInputStream getInputStream() {
-            return new CachedServletInputStream(rawBuffer, length);
+            return new SegmentedServletInputStream(segments, length);
         }
 
         @Override
@@ -308,27 +387,63 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         }
     }
 
-    private static final class CachedServletInputStream extends ServletInputStream {
+    private static final class SegmentedServletInputStream extends ServletInputStream {
 
-        private final ByteArrayInputStream delegate;
+        private final List<byte[]> segments;
+        private final int totalLength;
+        private int segmentIndex = 0;
+        private int segmentOffset = 0;
+        private int bytesRead = 0;
 
-        private CachedServletInputStream(byte[] rawBuffer, int length) {
-            this.delegate = new ByteArrayInputStream(rawBuffer, 0, length);
+        private SegmentedServletInputStream(List<byte[]> segments, int totalLength) {
+            this.segments = segments;
+            this.totalLength = totalLength;
         }
 
         @Override
         public int read() {
-            return delegate.read();
+            if (bytesRead >= totalLength) {
+                return -1;
+            }
+            advanceSegmentIfNeeded();
+            int value = segments.get(segmentIndex)[segmentOffset++] & 0xFF;
+            bytesRead++;
+            return value;
         }
 
         @Override
         public int read(byte[] b, int off, int len) {
-            return delegate.read(b, off, len);
+            Objects.checkFromIndexSize(off, len, b.length);
+            if (len == 0) {
+                return 0;
+            }
+            if (bytesRead >= totalLength) {
+                return -1;
+            }
+            int remainingTotal = totalLength - bytesRead;
+            int toRead = Math.min(len, remainingTotal);
+            int copied = 0;
+            while (copied < toRead) {
+                advanceSegmentIfNeeded();
+                byte[] current = segments.get(segmentIndex);
+                int availableInSegment = current.length - segmentOffset;
+                int step = Math.min(toRead - copied, availableInSegment);
+                System.arraycopy(current, segmentOffset, b, off + copied, step);
+                segmentOffset += step;
+                copied += step;
+                bytesRead += step;
+            }
+            return copied;
+        }
+
+        @Override
+        public int available() {
+            return totalLength - bytesRead;
         }
 
         @Override
         public boolean isFinished() {
-            return delegate.available() == 0;
+            return bytesRead >= totalLength;
         }
 
         @Override
@@ -338,7 +453,14 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
         @Override
         public void setReadListener(ReadListener readListener) {
-            // Replay stream backed by in-memory bytes is always immediately readable.
+            // Replay stream backed by in-memory segments is always immediately readable.
+        }
+
+        private void advanceSegmentIfNeeded() {
+            while (segmentIndex < segments.size() && segmentOffset >= segments.get(segmentIndex).length) {
+                segmentIndex++;
+                segmentOffset = 0;
+            }
         }
     }
 }
