@@ -4,9 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.planlock.common.BusinessException;
 import com.planlock.common.ErrorCode;
 import com.planlock.common.PlanStatusLogRules;
+import com.planlock.record.journal.JournalRules;
+import com.planlock.record.journal.entity.JournalEntry;
 import com.planlock.schedule.ScheduleRules;
 import com.planlock.schedule.dto.ScheduleUpsertRequest;
 import com.planlock.sync.dto.SyncItemResult;
+import com.planlock.sync.dto.SyncJournalView;
 import com.planlock.sync.dto.SyncPullResponse;
 import com.planlock.sync.dto.SyncPushRequest;
 import com.planlock.sync.dto.SyncPushResponse;
@@ -28,11 +31,15 @@ public class SyncService {
     private final ObjectMapper objectMapper;
 
     public SyncPullResponse pull(Long userId) {
+        List<SyncJournalView> journals = syncMapper.pullJournalEntries(userId).stream()
+                .map(this::toJournalView)
+                .toList();
         return SyncPullResponse.builder()
                 .plans(syncMapper.pullPlans(userId))
                 .schedules(syncMapper.pullSchedules(userId))
                 .strategies(syncMapper.pullStrategies(userId))
                 .planTypes(syncMapper.pullPlanTypes(userId))
+                .journals(journals)
                 .recordCounts(Map.of(
                         "execution", syncMapper.countExecutions(userId),
                         "violation", syncMapper.countViolations(userId),
@@ -89,7 +96,72 @@ public class SyncService {
                 }
             }
         }
+        if (req.getJournals() != null) {
+            if (req.getJournals().size() > JournalRules.MAX_SYNC_BATCH_SIZE) {
+                throw new BusinessException(ErrorCode.INVALID_PARAM, "单次同步日常记录不能超过 500 条");
+            }
+            for (var item : req.getJournals()) {
+                if (item == null) {
+                    results.add(fail("journal:null", new BusinessException(ErrorCode.INVALID_PARAM, "日常记录条目不能为空"), null));
+                    continue;
+                }
+                String key = "journal:" + item.getId();
+                try {
+                    pushJournal(userId, item);
+                    results.add(ok(key, syncMapper.journalIdentity(userId, item.getId())));
+                } catch (BusinessException e) {
+                    results.add(fail(key, e, item.getClientId()));
+                }
+            }
+        }
         return new SyncPushResponse(results);
+    }
+
+    private void pushJournal(Long userId, SyncPushRequest.JournalItem item) {
+        JournalRules.validateClientId(item.getClientId());
+        if (item.getEntryDate() == null) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "记录日期不能为空");
+        }
+        item.setMood(JournalRules.normalizeMood(item.getMood()));
+        List<String> normalizedTags = JournalRules.normalizeTags(item.getTags());
+        item.setTags(normalizedTags);
+        String tagsJson = JournalRules.serializeTags(normalizedTags, objectMapper);
+        item.setContent(JournalRules.normalizeContent(item.getContent()));
+        if (item.getStatus() == null) {
+            item.setStatus(1);
+        }
+        if (item.getStatus() != 0 && item.getStatus() != 1) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "日常记录状态无效");
+        }
+        if (item.getId() == null) {
+            syncMapper.insertJournal(userId, item, tagsJson);
+            return;
+        }
+        if (item.getBaseVersion() == null) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM, "缺少 baseVersion");
+        }
+        if (syncMapper.updateJournal(userId, item, tagsJson) == 0) {
+            if (syncMapper.countOwnedJournal(item.getId(), userId) == 0) {
+                throw new BusinessException(ErrorCode.NOT_FOUND, "日常记录不存在");
+            }
+            throw new BusinessException(ErrorCode.VERSION_CONFLICT);
+        }
+    }
+
+    private SyncJournalView toJournalView(JournalEntry e) {
+        SyncJournalView view = new SyncJournalView();
+        view.setId(e.getId());
+        view.setClientId(e.getClientId());
+        view.setUserId(e.getUserId());
+        view.setEntryDate(e.getEntryDate());
+        view.setMood(e.getMood());
+        view.setTags(JournalRules.parseTags(e.getTags(), objectMapper));
+        view.setContent(e.getContent());
+        view.setStatus(e.getStatus());
+        view.setVersion(e.getVersion());
+        view.setCreatedAt(e.getCreatedAt());
+        view.setUpdatedAt(e.getUpdatedAt());
+        return view;
     }
 
     private void validateClientId(String clientId) {

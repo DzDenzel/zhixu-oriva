@@ -28,4 +28,26 @@ public interface MergeMapper {
 
     @Update("UPDATE schedules SET user_id = #{toUserId}, version = version + 1 WHERE user_id = #{fromUserId}")
     int transferSchedules(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
+
+    /** 情景 A：同 client_id 但字段/状态存在任何分歧时无损重命名游客行 client_id，确保双方无损并存（mood/content 按 BINARY 精确判等）。 */
+    @Update("UPDATE journal_entries g JOIN journal_entries t "
+            + "ON t.user_id = #{toUserId} AND t.client_id = g.client_id "
+            + "SET g.client_id = CONCAT('m-', g.id, '-', SUBSTRING(REPLACE(UUID(), '-', ''), 1, 24)) "
+            + "WHERE g.user_id = #{fromUserId} AND NOT ("
+            + "t.entry_date <=> g.entry_date AND CAST(t.mood AS BINARY) <=> CAST(g.mood AS BINARY) "
+            + "AND t.tags <=> g.tags AND CAST(t.content AS BINARY) <=> CAST(g.content AS BINARY) AND t.status <=> g.status)")
+    int rekeyConflictingGuestJournals(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
+
+    @Update("UPDATE journal_entries g LEFT JOIN journal_entries t ON t.user_id = #{toUserId} AND t.client_id = g.client_id "
+            + "SET g.user_id = #{toUserId}, g.version = g.version + 1 "
+            + "WHERE g.user_id = #{fromUserId} AND t.id IS NULL")
+    int transferJournals(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
+
+    /** 情景 B：仅在全字段与状态逐字节完全等价时清理冗余游客行。 */
+    @org.apache.ibatis.annotations.Delete("DELETE g FROM journal_entries g JOIN journal_entries t "
+            + "ON t.user_id = #{toUserId} AND t.client_id = g.client_id "
+            + "WHERE g.user_id = #{fromUserId} "
+            + "AND t.entry_date <=> g.entry_date AND CAST(t.mood AS BINARY) <=> CAST(g.mood AS BINARY) "
+            + "AND t.tags <=> g.tags AND CAST(t.content AS BINARY) <=> CAST(g.content AS BINARY) AND t.status <=> g.status")
+    int clearDuplicateGuestJournals(@Param("fromUserId") Long fromUserId, @Param("toUserId") Long toUserId);
 }

@@ -1,5 +1,6 @@
 package com.planlock.sync.mapper;
 
+import com.planlock.record.journal.entity.JournalEntry;
 import com.planlock.sync.dto.SyncPlanView;
 import com.planlock.sync.dto.SyncPushRequest;
 import com.planlock.sync.dto.SyncStrategyView;
@@ -115,4 +116,27 @@ public interface SyncMapper {
             + "auto_dnd = COALESCE(#{s.autoDnd}, auto_dnd), notify_silence = COALESCE(#{s.notifySilence}, notify_silence), version = version + 1 "
             + "WHERE plan_id = #{s.planId} AND version = #{s.baseVersion}")
     int updateStrategy(@Param("s") SyncPushRequest.StrategyItem s);
+
+    // ---- 日常记录 ----
+
+    @Select("SELECT id, client_id, user_id, entry_date, mood, tags, content, status, version, created_at, updated_at "
+            + "FROM journal_entries WHERE user_id = #{userId} ORDER BY entry_date DESC, id DESC")
+    List<JournalEntry> pullJournalEntries(@Param("userId") Long userId);
+
+    @Select("SELECT COUNT(*) FROM journal_entries WHERE id = #{id} AND user_id = #{userId}")
+    int countOwnedJournal(@Param("id") Long id, @Param("userId") Long userId);
+
+    @Insert("INSERT INTO journal_entries(user_id, client_id, entry_date, mood, tags, content, status, version) "
+            + "VALUES(#{userId}, #{j.clientId}, #{j.entryDate}, #{j.mood}, #{tagsJson}, #{j.content}, #{j.status}, 0) "
+            + "ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)")
+    @Options(useGeneratedKeys = true, keyProperty = "j.id")
+    int insertJournal(@Param("userId") Long userId, @Param("j") SyncPushRequest.JournalItem j, @Param("tagsJson") String tagsJson);
+
+    @Update("UPDATE journal_entries SET entry_date = #{j.entryDate}, mood = #{j.mood}, tags = #{tagsJson}, "
+            + "content = #{j.content}, status = #{j.status}, version = version + 1 "
+            + "WHERE id = #{j.id} AND user_id = #{userId} AND version = #{j.baseVersion}")
+    int updateJournal(@Param("userId") Long userId, @Param("j") SyncPushRequest.JournalItem j, @Param("tagsJson") String tagsJson);
+
+    @Select("SELECT id, version, client_id, status FROM journal_entries WHERE id = #{id} AND user_id = #{userId} FOR UPDATE")
+    SyncItemResult journalIdentity(@Param("userId") Long userId, @Param("id") Long id);
 }

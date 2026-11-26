@@ -7,6 +7,8 @@ import com.planlock.app.api.dto.BackupPasswordSetRequest
 import com.planlock.app.api.dto.DeviceDto
 import com.planlock.app.api.dto.DeviceRegisterRequest
 import com.planlock.app.api.dto.ExecutionRecordRequest
+import com.planlock.app.api.dto.JournalDto
+import com.planlock.app.api.dto.JournalUpsertRequest
 import com.planlock.app.api.dto.LoginRequest
 import com.planlock.app.api.dto.MergeRequest
 import com.planlock.app.api.dto.PlanDto
@@ -139,4 +141,30 @@ interface PlanLockApi {
 
     @POST("sync/push")
     suspend fun syncPush(@Body req: SyncPushRequest): ApiResponse<SyncPushResponse>
+
+    @GET("journals")
+    suspend fun journals(
+        @Query("from") from: String? = null,
+        @Query("to") to: String? = null,
+        @Query("mood") mood: String? = null,
+    ): ApiResponse<List<JournalDto>>
+
+    @POST("journals")
+    suspend fun createJournal(@Body req: JournalUpsertRequest): ApiResponse<JournalDto>
+
+    @PUT("journals/{id}")
+    suspend fun updateJournal(
+        @Path("id") id: Long,
+        @Query("baseVersion") baseVersion: Long,
+        @Body req: JournalUpsertRequest,
+    ): ApiResponse<JournalDto>
+
+    @DELETE("journals/{id}")
+    suspend fun deleteJournal(
+        @Path("id") id: Long,
+        @Query("baseVersion") baseVersion: Long? = null,
+    ): ApiResponse<Unit>
+
+    @GET("journals/export")
+    suspend fun exportJournals(@Query("format") format: String = "markdown"): ResponseBody
 }

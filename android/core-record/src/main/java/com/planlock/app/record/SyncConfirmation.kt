@@ -18,9 +18,16 @@ data class SyncConfirmation(
     val remoteSchedule: SyncScheduleView? = null,
     val intentIds: List<Long> = emptyList(),
     val strategyChanged: Boolean = false,
+    val localJournal: JournalSnapshotEntity? = null,
+    val remoteJournal: SyncJournalView? = null,
+    val scope: String = "",
 ) {
     val key get() = "$kind:$id"
-    val remoteDeleted get() = if (kind == "plan") remotePlan == null else remoteSchedule == null
+    val remoteDeleted get() = when (kind) {
+        "plan" -> remotePlan == null
+        "journal" -> remoteJournal == null || remoteJournal.status == 0
+        else -> remoteSchedule == null
+    }
 }
 
 @Serializable
@@ -41,5 +48,6 @@ fun PendingRecordEntity.syncEntityKey(): String? = when (type) {
     "plan_upsert", "strategy_upsert", "plan_delete", SnapshotProtection.LOCAL_PLAN_CHANGE -> planId?.let { "plan:$it" }
     "schedule_upsert" -> "schedule:${kotlinx.serialization.json.Json.decodeFromString<SchedulePendingUpsert>(payload.orEmpty()).localId}"
     "schedule_delete" -> "schedule:${requireNotNull(payload?.toLongOrNull())}"
+    "journal_upsert" -> "journal:${kotlinx.serialization.json.Json.decodeFromString<JournalPendingUpsert>(payload.orEmpty()).localId}"
     else -> null
 }

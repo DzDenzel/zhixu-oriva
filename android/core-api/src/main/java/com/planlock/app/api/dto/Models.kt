@@ -341,6 +341,7 @@ data class SyncPullResponse(
     val strategies: List<SyncStrategyView>? = null,
     val recordCounts: Map<String, Int>? = null,
     val planTypes: List<SyncPlanTypeView>? = null,
+    val journals: List<SyncJournalView>? = null,
 )
 
 @Serializable
@@ -405,6 +406,58 @@ data class SyncPushRequest(
     val strategies: List<SyncStrategyItem>? = null,
     val schedules: List<SyncScheduleItem>? = null,
     val planTypes: List<SyncPlanTypeItem>? = null,
+    val journals: List<SyncJournalItem>? = null,
+)
+
+@Serializable
+data class JournalUpsertRequest(
+    val entryDate: String,
+    val mood: String? = null,
+    val tags: List<String> = emptyList(),
+    val content: String,
+    val clientId: String? = null,
+)
+
+@Serializable
+data class JournalDto(
+    val id: Long = 0,
+    val userId: Long = 0,
+    val clientId: String? = null,
+    val entryDate: String = "",
+    val mood: String? = null,
+    val tags: List<String> = emptyList(),
+    val content: String = "",
+    val status: Int = 1,
+    val version: Long = 0,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class SyncJournalView(
+    val id: Long = 0,
+    val userId: Long = 0,
+    val clientId: String? = null,
+    val entryDate: String = "",
+    val mood: String? = null,
+    val tags: List<String> = emptyList(),
+    val content: String = "",
+    val status: Int = 1,
+    val version: Long = 0,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class SyncJournalItem(
+    val id: Long? = null,
+    val baseVersion: Long? = null,
+    val clientId: String? = null,
+    val entryDate: String,
+    val mood: String? = null,
+    val tags: List<String> = emptyList(),
+    val content: String,
+    val status: Int = 1,
 )
 
 @Serializable
@@ -421,7 +474,8 @@ data class SyncItemResult(
     val message: String = "",
     val id: Long? = null,
     val version: Long? = null,
-    val clientId: String? = null
+    val clientId: String? = null,
+    val status: Int? = null,
 )
 
 @Serializable

@@ -53,5 +53,13 @@ internal class ScopedAggregates(private val dao: BehaviorAggregateDao, private v
     suspend fun add(planId: Long, packageName: String, sourceLevel: String, durationMs: Long, endedAt: String?) =
         dao.add(scope(), planId, packageName, sourceLevel, durationMs, endedAt)
 }
+internal class ScopedJournals(private val dao: JournalSnapshotDao, private val scope: () -> String) {
+    suspend fun active() = dao.active(scope())
+    suspend fun all() = dao.all(scope())
+    suspend fun byId(id: Long) = dao.byId(scope(), id)
+    suspend fun delete(id: Long) = dao.delete(scope(), id)
+    suspend fun replaceId(old: Long, new: Long) = dao.replaceId(scope(), old, new)
+    suspend fun upsertAll(rows: List<JournalSnapshotEntity>) = dao.upsertAll(rows.map { it.copy(scope = scope(), userId = scopeOwner(scope())) })
+}
 
 internal fun scopeOwner(scope: String): Long = scope.substringAfterLast('\n').toLongOrNull() ?: 0L

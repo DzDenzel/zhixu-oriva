@@ -1,5 +1,7 @@
 package com.planlock.app.api.mock
 
+import com.planlock.app.api.JournalExportItem
+import com.planlock.app.api.JournalRules
 import com.planlock.app.api.PlanLockApi
 import com.planlock.app.api.dto.ApiResponse
 import com.planlock.app.api.dto.AuthResponse
@@ -8,6 +10,8 @@ import com.planlock.app.api.dto.BackupPasswordSetRequest
 import com.planlock.app.api.dto.DeviceDto
 import com.planlock.app.api.dto.DeviceRegisterRequest
 import com.planlock.app.api.dto.ExecutionRecordRequest
+import com.planlock.app.api.dto.JournalDto
+import com.planlock.app.api.dto.JournalUpsertRequest
 import com.planlock.app.api.dto.LoginRequest
 import com.planlock.app.api.dto.MergeRequest
 import com.planlock.app.api.dto.PlanDto
@@ -19,6 +23,8 @@ import com.planlock.app.api.dto.SendCodeRequest
 import com.planlock.app.api.dto.StatsResponse
 import com.planlock.app.api.dto.StrategyDto
 import com.planlock.app.api.dto.StrategyUpsertRequest
+import com.planlock.app.api.dto.SyncItemResult
+import com.planlock.app.api.dto.SyncJournalView
 import com.planlock.app.api.dto.SyncPullResponse
 import com.planlock.app.api.dto.SyncPushRequest
 import com.planlock.app.api.dto.SyncPushResponse
@@ -37,7 +43,9 @@ class MockApi : PlanLockApi {
 
     private var nextPlanId = 1000L
     private var nextScheduleId = 2000L
+    private var nextJournalId = 3000L
     private val scheduleItems = mutableListOf<ScheduleDto>()
+    private val journalItems = mutableListOf<JournalDto>()
 
     override suspend fun deviceRegister(req: DeviceRegisterRequest): ApiResponse<AuthResponse> =
         ApiResponse(0, "ok", token)
@@ -123,8 +131,155 @@ class MockApi : PlanLockApi {
         ApiResponse(0, "ok", Unit)
 
     override suspend fun syncPull(): ApiResponse<SyncPullResponse> =
-        ApiResponse(0, "ok", SyncPullResponse())
+        ApiResponse(
+            0,
+            "ok",
+            SyncPullResponse(
+                plans = emptyList(),
+                schedules = emptyList(),
+                strategies = emptyList(),
+                journals = journalItems.map {
+                    SyncJournalView(
+                        id = it.id,
+                        userId = it.userId,
+                        clientId = it.clientId,
+                        entryDate = it.entryDate,
+                        mood = it.mood,
+                        tags = it.tags,
+                        content = it.content,
+                        status = it.status,
+                        version = it.version,
+                        createdAt = it.createdAt,
+                        updatedAt = it.updatedAt,
+                    )
+                },
+            ),
+        )
 
-    override suspend fun syncPush(req: SyncPushRequest): ApiResponse<SyncPushResponse> =
-        ApiResponse(0, "ok", SyncPushResponse(emptyList()))
+    override suspend fun syncPush(req: SyncPushRequest): ApiResponse<SyncPushResponse> {
+        val results = mutableListOf<SyncItemResult>()
+        req.journals?.forEach { item ->
+            val key = "journal:${item.id}"
+            if (item.id == null) {
+                val existing = item.clientId?.let { cid -> journalItems.firstOrNull { it.userId == 1L && it.clientId == cid } }
+                val target = if (existing != null) {
+                    // Preserve original status on clientId duplicate-key idempotency and echo authoritative status.
+                    existing
+                } else {
+                    JournalDto(
+                        id = ++nextJournalId,
+                        userId = 1L,
+                        clientId = item.clientId,
+                        entryDate = item.entryDate,
+                        mood = JournalRules.normalizeMood(item.mood),
+                        tags = JournalRules.normalizeTags(item.tags),
+                        content = JournalRules.normalizeContent(item.content),
+                        status = item.status,
+                        version = 0L,
+                    ).also { journalItems += it }
+                }
+                results += SyncItemResult(
+                    key = key,
+                    ok = true,
+                    code = 0,
+                    message = "ok",
+                    id = target.id,
+                    version = target.version,
+                    clientId = target.clientId,
+                    status = target.status,
+                )
+            } else {
+                val old = journalItems.firstOrNull { it.id == item.id && it.userId == 1L }
+                when {
+                    old == null -> results += SyncItemResult(key = key, ok = false, code = 1003, message = "日常记录不存在", clientId = item.clientId)
+                    old.version != item.baseVersion -> results += SyncItemResult(key = key, ok = false, code = 1409, message = "版本冲突", clientId = item.clientId)
+                    else -> {
+                        val updated = old.copy(
+                            entryDate = item.entryDate,
+                            mood = JournalRules.normalizeMood(item.mood),
+                            tags = JournalRules.normalizeTags(item.tags),
+                            content = JournalRules.normalizeContent(item.content),
+                            status = item.status,
+                            version = old.version + 1L,
+                        )
+                        journalItems.removeAll { it.id == item.id }
+                        journalItems += updated
+                        results += SyncItemResult(
+                            key = key,
+                            ok = true,
+                            code = 0,
+                            message = "ok",
+                            id = updated.id,
+                            version = updated.version,
+                            clientId = updated.clientId,
+                            status = updated.status,
+                        )
+                    }
+                }
+            }
+        }
+        return ApiResponse(0, "ok", SyncPushResponse(results))
+    }
+
+    override suspend fun journals(from: String?, to: String?, mood: String?): ApiResponse<List<JournalDto>> =
+        ApiResponse(
+            0,
+            "ok",
+            journalItems
+                .filter { it.status == 1 }
+                .filter { from == null || it.entryDate >= from }
+                .filter { to == null || it.entryDate <= to }
+                .filter { mood == null || it.mood == mood }
+                .sortedWith(compareByDescending<JournalDto> { it.entryDate }.thenByDescending { it.id }),
+        )
+
+    override suspend fun createJournal(req: JournalUpsertRequest): ApiResponse<JournalDto> {
+        val existing = req.clientId?.let { cid -> journalItems.firstOrNull { it.clientId == cid } }
+        if (existing != null) return ApiResponse(0, "ok", existing)
+        val item = JournalDto(
+            id = ++nextJournalId,
+            userId = 1L,
+            clientId = req.clientId,
+            entryDate = req.entryDate,
+            mood = JournalRules.normalizeMood(req.mood),
+            tags = JournalRules.normalizeTags(req.tags),
+            content = JournalRules.normalizeContent(req.content),
+            status = 1,
+            version = 0L,
+        )
+        journalItems += item
+        return ApiResponse(0, "ok", item)
+    }
+
+    override suspend fun updateJournal(id: Long, baseVersion: Long, req: JournalUpsertRequest): ApiResponse<JournalDto> {
+        val old = journalItems.firstOrNull { it.id == id && it.status == 1 }
+            ?: return ApiResponse(1003, "日常记录不存在", null)
+        if (old.version != baseVersion) return ApiResponse(1409, "版本冲突", null)
+        val updated = old.copy(
+            entryDate = req.entryDate,
+            mood = JournalRules.normalizeMood(req.mood),
+            tags = JournalRules.normalizeTags(req.tags),
+            content = JournalRules.normalizeContent(req.content),
+            version = old.version + 1,
+        )
+        journalItems.removeAll { it.id == id }
+        journalItems += updated
+        return ApiResponse(0, "ok", updated)
+    }
+
+    override suspend fun deleteJournal(id: Long, baseVersion: Long?): ApiResponse<Unit> {
+        val old = journalItems.firstOrNull { it.id == id } ?: return ApiResponse(0, "ok", Unit)
+        if (old.status == 0) return ApiResponse(0, "ok", Unit)
+        if (baseVersion != null && old.version != baseVersion) return ApiResponse(1409, "版本冲突", null)
+        journalItems.removeAll { it.id == id }
+        journalItems += old.copy(status = 0, version = old.version + 1)
+        return ApiResponse(0, "ok", Unit)
+    }
+
+    override suspend fun exportJournals(format: String): ResponseBody =
+        JournalRules.exportMarkdown(
+            journalItems.filter { it.status == 1 }.map {
+                JournalExportItem(it.id, it.entryDate, it.mood, it.tags, it.content)
+            },
+        ).toResponseBody()
 }

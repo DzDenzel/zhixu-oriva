@@ -5,7 +5,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 
 /** Derive the protected IDs inside the same transaction that commits remote snapshots. */
-data class SnapshotProtection(val plans: Set<Long>, val schedules: Set<Long>) {
+data class SnapshotProtection(val plans: Set<Long>, val schedules: Set<Long>, val journals: Set<Long> = emptySet()) {
     companion object {
         const val LOCAL_PLAN_CHANGE = "local_plan_change"
         fun from(pending: List<PendingRecordEntity>): SnapshotProtection = SnapshotProtection(
@@ -16,6 +16,10 @@ data class SnapshotProtection(val plans: Set<Long>, val schedules: Set<Long>) {
                     "schedule_delete" -> requireNotNull(it.payload?.toLongOrNull())
                     else -> null
                 }
+            }.toSet(),
+            pending.filter { it.type == "journal_upsert" }.flatMap { row ->
+                val queued = Json.decodeFromString<JournalPendingUpsert>(row.payload.orEmpty())
+                listOfNotNull(queued.localId, queued.item.id)
             }.toSet(),
         )
     }

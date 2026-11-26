@@ -41,9 +41,20 @@ planlock:
   jwt:
     secret: ${PLANLOCK_JWT_SECRET}
     expire-minutes: ${PLANLOCK_JWT_EXPIRE_MINUTES:10080}
+  security:
+    max-json-request-bytes: ${PLANLOCK_MAX_JSON_REQUEST_BYTES:65536}
+    max-concurrent-json-buffer-bytes: ${PLANLOCK_MAX_CONCURRENT_JSON_BUFFER_BYTES:67108864}
+    json-route-limits:
+      - pattern: /api/v1/journals/**
+        max-bytes: 524288
+      - pattern: /api/v1/sync/push
+        max-bytes: 16777216
 
 logging:
   level:
     com.planlock: debug
     # User insert parameters contain password hashes; never print them in deployment logs.
     com.planlock.account.mapper: info
+    # Journal entries and sync payloads contain private user notes/tags; never print SQL parameters.
+    com.planlock.record.journal.mapper: info
+    com.planlock.sync.mapper: info

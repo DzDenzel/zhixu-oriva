@@ -17,7 +17,13 @@ class SyncClient(private val api: PlanLockApi, private val recordStore: RecordSt
         check(response.code == 0) { "同步服务返回失败" }
         val data = checkNotNull(response.data) { "同步快照缺失" }
         validateSnapshot(data)
-        recordStore.saveSnapshots(requireNotNull(data.plans), requireNotNull(data.strategies), requireNotNull(data.schedules), data.planTypes.orEmpty())
+        recordStore.saveSnapshots(
+            requireNotNull(data.plans),
+            requireNotNull(data.strategies),
+            requireNotNull(data.schedules),
+            data.planTypes.orEmpty(),
+            data.journals,
+        )
         data
     }
 
@@ -39,25 +45,33 @@ class SyncClient(private val api: PlanLockApi, private val recordStore: RecordSt
     suspend fun pushPendingRecords() = transferMutex.withLock {
         recordStore.prepareOutbox()
         val blocked = mutableSetOf<String>()
-        val initial = recordStore.pending()
-        val creates = initial.filter { it.type == "plan_upsert" && (it.planId ?: 0) < 0 }.groupBy { it.planId }.values.map { rows -> rows.minBy { it.id }.id }.toSet()
-        val initialIds = initial.sortedWith(compareBy<PendingRecordEntity> {
-            if (it.type == "plan_type_upsert" && !Json.decodeFromString<SyncPlanTypeItem>(it.payload.orEmpty()).deleted) 0 else if (it.id in creates) 1 else 2
-        }.thenBy { it.id }).map { it.id }
-        for (id in initialIds) {
-            // An earlier acknowledgement may have mapped IDs/rebased this persisted row.
-            val p = recordStore.pendingById(id) ?: continue
-            val entity = p.syncEntityKey() ?: when (p.type) {
-                "plan_type_upsert" -> "planType:${Json.decodeFromString<SyncPlanTypeItem>(p.payload.orEmpty()).typeKey}"
-                "schedule_upsert" -> "schedule:${Json.decodeFromString<SchedulePendingUpsert>(p.payload.orEmpty()).localId}"
-                "schedule_delete" -> "schedule:${p.payload}"
-                else -> "plan:${p.planId}"
+        val processed = mutableSetOf<Long>()
+        while (true) {
+            val pending = recordStore.pending().filterNot { it.id in processed }
+            if (pending.isEmpty()) break
+            val creates = pending.filter { it.type == "plan_upsert" && (it.planId ?: 0) < 0 }.groupBy { it.planId }.values.map { rows -> rows.minBy { it.id }.id }.toSet()
+            val orderedIds = pending.sortedWith(compareBy<PendingRecordEntity> {
+                if (it.type == "plan_type_upsert" && !Json.decodeFromString<SyncPlanTypeItem>(it.payload.orEmpty()).deleted) 0 else if (it.id in creates) 1 else 2
+            }.thenBy { it.id }).map { it.id }
+            var progressed = false
+            for (id in orderedIds) {
+                processed += id
+                // An earlier acknowledgement may have mapped IDs/rebased this persisted row.
+                val p = recordStore.pendingById(id) ?: continue
+                val entity = p.syncEntityKey() ?: when (p.type) {
+                    "plan_type_upsert" -> "planType:${Json.decodeFromString<SyncPlanTypeItem>(p.payload.orEmpty()).typeKey}"
+                    "schedule_upsert" -> "schedule:${Json.decodeFromString<SchedulePendingUpsert>(p.payload.orEmpty()).localId}"
+                    "schedule_delete" -> "schedule:${p.payload}"
+                    "journal_upsert" -> "journal:${Json.decodeFromString<JournalPendingUpsert>(p.payload.orEmpty()).localId}"
+                    else -> "plan:${p.planId}"
+                }
+                if (entity in blocked) continue
+                val ok = try { send(p) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { false }
+                if (ok) progressed = true else blocked += entity
             }
-            if (entity in blocked) continue
-            val ok = try { send(p) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { false }
-            if (!ok) blocked += entity
+            if (!progressed) break
         }
         check(recordStore.pending().isEmpty()) { "仍有本地更改或记录未补传" }
     }
@@ -129,6 +143,26 @@ class SyncClient(private val api: PlanLockApi, private val recordStore: RecordSt
                 finish(p, response.code == 0) || confirmConflict(p, response.code)
             }
         } ?: false
+        "journal_upsert" -> {
+            val live = recordStore.prepareJournalSend(p.id) ?: return true
+            val queued = Json.decodeFromString<JournalPendingUpsert>(live.payload.orEmpty())
+            val response = api.syncPush(SyncPushRequest(journals = listOf(queued.item)))
+            val result = response.data?.results?.singleOrNull()
+            val expectedKey = "journal:${queued.item.id}"
+            val valid = response.code == 0 && result?.ok == true && result.key == expectedKey &&
+                result.id != null && requireNotNull(result.id) > 0 && result.version != null && requireNotNull(result.version) >= 0 &&
+                (queued.item.id == null && result.clientId == queued.item.clientId || queued.item.id != null && result.id == queued.item.id)
+            if (valid) {
+                recordStore.acknowledgeJournal(live, requireNotNull(result?.id), requireNotNull(result?.version), result?.status)
+                true
+            } else if (queued.item.id != null) {
+                val remote = remoteSnapshot()?.journals?.firstOrNull { it.id == queued.item.id }
+                if (remote != null && sameJournal(queued.item, remote) && remote.version >= 0) {
+                    recordStore.acknowledgeJournal(live, remote.id, remote.version, remote.status)
+                    true
+                } else confirmConflict(live, result?.code ?: response.code)
+            } else false
+        }
         else -> if (p.planId?.let { it <= 0 } == true) false else when (val upload = p.toPendingUpload()) {
             is PendingUpload.Execution -> finish(p, api.reportExecution(upload.request).code == 0)
             is PendingUpload.Violation -> finish(p, api.reportViolation(upload.request).code == 0)
@@ -151,11 +185,14 @@ class SyncClient(private val api: PlanLockApi, private val recordStore: RecordSt
         val schedules = checkNotNull(data.schedules) { "日程快照不完整" }
         val strategies = checkNotNull(data.strategies) { "设置快照不完整" }
         val types = data.planTypes.orEmpty()
+        val journals = data.journals.orEmpty()
         check(types.map { it.typeKey }.distinct().size == types.size && types.all { it.typeKey.matches(Regex("custom:[A-Za-z0-9-]{1,57}")) && it.version >= 0 && it.color in com.planlock.app.api.PlanTypes.colors && com.planlock.app.api.PlanTypes.validateName(it.name) == it.name }) { "类型快照无效" }
         check(plans.all { it.id > 0 } && plans.map { it.id }.distinct().size == plans.size)
         check(schedules.all { it.id > 0 } && schedules.map { it.id }.distinct().size == schedules.size)
+        check(journals.all { it.id > 0 && com.planlock.app.api.JournalRules.isValidIsoDate(it.entryDate) } &&
+            journals.map { it.id }.distinct().size == journals.size)
         check(strategies.all { s -> plans.any { it.id == s.planId } } && strategies.map { it.planId }.distinct().size == strategies.size)
-        owner()?.let { user -> check(plans.all { it.userId == user } && schedules.all { it.userId == user } && types.all { it.userId == user }) { "同步快照账号不匹配" } }
+        owner()?.let { user -> check(plans.all { it.userId == user } && schedules.all { it.userId == user } && types.all { it.userId == user } && journals.all { it.userId == user }) { "同步快照账号不匹配" } }
     }
     private suspend fun finish(p: PendingRecordEntity, ok: Boolean): Boolean {
         if (ok) recordStore.removePending(listOf(p.id))
@@ -176,6 +213,12 @@ internal fun sameSchedule(sent: ScheduleUpsertRequest, remote: SyncScheduleView)
         sameClock(sent.endTime, remote.endTime) && sent.allDay == remote.allDay && sent.location == remote.location && sent.note == remote.note &&
         sent.remindAdvanceMin == remote.remindAdvanceMin && sameJson(sent.repeatRule, remote.repeatRule) && sent.linkedPlanId == remote.linkedPlanId && sent.tzId == remote.tzId &&
         sent.locationLat == remote.locationLat && sent.locationLon == remote.locationLon
+internal fun sameJournal(sent: SyncJournalItem, remote: SyncJournalView): Boolean =
+    sent.entryDate == remote.entryDate &&
+        sent.mood == remote.mood &&
+        sent.tags == remote.tags &&
+        sent.content == remote.content &&
+        sent.status == remote.status
 private fun sameJson(a: String?, b: String?): Boolean = if (a == b) true else try {
     a != null && b != null && Json.parseToJsonElement(a) == Json.parseToJsonElement(b)
 } catch (_: Exception) { false }

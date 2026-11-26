@@ -76,7 +76,12 @@ import java.util.Locale
 import java.util.TimeZone
 
 @Composable
-internal fun CreateActionSheet(onDismiss: () -> Unit, onPlan: () -> Unit, onSchedule: () -> Unit) {
+internal fun CreateActionSheet(
+    onDismiss: () -> Unit,
+    onPlan: () -> Unit,
+    onSchedule: () -> Unit,
+    onJournal: (() -> Unit)? = null,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("新建") },
@@ -84,6 +89,9 @@ internal fun CreateActionSheet(onDismiss: () -> Unit, onPlan: () -> Unit, onSche
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 CreateChoice("行", "计划", "需要执行与进度追踪的时间块", com.planlock.design.InkTone.slab, onPlan)
                 CreateChoice("记", "日程", "事件、纪念日与提醒", com.planlock.design.InkTone.brass, onSchedule)
+                onJournal?.let { openJournal ->
+                    CreateChoice("随", "日常记录", "心情、标签与随手记", com.planlock.design.InkTone.jade, openJournal)
+                }
             }
         },
         confirmButton = {},

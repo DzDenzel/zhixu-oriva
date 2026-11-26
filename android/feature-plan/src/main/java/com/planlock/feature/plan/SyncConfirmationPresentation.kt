@@ -15,8 +15,60 @@ internal data class ConfirmationPresentation(
 
 internal fun SyncConfirmation.affectedPlanId(): Long? = if (kind == "plan") id else null
 
+internal fun filterConfirmationsForScope(
+    confirmations: List<SyncConfirmation>,
+    currentScope: String,
+    kind: String? = null,
+): List<SyncConfirmation> = confirmations.filter { item ->
+    currentScope.isNotEmpty() &&
+        item.scope == currentScope &&
+        (kind == null || item.kind == kind)
+}
+
+internal fun isConfirmationInScope(
+    confirmation: SyncConfirmation?,
+    currentScope: String,
+    expectedKind: String? = null,
+): Boolean = confirmation != null &&
+    currentScope.isNotEmpty() &&
+    confirmation.scope == currentScope &&
+    (expectedKind == null || confirmation.kind == expectedKind)
+
 /** UI-only projection: neither side is mutated or silently preferred while the user compares it. */
 internal fun SyncConfirmation.presentation(): ConfirmationPresentation {
+    if (kind == "journal") {
+        val localTags = localJournal?.let { com.planlock.app.api.JournalRules.parseTagsJson(it.tagsJson).joinToString("、") }
+        val remoteTags = remoteJournal?.tags?.joinToString("、")
+        val title = localJournal?.entryDate?.takeIf { it.isNotBlank() }
+            ?: remoteJournal?.entryDate?.takeIf { it.isNotBlank() }
+            ?: "日常记录 $id"
+        val fields = buildList {
+            fun field(label: String, mine: String?, remote: String?) {
+                add(
+                    ConfirmationField(
+                        label,
+                        mine?.takeIf { it.isNotBlank() } ?: "未设置",
+                        if (remoteDeleted) "对方已删除" else remote?.takeIf { it.isNotBlank() } ?: "未设置",
+                    )
+                )
+            }
+            field("日期", if (deleting) "本机已删除" else localJournal?.entryDate, remoteJournal?.entryDate)
+            field("心情", localJournal?.mood, remoteJournal?.mood)
+            field("标签", localTags, remoteTags)
+            field("正文", localJournal?.content?.take(120), remoteJournal?.content?.take(120))
+        }
+        return ConfirmationPresentation(
+            title = "日常记录 · $title",
+            explanation = when {
+                deleting -> "对方修改过这条日常记录，仍要删除吗？"
+                remoteDeleted -> "对方已删除这条日常记录。你可以接受删除，或恢复我的版本并重新同步。"
+                else -> "这条日常记录在两台设备上有不同修改。请比较两边内容，再选择要保留的版本。"
+            },
+            fields = fields,
+            keepRemoteLabel = if (remoteDeleted) "接受删除" else "保留对方版本",
+            keepMineLabel = if (remoteDeleted) "恢复我的版本" else "保留我的版本",
+        )
+    }
     val isPlan = kind == "plan"
     val localTitle = if (isPlan) localPlan?.name else localSchedule?.title
     val remoteTitle = if (isPlan) remotePlan?.name else remoteSchedule?.title

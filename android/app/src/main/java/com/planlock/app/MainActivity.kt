@@ -89,6 +89,7 @@ import com.planlock.design.ThemeMode
 import com.planlock.design.TopLevelDestination
 import com.planlock.design.UIStatePanel
 import com.planlock.design.UiState
+import com.planlock.feature.plan.JournalScreen
 import com.planlock.feature.plan.PlanDetailScreen
 import com.planlock.feature.plan.PlanEditScreen
 import com.planlock.feature.plan.PlanScreen
@@ -456,6 +457,20 @@ private fun AppContent(
                     localHolder = todayHolder,
                     localKey = todayKey,
                     onAsk = { navController.navigate("assistant") { launchSingleTop = true } },
+                    onOpenJournal = { compose ->
+                        navController.navigate(if (compose) "journal?compose=true" else "journal") { launchSingleTop = true }
+                    },
+                )
+            }
+            composable(
+                "journal?compose={compose}",
+                arguments = listOf(navArgument("compose") { type = NavType.BoolType; defaultValue = false }),
+            ) { backStack ->
+                val compose = backStack.arguments?.getBoolean("compose") ?: false
+                JournalScreen(
+                    onBack = { navController.popBackStack() },
+                    openComposerInitially = compose,
+                    onNotice = { message -> lifecycleOwner.lifecycleScope.launch { snackbar.showSnackbar(message) } },
                 )
             }
             composable(TopLevelDestination.PLANS.route) {

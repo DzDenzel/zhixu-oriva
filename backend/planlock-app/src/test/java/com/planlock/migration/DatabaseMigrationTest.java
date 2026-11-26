@@ -137,7 +137,7 @@ class DatabaseMigrationTest {
             try (var app = start(schema)) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
+                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1", "8|SQL|1");
                 snapshot(schema, "empty");
             }
         }
@@ -160,7 +160,7 @@ class DatabaseMigrationTest {
             try (var app = start(schema, "--spring.flyway.baseline-on-migrate=true", "--spring.flyway.baseline-version=2")) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
+                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1", "8|SQL|1");
                 after = snapshot(schema, "existing");
                 assertCreationIdentityStructure(schema);
                 assertThat(schema.query("SELECT name,ended_occurrence_date,status_log FROM plans WHERE id=9001"))
@@ -169,7 +169,7 @@ class DatabaseMigrationTest {
             }
             try (var app = start(schema)) {
                 assertThat(app.isActive()).isTrue();
-                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
+                assertThat(history(schema)).containsExactly("2|BASELINE|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1", "8|SQL|1");
                 assertThat(snapshot(schema, "restart")).isEqualTo(after);
                 assertThat(rowCounts(schema)).isEqualTo(dataBefore);
                 assertThat(schema.query("SELECT email FROM users WHERE id=9001")).containsExactly("f37-sentinel@example.invalid");
@@ -178,7 +178,7 @@ class DatabaseMigrationTest {
                 try (var app = start(fresh)) {
                     assertBusinessStructure(fresh);
                     assertThat(snapshot(fresh, "comparison-empty")).isEqualTo(after);
-                    evidence("structure-diff.txt", "fresh V7 == upgraded existing V2 == restart; difference: []\n");
+                    evidence("structure-diff.txt", "fresh V8 == upgraded existing V2 == restart; difference: []\n");
                 }
             }
         }
@@ -188,9 +188,9 @@ class DatabaseMigrationTest {
     void brokenMigrationStopsApplicationStartupWithFailedHistoryEntry() throws Exception {
         try (Schema schema = new Schema("broken")) {
             assertThatThrownBy(() -> start(schema, "--spring.flyway.locations=classpath:db/migration,classpath:db/f37-broken"))
-                    .hasStackTraceContaining("V8__intentional_syntax_error.sql")
+                    .hasStackTraceContaining("V9__intentional_syntax_error.sql")
                     .hasStackTraceContaining("SQL State");
-            assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1", "8|SQL|0");
+            assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1", "8|SQL|1", "9|SQL|0");
             assertBusinessStructure(schema);
             snapshot(schema, "broken");
         }
@@ -202,8 +202,8 @@ class DatabaseMigrationTest {
             try (var app = start(schema, "--spring.flyway.baseline-on-migrate=true", "--spring.flyway.baseline-version=2")) {
                 assertThat(app.isActive()).isTrue();
                 assertBusinessStructure(schema);
-                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1");
-                evidence("baseline-empty.txt", "Completely empty schema: V1 through V7 executed despite baseline override.\n");
+                assertThat(history(schema)).containsExactly("1|SQL|1", "2|SQL|1", "3|SQL|1", "4|SQL|1", "5|SQL|1", "6|SQL|1", "7|SQL|1", "8|SQL|1");
+                evidence("baseline-empty.txt", "Completely empty schema: V1 through V8 executed despite baseline override.\n");
             }
         }
     }
@@ -379,7 +379,12 @@ class DatabaseMigrationTest {
 
     private static void assertBusinessStructure(Schema schema) throws Exception {
         assertThat(schema.query("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='" + schema.name + "' AND TABLE_NAME <> 'flyway_schema_history' ORDER BY TABLE_NAME"))
-                .containsExactly("deployment_instance", "devices", "execution_records", "plan_strategies", "plan_types", "plans", "schedules", "unlock_records", "users", "violation_records");
+                .containsExactly("deployment_instance", "devices", "execution_records", "journal_entries", "plan_strategies", "plan_types", "plans", "schedules", "unlock_records", "users", "violation_records");
+        assertThat(schema.query("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{0}' AND TABLE_NAME='journal_entries' ORDER BY ORDINAL_POSITION".replace("{0}", schema.name)))
+                .containsExactly(
+                        "id|bigint|NO", "user_id|bigint|NO", "client_id|varchar|YES", "entry_date|date|NO",
+                        "mood|varchar|YES", "tags|json|YES", "content|text|NO", "status|tinyint|NO",
+                        "version|bigint|NO", "created_at|datetime|NO", "updated_at|datetime|NO");
         assertThat(schema.query("SELECT id, initialized, owner_user_id FROM deployment_instance")).containsExactly("1|0|<NULL>");
         assertThat(schema.query("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{0}' AND TABLE_NAME='plans' AND COLUMN_NAME IN ('ended_occurrence_date','status_log') ORDER BY COLUMN_NAME".replace("{0}", schema.name)))
                 .containsExactly("ended_occurrence_date|date|YES", "status_log|json|YES");
@@ -390,10 +395,10 @@ class DatabaseMigrationTest {
     }
 
     private static void assertCreationIdentityStructure(Schema schema) throws Exception {
-        assertThat(schema.query("SELECT TABLE_NAME,IS_NULLABLE,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" + schema.name + "' AND COLUMN_NAME='client_id' AND TABLE_NAME IN ('plans','schedules') ORDER BY TABLE_NAME"))
-                .containsExactly("plans|YES|utf8mb4_0900_bin", "schedules|YES|utf8mb4_0900_bin");
-        assertThat(schema.query("SELECT TABLE_NAME,NON_UNIQUE,GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='" + schema.name + "' AND INDEX_NAME IN ('uk_plans_user_client','uk_schedules_user_client') GROUP BY TABLE_NAME,INDEX_NAME,NON_UNIQUE ORDER BY TABLE_NAME"))
-                .containsExactly("plans|0|user_id,client_id", "schedules|0|user_id,client_id");
+        assertThat(schema.query("SELECT TABLE_NAME,IS_NULLABLE,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" + schema.name + "' AND COLUMN_NAME='client_id' AND TABLE_NAME IN ('journal_entries','plans','schedules') ORDER BY TABLE_NAME"))
+                .containsExactly("journal_entries|YES|utf8mb4_0900_bin", "plans|YES|utf8mb4_0900_bin", "schedules|YES|utf8mb4_0900_bin");
+        assertThat(schema.query("SELECT TABLE_NAME,NON_UNIQUE,GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='" + schema.name + "' AND INDEX_NAME IN ('uk_journal_user_client','uk_plans_user_client','uk_schedules_user_client') GROUP BY TABLE_NAME,INDEX_NAME,NON_UNIQUE ORDER BY TABLE_NAME"))
+                .containsExactly("journal_entries|0|user_id,client_id", "plans|0|user_id,client_id", "schedules|0|user_id,client_id");
     }
 
     private static List<String> history(Schema schema) throws Exception {
