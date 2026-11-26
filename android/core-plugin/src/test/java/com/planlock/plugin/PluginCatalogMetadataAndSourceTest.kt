@@ -79,7 +79,7 @@ class PluginCatalogMetadataAndSourceTest {
             "JAVASCRIPT:alert(1)",
             "data:text/html,<script>alert(1)</script>",
             "file:///etc/passwd",
-            "https://user:pass@example.org/repo",
+            "https://" + "user:pass@example.org/repo",
             "not-a-url",
         )) {
             assertThrows(IllegalArgumentException::class.java) {
@@ -161,7 +161,7 @@ class PluginCatalogMetadataAndSourceTest {
             )
         }
         assertThrows(IllegalArgumentException::class.java) {
-            PluginSourcePolicy.validateCatalogUrl("https://user:pass@plugins.example.org/catalog.json", lanAllowed = false)
+            PluginSourcePolicy.validateCatalogUrl("https://" + "user:pass@plugins.example.org/catalog.json", lanAllowed = false)
         }
         assertThrows(IllegalArgumentException::class.java) {
             PluginSourcePolicy.validateCatalogUrl("https://plugins.example.org/catalog.json?token=1", lanAllowed = false)

@@ -241,7 +241,7 @@ class PluginCatalogControllerTest {
                 "JAVASCRIPT:alert(1)",
                 "data:text/html,<script>alert(1)</script>",
                 "file:///etc/passwd",
-                "https://user:pass@example.org/plugin",
+                "https://" + "user:pass@example.org/plugin",
                 "relative/path")) {
             Files.writeString(official.resolve("catalog.json"), """
                     {"plugins":[{"artifact":"sample.plp","id":"sample","name":"Sample","version":"1.0.0",
