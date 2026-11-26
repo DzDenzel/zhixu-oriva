@@ -151,6 +151,7 @@ class JsonBodyLimitFilterTest {
                 .andExpect(jsonPath("$.code").value(ErrorCode.INVALID_PARAM.getCode()))
                 .andExpect(jsonPath("$.message").value(ErrorCode.INVALID_PARAM.getDefaultMessage()))
                 .andExpect(jsonPath("$.data").doesNotExist());
+        assertThat(controller.reached).isFalse();
         assertThat(bytesConsumed.get()).isEqualTo(65);
     }
 

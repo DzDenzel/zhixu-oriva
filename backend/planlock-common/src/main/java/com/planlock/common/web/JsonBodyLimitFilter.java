@@ -16,9 +16,10 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.util.AntPathMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
-import org.springframework.web.util.ContentCachingResponseWrapper;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.Charset;
@@ -27,7 +28,8 @@ import java.util.Locale;
 
 /**
  * Servlet 级 JSON 请求体预读拦截器：
- * 先拦截已知超限 {@code Content-Length}，再通过计数输入流约束无 {@code Content-Length} 的流式/分块请求。
+ * 先拦截已知超限 {@code Content-Length}，再在调用 {@code filterChain.doFilter} 之前
+ * 分块有界读取完整请求体；未超限才放入可重放请求体进入 Controller/事务。
  */
 @Slf4j
 @Component
@@ -40,6 +42,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             + ",\"message\":\""
             + ErrorCode.INVALID_PARAM.getDefaultMessage()
             + "\"}";
+    private static final int CHUNK_SIZE = 8192;
 
     private final JsonBodyLimitProperties properties;
     private final AntPathMatcher pathMatcher = new AntPathMatcher();
@@ -63,24 +66,24 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             writeSafeLimitError(response);
             return;
         }
-        BoundedJsonRequestWrapper wrapped = new BoundedJsonRequestWrapper(request, limit);
-        ContentCachingResponseWrapper responseWrapper = new ContentCachingResponseWrapper(response);
+        byte[] bodyBytes;
         try {
-            filterChain.doFilter(wrapped, responseWrapper);
-            if (!response.isCommitted()) {
-                wrapped.drainRemainingWithinLimit();
-                responseWrapper.copyBodyToResponse();
-            }
+            bodyBytes = readBoundedBytes(request.getInputStream(), limit);
+        } catch (JsonPayloadTooLargeException ex) {
+            log.warn("rejected oversized request: category=payload_limit, stage=stream, method={}, uri={}",
+                    request.getMethod(), request.getRequestURI());
+            writeSafeLimitError(response);
+            return;
+        }
+        CachedBodyHttpServletRequest wrapped = new CachedBodyHttpServletRequest(request, bodyBytes);
+        try {
+            filterChain.doFilter(wrapped, response);
         } catch (Exception ex) {
             if (hasPayloadLimitCause(ex) && !response.isCommitted()) {
-                log.warn("rejected oversized request: category=payload_limit, stage=stream, method={}, uri={}",
+                log.warn("rejected oversized request: category=payload_limit, stage=deserializer, method={}, uri={}",
                         request.getMethod(), request.getRequestURI());
-                responseWrapper.reset();
                 writeSafeLimitError(response);
                 return;
-            }
-            if (!response.isCommitted()) {
-                responseWrapper.copyBodyToResponse();
             }
             throw ex;
         }
@@ -97,6 +100,26 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             depth++;
         }
         return false;
+    }
+
+    private static byte[] readBoundedBytes(ServletInputStream in, long limit) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[CHUNK_SIZE];
+        long total = 0L;
+        while (true) {
+            long remaining = limit - total;
+            int maxRead = remaining >= buffer.length ? buffer.length : (int) remaining + 1;
+            int count = in.read(buffer, 0, maxRead);
+            if (count == -1) {
+                break;
+            }
+            total += count;
+            if (total > limit) {
+                throw new JsonPayloadTooLargeException();
+            }
+            out.write(buffer, 0, count);
+        }
+        return out.toByteArray();
     }
 
     private long resolveLimit(HttpServletRequest request) {
@@ -146,118 +169,69 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         response.getWriter().write(SAFE_ERROR_JSON);
     }
 
-    private static final class BoundedJsonRequestWrapper extends HttpServletRequestWrapper {
+    private static final class CachedBodyHttpServletRequest extends HttpServletRequestWrapper {
 
-        private final long maxBytes;
-        private BoundedServletInputStream cachedInputStream;
-        private BufferedReader cachedReader;
+        private final byte[] cachedBody;
 
-        private BoundedJsonRequestWrapper(HttpServletRequest request, long maxBytes) {
+        private CachedBodyHttpServletRequest(HttpServletRequest request, byte[] cachedBody) {
             super(request);
-            this.maxBytes = maxBytes;
+            this.cachedBody = cachedBody;
         }
 
         @Override
-        public ServletInputStream getInputStream() throws IOException {
-            if (cachedInputStream == null) {
-                cachedInputStream = new BoundedServletInputStream(super.getInputStream(), maxBytes);
-            }
-            return cachedInputStream;
+        public int getContentLength() {
+            return cachedBody.length;
+        }
+
+        @Override
+        public long getContentLengthLong() {
+            return cachedBody.length;
+        }
+
+        @Override
+        public ServletInputStream getInputStream() {
+            return new CachedServletInputStream(cachedBody);
         }
 
         @Override
         public BufferedReader getReader() throws IOException {
-            if (cachedReader == null) {
-                String encoding = getCharacterEncoding();
-                Charset charset = encoding == null ? StandardCharsets.UTF_8 : Charset.forName(encoding);
-                cachedReader = new BufferedReader(new InputStreamReader(getInputStream(), charset));
-            }
-            return cachedReader;
-        }
-
-        /** 对未触发过早结束或含尾随字符的请求流执行有界排空检查，超出 limit 立即抛出异常。 */
-        private void drainRemainingWithinLimit() throws IOException {
-            ServletInputStream stream = getInputStream();
-            if (cachedInputStream != null && cachedInputStream.isExceeded()) {
-                throw new JsonPayloadTooLargeException();
-            }
-            byte[] drainBuf = new byte[4096];
-            while (stream.read(drainBuf, 0, drainBuf.length) != -1) {
-                // BoundedServletInputStream enforces maxBytes on every read chunk.
-            }
+            String encoding = getCharacterEncoding();
+            Charset charset = encoding == null ? StandardCharsets.UTF_8 : Charset.forName(encoding);
+            return new BufferedReader(new InputStreamReader(getInputStream(), charset));
         }
     }
 
-    private static final class BoundedServletInputStream extends ServletInputStream {
+    private static final class CachedServletInputStream extends ServletInputStream {
 
-        private final ServletInputStream delegate;
-        private final long maxBytes;
-        private long totalRead;
-        private boolean exceeded;
+        private final ByteArrayInputStream delegate;
 
-        private BoundedServletInputStream(ServletInputStream delegate, long maxBytes) {
-            this.delegate = delegate;
-            this.maxBytes = maxBytes;
-        }
-
-        private boolean isExceeded() {
-            return exceeded;
+        private CachedServletInputStream(byte[] cachedBody) {
+            this.delegate = new ByteArrayInputStream(cachedBody);
         }
 
         @Override
-        public int read() throws IOException {
-            if (exceeded) {
-                throw new JsonPayloadTooLargeException();
-            }
-            if (totalRead >= maxBytes) {
-                int peek = delegate.read();
-                if (peek != -1) {
-                    exceeded = true;
-                    throw new JsonPayloadTooLargeException();
-                }
-                return -1;
-            }
-            int next = delegate.read();
-            if (next != -1) {
-                totalRead++;
-            }
-            return next;
+        public int read() {
+            return delegate.read();
         }
 
         @Override
-        public int read(byte[] b, int off, int len) throws IOException {
-            if (exceeded) {
-                throw new JsonPayloadTooLargeException();
-            }
-            if (len == 0) {
-                return 0;
-            }
-            long remaining = maxBytes - totalRead;
-            int maxToRead = remaining >= Integer.MAX_VALUE ? len : (int) Math.min(len, Math.max(0L, remaining) + 1L);
-            int count = delegate.read(b, off, maxToRead);
-            if (count > 0) {
-                totalRead += count;
-                if (totalRead > maxBytes) {
-                    exceeded = true;
-                    throw new JsonPayloadTooLargeException();
-                }
-            }
-            return count;
+        public int read(byte[] b, int off, int len) {
+            return delegate.read(b, off, len);
         }
 
         @Override
         public boolean isFinished() {
-            return delegate.isFinished();
+            return delegate.available() == 0;
         }
 
         @Override
         public boolean isReady() {
-            return delegate.isReady();
+            return true;
         }
 
         @Override
         public void setReadListener(ReadListener readListener) {
-            delegate.setReadListener(readListener);
+            // Replay stream backed by in-memory bytes is always immediately readable.
         }
     }
 }

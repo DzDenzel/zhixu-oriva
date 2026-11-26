@@ -394,6 +394,31 @@ class JournalMigrationInstrumentedTest {
             assertEquals(920L, coincidentalConflict.id)
             assertEquals("本地离线改写v0", coincidentalConflict.localJournal?.content)
             assertEquals("目标另一端v0内容", coincidentalConflict.remoteJournal?.content)
+            isolatedStore.resolveConfirmation(coincidentalConflict, keepMine = false)
+
+            // R4 A7-07 #3: Multiple pending journal_upsert rows for same old localId where earlier item equals targetRemote
+            db.journalSnapshotDao().upsertAll(
+                listOf(
+                    JournalSnapshotEntity(930L, 99L, "multi-rebind-cid", "2026-11-26", "平静", null, "初始正文", 1, 0L, scope = isolatedScope),
+                )
+            )
+            isolatedStore.saveJournalChange("2026-11-26", "平静", emptyList(), "edit1", id = 930L)
+            isolatedStore.saveJournalChange("2026-11-26", "专注", emptyList(), "edit2", id = 930L)
+            isolatedStore.saveSnapshots(
+                plans = emptyList(),
+                strategies = emptyList(),
+                schedules = emptyList(),
+                journals = listOf(
+                    SyncJournalView(940L, 99L, "multi-rebind-cid", "2026-11-26", "平静", emptyList(), "edit1", 1, 1L),
+                ),
+            )
+            val multiConflict = isolatedStore.confirmations().single { it.kind == "journal" }
+            assertEquals(940L, multiConflict.id)
+            assertEquals("edit2", multiConflict.localJournal?.content)
+            isolatedStore.resolveConfirmation(multiConflict, keepMine = true)
+            assertEquals("edit2", isolatedStore.journal(940L)?.content)
+            val reupload = isolatedStore.pending().single { it.type == "journal_upsert" }
+            assertTrue(reupload.payload.orEmpty().contains("edit2"))
         }
     }
 }
