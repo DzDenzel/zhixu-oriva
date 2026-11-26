@@ -40,8 +40,9 @@ import com.planlock.app.record.entity.ScheduleSnapshotEntity
         com.planlock.app.record.entity.ScopeMigrationIssue::class,
         com.planlock.app.record.entity.PlanTypeSnapshotEntity::class,
         com.planlock.app.record.entity.BehaviorHistoryEntity::class,
+        com.planlock.app.record.entity.JournalSnapshotEntity::class,
     ],
-    version = 11,
+    version = 12,
     autoMigrations = [AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4), AutoMigration(from = 4, to = 5), AutoMigration(from = 5, to = 6), AutoMigration(from = 6, to = 7)],
     exportSchema = true
 )
@@ -52,7 +53,7 @@ abstract class PlanLockDatabase : RoomDatabase() {
         val revision = MutableStateFlow(0L)
         invalidationTracker.addObserver(object : InvalidationTracker.Observer(
             "plan_snapshot", "strategy_snapshot", "schedule_snapshot", "pending_record", "behavior_aggregate",
-            "execution_history", "record_history_cursor", "plan_type_snapshot", "behavior_history",
+            "execution_history", "record_history_cursor", "plan_type_snapshot", "behavior_history", "journal_snapshot",
         ) {
             override fun onInvalidated(tables: Set<String>) {
                 revision.update { it + 1 }
@@ -69,6 +70,7 @@ abstract class PlanLockDatabase : RoomDatabase() {
     abstract fun executionHistoryDao(): com.planlock.app.record.dao.ExecutionHistoryDao
     abstract fun planTypeSnapshotDao(): com.planlock.app.record.dao.PlanTypeSnapshotDao
     abstract fun behaviorHistoryDao(): com.planlock.app.record.dao.BehaviorHistoryDao
+    abstract fun journalSnapshotDao(): com.planlock.app.record.dao.JournalSnapshotDao
 
     companion object {
         // 保留既有计划、策略和待上传记录，仅追加可空的本地列。
@@ -87,7 +89,7 @@ abstract class PlanLockDatabase : RoomDatabase() {
                     context.applicationContext,
                     PlanLockDatabase::class.java,
                     "planlock.db"
-                ).addMigrations(MIGRATION_1_2, PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration, AccountScopeMigration(legacyInstance = {
+                ).addMigrations(MIGRATION_1_2, PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration, JournalMigration, AccountScopeMigration(legacyInstance = {
                     val preferences = kotlinx.coroutines.runBlocking { context.planLockPreferences.data.first() }
                     preferences[com.planlock.app.api.TokenStore.legacyOwnerInstanceKey]
                         ?: preferences[androidx.datastore.preferences.core.stringPreferencesKey("auth_data_owner_instance")]

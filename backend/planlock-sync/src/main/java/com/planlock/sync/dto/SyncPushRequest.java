@@ -16,6 +16,19 @@ public class SyncPushRequest {
     private List<StrategyItem> strategies;
     private List<ScheduleItem> schedules;
     private List<PlanTypeItem> planTypes;
+    private List<JournalItem> journals;
+
+    @Data
+    public static class JournalItem {
+        private String clientId;
+        private Long id;
+        private Long baseVersion;
+        private LocalDate entryDate;
+        private String mood;
+        private List<String> tags;
+        private String content;
+        private Integer status;
+    }
 
     @Data
     public static class PlanTypeItem {

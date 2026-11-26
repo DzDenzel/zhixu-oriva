@@ -19,7 +19,7 @@ class SyncReconciliationInstrumentedTest {
     private fun schedule(id: Long) = ScheduleSnapshotEntity(id,1,"schedule-$id","2026-10-13","10:00:00","2026-10-13","11:00:00",false,null,null,15,null,null,false,"Asia/Shanghai",1,0)
     private suspend fun withStore(block: suspend (RecordStore,PlanLockDatabase) -> Unit) {
         val name="reconcile-${UUID.randomUUID()}.db"
-        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration).build()
+        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration, JournalMigration).build()
         try { block(RecordStore(db, historyScope = { "local\nlocal" }),db) } finally { db.close(); context.deleteDatabase(name) }
     }
     @Test fun completeEmptyPullRemovesConfirmedRowsAndStrategiesButKeepsDrafts() = runBlocking { withStore { store,db ->
@@ -139,7 +139,7 @@ class SyncReconciliationInstrumentedTest {
             old.execSQL("INSERT INTO pending_record (id,type,planId,clientId,createdAt) VALUES (1,'plan_upsert',-41,'old-key',1)")
             old.version=5
         } finally { old.close() }
-        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration).build()
+        val db=Room.databaseBuilder(context,PlanLockDatabase::class.java,name).addMigrations(AccountScopeMigration({ "legacy" }), PlanTypeMigration, BehaviorHistoryMigration, ScheduleLocationMigration, JournalMigration).build()
         try {
             assertEquals("old-draft",db.planSnapshotDao().all("legacy\n1").single().name)
             assertEquals("old-key",db.pendingRecordDao().all("legacy\n1").single().clientId)

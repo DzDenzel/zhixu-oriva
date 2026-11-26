@@ -2,6 +2,8 @@ package com.planlock.app.record
 
 import android.content.Context
 import androidx.room.withTransaction
+import com.planlock.app.api.JournalExportItem
+import com.planlock.app.api.JournalRules
 import com.planlock.app.api.dto.*
 import kotlinx.serialization.decodeFromString
 import com.planlock.app.api.dto.ExecutionRecordRequest
@@ -11,6 +13,7 @@ import com.planlock.app.api.dto.SyncScheduleView
 import com.planlock.app.api.dto.ScheduleUpsertRequest
 import com.planlock.app.api.dto.UnlockRecordRequest
 import com.planlock.app.api.dto.ViolationRecordRequest
+import com.planlock.app.record.entity.JournalSnapshotEntity
 import com.planlock.app.record.entity.PendingRecordEntity
 import com.planlock.app.record.entity.PlanSnapshotEntity
 import com.planlock.app.record.entity.StrategySnapshotEntity
@@ -50,6 +53,7 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
     internal val strategyDao = ScopedStrategies(database.strategySnapshotDao(), ::dataScope)
     internal val pendingDao = ScopedPending(database.pendingRecordDao(), ::dataScope)
     internal val scheduleDao = ScopedSchedules(database.scheduleSnapshotDao(), ::dataScope)
+    internal val journalDao = ScopedJournals(database.journalSnapshotDao(), ::dataScope)
     private val aggregateDao = ScopedAggregates(database.behaviorAggregateDao(), ::dataScope)
     private val retention = BehaviorRetentionPolicy()
     private val historyDao = database.executionHistoryDao()
@@ -189,7 +193,10 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
     }
 
     suspend fun guestContentCount(scopes: List<String>): Int = scopes.distinct().sumOf { source ->
-        database.planSnapshotDao().all(source).size + database.scheduleSnapshotDao().all(source).size + typeDao.all(source).count { !it.deleted }
+        database.planSnapshotDao().all(source).size +
+            database.scheduleSnapshotDao().all(source).size +
+            typeDao.all(source).count { !it.deleted } +
+            database.journalSnapshotDao().active(source).size
     }
 
     /** Session owner invokes this only after a successful server merge (including local-only guests). */
@@ -199,6 +206,7 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         for (source in scopes.distinct().filter { it != destination }) {
             val sourcePlans = database.planSnapshotDao().all(source)
             val sourceSchedules = database.scheduleSnapshotDao().all(source)
+            val sourceJournals = database.journalSnapshotDao().all(source)
             val destinationTypes = typeDao.all(destination).associateBy { it.typeKey }
             typeDao.all(source).forEach { type ->
                 val existing = destinationTypes[type.typeKey]
@@ -206,10 +214,11 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
             }
             typeDao.clear(source)
             check(sourcePlans.none { row -> planDao.all().any { it.id == row.id } } &&
-                sourceSchedules.none { row -> scheduleDao.all().any { it.id == row.id } }) { "合并身份冲突，游客内容已保留" }
+                sourceSchedules.none { row -> scheduleDao.all().any { it.id == row.id } } &&
+                sourceJournals.none { row -> journalDao.all().any { it.id == row.id } }) { "合并身份冲突，游客内容已保留" }
             // SQL identifiers are a fixed internal list; values are always bound parameters.
             val sql = database.openHelper.writableDatabase
-            listOf("plan_snapshot", "schedule_snapshot").forEach {
+            listOf("plan_snapshot", "schedule_snapshot", "journal_snapshot").forEach {
                 sql.execSQL("UPDATE $it SET scope=?,userId=? WHERE scope=?", arrayOf(destination, owner, source))
             }
             listOf("strategy_snapshot", "pending_record", "behavior_aggregate").forEach {
@@ -299,13 +308,19 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
     }
 
     /** Caller must supply a complete, successful, owner-checked snapshot. */
-    suspend fun saveSnapshots(plans: List<SyncPlanView>, strategies: List<SyncStrategyView>, schedules: List<SyncScheduleView> = emptyList(), planTypes: List<SyncPlanTypeView> = emptyList()) =
+    suspend fun saveSnapshots(
+        plans: List<SyncPlanView>,
+        strategies: List<SyncStrategyView>,
+        schedules: List<SyncScheduleView> = emptyList(),
+        planTypes: List<SyncPlanTypeView> = emptyList(),
+        journals: List<SyncJournalView> = emptyList(),
+    ) =
         scopedTransaction {
             val knownIds=planDao.all().mapTo(mutableSetOf()) { it.id }
             // Guest merges can transfer old record IDs to this owner. A newly visible plan
             // invalidates the append cursor; history keys make the replay idempotent.
             if(plans.any { it.id !in knownIds }) historyDao.saveCursor(com.planlock.app.record.entity.RecordHistoryCursor(dataScope()))
-            reconciler.reconcile(plans, strategies, schedules)
+            reconciler.reconcile(plans, strategies, schedules, journals)
             mergePlanTypes(planTypes)
         }
 
@@ -383,6 +398,7 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
     }
     suspend fun resolvePlanId(id: Long): Long = resolveRestoredId(id, "plan")
     suspend fun resolveScheduleId(id: Long): Long = resolveRestoredId(id, "schedule")
+    suspend fun resolveJournalId(id: Long): Long = resolveId(id, "journal_identity")
 
     internal suspend fun rememberPlanDeleted(id: Long) {
         val previous = confirmation("plan", id) ?: LocalConfirmation("plan", 0, 0)
@@ -710,14 +726,206 @@ class RecordStore(private val database: PlanLockDatabase, private val historySco
         }
     }
 
+    // ---- 日常记录（REQ-039）：本地优先存储 + journal_upsert 同步出站 ----
+
+    suspend fun journals(mood: String? = null, query: String? = null): List<JournalSnapshotEntity> {
+        val normalizedMood = JournalRules.normalizeMood(mood)
+        val needle = query?.trim()?.takeIf { it.isNotEmpty() }?.lowercase()
+        return journalDao.active()
+            .filter { row -> normalizedMood == null || row.mood == normalizedMood }
+            .filter { row ->
+                if (needle == null) true
+                else {
+                    val tags = JournalRules.parseTagsJson(row.tagsJson)
+                    row.content.lowercase().contains(needle) ||
+                        row.mood.orEmpty().lowercase().contains(needle) ||
+                        row.entryDate.lowercase().contains(needle) ||
+                        tags.any { it.lowercase().contains(needle) }
+                }
+            }
+    }
+
+    suspend fun journal(id: Long): JournalSnapshotEntity? = journalDao.byId(resolveJournalId(id))
+
+    suspend fun saveJournalChange(
+        entryDate: String,
+        mood: String? = null,
+        tags: List<String> = emptyList(),
+        content: String,
+        id: Long? = null,
+        expectedScope: String? = null,
+    ): Long = scopedTransaction {
+        check(expectedScope == null || expectedScope == dataScope()) { "账号已变化，请重新打开编辑页" }
+        require(JournalRules.isValidIsoDate(entryDate)) { "记录日期无效" }
+        val cleanMood = JournalRules.normalizeMood(mood)
+        val cleanTags = JournalRules.normalizeTags(tags)
+        val cleanTagsJson = JournalRules.encodeTagsJson(cleanTags)
+        val cleanContent = JournalRules.normalizeContent(content)
+        val owner = scopeOwner(dataScope())
+
+        val canonicalId = if (id == null) {
+            -(UUID.randomUUID().mostSignificantBits and Long.MAX_VALUE).coerceAtLeast(1L)
+        } else {
+            resolveJournalId(id)
+        }
+        val existing = if (id != null) journalDao.byId(canonicalId) else null
+        if (id != null) {
+            check(existing != null && existing.status == 1) { "日常记录不存在或已删除" }
+        }
+        val baseVersion = if (canonicalId > 0) {
+            rebasedVersion("journal", canonicalId, existing?.version, existing?.version)
+        } else {
+            null
+        }
+        val marker = "journal-${UUID.randomUUID()}"
+        val previousPending = pendingDao.all().firstOrNull {
+            it.type == "journal_upsert" && Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).localId == canonicalId
+        }
+        val stableClientId = existing?.clientId
+            ?: previousPending?.let { Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).item.clientId }
+            ?: marker
+
+        val entity = JournalSnapshotEntity(
+            id = canonicalId,
+            userId = owner,
+            clientId = stableClientId,
+            entryDate = entryDate,
+            mood = cleanMood,
+            tagsJson = cleanTagsJson,
+            content = cleanContent,
+            status = 1,
+            version = existing?.version ?: 0L,
+            createdAt = existing?.createdAt,
+            updatedAt = existing?.updatedAt,
+            scope = dataScope(),
+        )
+        journalDao.upsertAll(listOf(entity))
+        val syncItem = SyncJournalItem(
+            id = canonicalId.takeIf { it > 0 },
+            baseVersion = baseVersion,
+            clientId = stableClientId,
+            entryDate = entryDate,
+            mood = cleanMood,
+            tags = cleanTags,
+            content = cleanContent,
+            status = 1,
+        )
+        pendingDao.insert(
+            PendingRecordEntity(
+                type = "journal_upsert",
+                planId = null,
+                clientId = marker,
+                payload = Json.encodeToString(JournalPendingUpsert(canonicalId, baseVersion, syncItem)),
+            )
+        )
+        canonicalId
+    }
+
+    suspend fun softDeleteJournal(inputId: Long, expectedScope: String? = null) = scopedTransaction {
+        check(expectedScope == null || expectedScope == dataScope()) { "账号已变化，请重新打开编辑页" }
+        val id = resolveJournalId(inputId)
+        val existing = journalDao.byId(id) ?: return@scopedTransaction
+        val queuedRows = pendingDao.all().filter {
+            it.type == "journal_upsert" && Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).localId == id
+        }
+        if (id < 0 && pendingDao.byClientId("journal-identity-$id") == null) {
+            if (queuedRows.isNotEmpty()) pendingDao.delete(queuedRows.map { it.id })
+            journalDao.delete(id)
+            return@scopedTransaction
+        }
+        if (existing.status == 0) return@scopedTransaction
+        val baseVersion = rebasedVersion("journal", id, existing.version, existing.version)
+        val tags = JournalRules.parseTagsJson(existing.tagsJson)
+        journalDao.upsertAll(listOf(existing.copy(status = 0)))
+        val marker = "journal-delete-${UUID.randomUUID()}"
+        val syncItem = SyncJournalItem(
+            id = id,
+            baseVersion = baseVersion,
+            clientId = existing.clientId,
+            entryDate = existing.entryDate,
+            mood = existing.mood,
+            tags = tags,
+            content = existing.content,
+            status = 0,
+        )
+        pendingDao.insert(
+            PendingRecordEntity(
+                type = "journal_upsert",
+                planId = null,
+                clientId = marker,
+                payload = Json.encodeToString(JournalPendingUpsert(id, baseVersion, syncItem)),
+            )
+        )
+    }
+
+    suspend fun acknowledgeJournal(sent: PendingRecordEntity, serverId: Long, version: Long) = scopedTransaction {
+        check(sent.scope == dataScope()) { "上传身份已变化" }
+        require(serverId > 0 && version >= 0)
+        val queued = Json.decodeFromString<JournalPendingUpsert>(sent.payload.orEmpty())
+        if (queued.localId != serverId) {
+            require(queued.localId < 0 && resolveJournalId(queued.localId) in setOf(queued.localId, serverId)) { "Conflicting journal identity" }
+            if (pendingDao.countByClientId("journal-identity-${queued.localId}") == 0) {
+                pendingDao.insert(
+                    PendingRecordEntity(
+                        type = "journal_identity",
+                        planId = serverId,
+                        clientId = "journal-identity-${queued.localId}",
+                        payload = queued.localId.toString(),
+                    )
+                )
+            }
+        }
+        recordAcknowledgement("journal", serverId, queued.baseVersion, version)
+        val current = journalDao.byId(queued.localId)
+        if (queued.localId != serverId) journalDao.delete(serverId)
+        if (current != null) {
+            journalDao.delete(queued.localId)
+            journalDao.upsertAll(listOf(current.copy(id = serverId, version = version, clientId = current.clientId ?: queued.item.clientId)))
+        }
+        pendingDao.delete(listOf(sent.id))
+        pendingDao.all().filter { it.type == "journal_upsert" }.forEach { p ->
+            val later = Json.decodeFromString<JournalPendingUpsert>(p.payload.orEmpty())
+            if (later.localId == queued.localId) {
+                pendingDao.update(
+                    p.copy(
+                        payload = Json.encodeToString(
+                            later.copy(
+                                localId = serverId,
+                                baseVersion = version,
+                                item = later.item.copy(id = serverId, baseVersion = version),
+                            )
+                        )
+                    )
+                )
+            }
+        }
+    }
+
+    suspend fun exportJournalsMarkdown(mood: String? = null, query: String? = null): String {
+        val items = journals(mood, query).map {
+            JournalExportItem(
+                id = it.id,
+                entryDate = it.entryDate,
+                mood = it.mood,
+                tags = JournalRules.parseTagsJson(it.tagsJson),
+                content = it.content,
+            )
+        }
+        val scopeLabel = if (dataScope() == "local\nlocal") "本地游客模式" else "个人空间"
+        return JournalRules.exportMarkdown(items, scopeLabel = scopeLabel)
+    }
+
     companion object {
         private val pendingMutex = Mutex()
-        private val METADATA_TYPES = setOf("plan_identity", "schedule_identity", "local_confirmation", "sync_conflict", "bulk_delete", "plan_restoration", "schedule_restoration", "history_seed")
+        private val METADATA_TYPES = setOf("plan_identity", "schedule_identity", "journal_identity", "local_confirmation", "sync_conflict", "bulk_delete", "plan_restoration", "schedule_restoration", "history_seed")
     }
 }
 
 @kotlinx.serialization.Serializable
 data class SchedulePendingUpsert(val localId: Long, val baseVersion: Long?, val request: ScheduleUpsertRequest)
+
+@kotlinx.serialization.Serializable
+data class JournalPendingUpsert(val localId: Long, val baseVersion: Long?, val item: SyncJournalItem)
 
 private fun SyncScheduleView.toEntity() = ScheduleSnapshotEntity(
     id, userId, title, startDate, startTime, endDate, endTime, allDay, location, note,

@@ -105,6 +105,7 @@ import com.planlock.app.record.ScheduleReminderScheduler
 import com.planlock.app.record.TimelineEntry
 import com.planlock.app.record.TimelineKind
 import com.planlock.app.record.TimelineState
+import com.planlock.app.record.entity.JournalSnapshotEntity
 import com.planlock.app.record.entity.PlanSnapshotEntity
 import com.planlock.app.record.entity.ScheduleSnapshotEntity
 import com.planlock.app.sync.AppSync
@@ -137,6 +138,7 @@ fun TodayScreen(
     localHolder: TodayLocalStateHolder,
     localKey: TodayLocalKey,
     onAsk: () -> Unit = {},
+    onOpenJournal: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val api = remember { ApiClient.create() }
@@ -159,6 +161,7 @@ fun TodayScreen(
     val localData = localRead?.data
     val plans = localData?.plans.orEmpty()
     val schedules = localData?.schedules.orEmpty()
+    val journals = localData?.journals.orEmpty()
     val loading = localData == null && localRead?.error == null
     val readError = localRead?.error
     val streak = localData?.streak ?: 0
@@ -229,6 +232,7 @@ fun TodayScreen(
         onDismiss = { showCreateActions = false },
         onPlan = { showCreateActions = false; onCreate(plans.isEmpty()) },
         onSchedule = { showCreateActions = false; editingSchedule = null; showScheduleEditor = true },
+        onJournal = { showCreateActions = false; onOpenJournal(true) },
     )
     if (showScheduleEditor) ScheduleEditorSheet(
         current = editingSchedule,
@@ -296,6 +300,7 @@ fun TodayScreen(
                         timeline = timeline,
                         timelineExpanded = timelineExpanded,
                         actionMessage = actionMessage,
+                        journals = journals,
                     ),
                     actions = TodayOverviewActions(
                         onWeatherInfo = { showWeatherInfo = true },
@@ -325,6 +330,7 @@ fun TodayScreen(
                             showScheduleEditor = true
                         },
                         onAsk = onAsk,
+                        onOpenJournal = { onOpenJournal(false) },
                     ),
                 )
             }
@@ -414,6 +420,7 @@ private data class TodayOverviewModel(
     val timeline: List<TimelineEntry>,
     val timelineExpanded: Boolean,
     val actionMessage: String?,
+    val journals: List<JournalSnapshotEntity> = emptyList(),
 )
 
 private data class TodayOverviewActions(
@@ -427,6 +434,7 @@ private data class TodayOverviewActions(
     val onOpenPlan: (Long) -> Unit,
     val onOpenSchedule: (Long) -> Unit,
     val onAsk: () -> Unit = {},
+    val onOpenJournal: () -> Unit = {},
 ) {
     companion object {
         val EMPTY = TodayOverviewActions({}, {}, {}, {}, {}, {}, {}, {}, {})
@@ -535,6 +543,14 @@ private fun TodayOverviewContent(
                     modifier = Modifier.fillMaxWidth().padding(top = 22.dp),
                 )
             }
+        }
+        item(key = "today-journal-entry") {
+            TodayJournalEntryCard(
+                journals = model.journals,
+                selectedDate = model.selectedKey,
+                onClick = actions.onOpenJournal,
+                modifier = Modifier.padding(top = 18.dp),
+            )
         }
         model.actionMessage?.let { message ->
             item { Text(message, Modifier.padding(top = 12.dp), color = InkTone.jade, style = MaterialTheme.typography.bodyMedium) }

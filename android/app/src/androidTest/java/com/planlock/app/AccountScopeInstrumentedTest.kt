@@ -18,7 +18,7 @@ class AccountScopeInstrumentedTest {
         path.parentFile!!.mkdirs()
         java.io.File("/data/local/tmp/bug108-mixed.db").copyTo(path, overwrite = true)
         val db = Room.databaseBuilder(context, PlanLockDatabase::class.java, path.name)
-            .addMigrations(AccountScopeMigration({ "legacy" }), com.planlock.app.record.PlanTypeMigration, com.planlock.app.record.BehaviorHistoryMigration, com.planlock.app.record.ScheduleLocationMigration).build()
+            .addMigrations(AccountScopeMigration({ "legacy" }), com.planlock.app.record.PlanTypeMigration, com.planlock.app.record.BehaviorHistoryMigration, com.planlock.app.record.ScheduleLocationMigration, com.planlock.app.record.JournalMigration).build()
         try {
             assertEquals(2, db.planSnapshotDao().all("local\nlocal").size)
             assertEquals(2, db.planSnapshotDao().all("legacy\n7").size)

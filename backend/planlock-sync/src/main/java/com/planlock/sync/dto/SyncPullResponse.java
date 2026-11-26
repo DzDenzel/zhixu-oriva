@@ -22,4 +22,5 @@ public class SyncPullResponse {
     private List<SyncStrategyView> strategies;
     private Map<String, Integer> recordCounts;
     private List<SyncPlanTypeView> planTypes;
+    private List<SyncJournalView> journals;
 }

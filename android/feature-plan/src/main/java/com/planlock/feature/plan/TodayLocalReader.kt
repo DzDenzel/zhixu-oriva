@@ -5,6 +5,7 @@ import com.planlock.app.api.WeatherSnapshot
 import com.planlock.app.api.WeatherStore
 import com.planlock.app.api.planLockPreferences
 import com.planlock.app.record.RecordStore
+import com.planlock.app.record.entity.JournalSnapshotEntity
 import com.planlock.app.record.entity.PlanSnapshotEntity
 import com.planlock.app.record.entity.ScheduleSnapshotEntity
 import com.planlock.app.sync.AppSync
@@ -20,6 +21,7 @@ data class TodayLocalData(
     val unlocks: Int,
     val streak: Int,
     val weather: WeatherSnapshot?,
+    val journals: List<JournalSnapshotEntity> = emptyList(),
 )
 
 data class TodayLocalRead(val data: TodayLocalData?, val error: String?)
@@ -32,13 +34,16 @@ class TodayLocalReader(
     private val scopedPlans: (suspend (String) -> List<PlanSnapshotEntity>)? = null,
     private val scopedSchedules: (suspend (String) -> List<ScheduleSnapshotEntity>)? = null,
     private val scopedOverview: (suspend (String) -> SyncOverview)? = null,
+    private val journals: (suspend () -> List<JournalSnapshotEntity>)? = null,
+    private val scopedJournals: (suspend (String) -> List<JournalSnapshotEntity>)? = null,
 ) {
     /** Shared disk-only path for cold preload and every subsequent page refresh. */
     suspend fun read(userId: Long?, todayKey: String, scope: String = ""): TodayLocalRead = withContext(Dispatchers.IO) {
         try {
             val localPlans = if (scope.isNotEmpty() && scopedPlans != null) scopedPlans.invoke(scope) else plans()
             val localSchedules = if (scope.isNotEmpty() && scopedSchedules != null) scopedSchedules.invoke(scope) else schedules()
-            check(scope.isEmpty() || localPlans.all { it.scope == scope } && localSchedules.all { it.scope == scope }) { "读取归属已变化" }
+            val localJournals = if (scope.isNotEmpty() && scopedJournals != null) scopedJournals.invoke(scope) else journals?.invoke().orEmpty()
+            check(scope.isEmpty() || localPlans.all { it.scope == scope } && localSchedules.all { it.scope == scope } && localJournals.all { it.scope == scope }) { "读取归属已变化" }
             val cached = if (scope.isNotEmpty() && scopedOverview != null) scopedOverview.invoke(scope) else overview(userId)
             val today = cached.today?.takeIf { it.date == todayKey }
             TodayLocalRead(
@@ -49,6 +54,7 @@ class TodayLocalReader(
                     unlocks = today?.unlockCount ?: 0,
                     streak = cached.stats?.continuousDays ?: 0,
                     weather = weather(),
+                    journals = localJournals,
                 ),
                 error = null,
             )
@@ -66,7 +72,8 @@ class TodayLocalReader(
             val cache = AppSync.get(app).cache
             val weather = WeatherStore(app.planLockPreferences)
             return TodayLocalReader(store::plans, store::schedules, cache::read, weather::cachedSnapshot,
-                scopedPlans = { store.forScope(it).plans() }, scopedSchedules = { store.forScope(it).schedules() }, scopedOverview = cache::readScope)
+                scopedPlans = { store.forScope(it).plans() }, scopedSchedules = { store.forScope(it).schedules() }, scopedOverview = cache::readScope,
+                journals = { store.journals() }, scopedJournals = { store.forScope(it).journals() })
         }
     }
 }

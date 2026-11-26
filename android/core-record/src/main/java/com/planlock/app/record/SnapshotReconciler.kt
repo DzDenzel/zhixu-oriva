@@ -18,6 +18,7 @@ internal class SnapshotReconciler(
     private val plans get() = store.planDao
     private val strategies get() = store.strategyDao
     private val schedules get() = store.scheduleDao
+    private val journals get() = store.journalDao
 
     fun observeConfirmations() = pending.observeConfirmations().map { rows ->
         rows.filter { it.type == CONFLICT }.map { Json.decodeFromString<SyncConfirmation>(it.payload.orEmpty()) }
@@ -55,7 +56,12 @@ internal class SnapshotReconciler(
         metadata(CONFLICT, "conflict:$key", Json.encodeToString(value))
     }
 
-    suspend fun reconcile(remotePlans: List<SyncPlanView>, remoteStrategies: List<SyncStrategyView>, remoteSchedules: List<SyncScheduleView>) = store.scopedTransaction {
+    suspend fun reconcile(
+        remotePlans: List<SyncPlanView>,
+        remoteStrategies: List<SyncStrategyView>,
+        remoteSchedules: List<SyncScheduleView>,
+        remoteJournals: List<SyncJournalView> = emptyList(),
+    ) = store.scopedTransaction {
         val remote = SyncPullResponse(remotePlans, remoteSchedules, remoteStrategies)
         val planIds = remotePlans.map { it.id }.toSet()
         val scheduleIds = remoteSchedules.map { it.id }.toSet()
@@ -105,6 +111,12 @@ internal class SnapshotReconciler(
         strategies.all().filter { it.planId > 0 && it.planId !in protection.plans && it.planId !in protectedRemotePlans && it.planId !in deferredPlans && it.planId !in remoteStrategyPlans }.forEach { strategies.deleteByPlanId(it.planId) }
         strategies.upsertRemote(remoteStrategies.filterNot { it.planId in protection.plans || it.planId in protectedRemotePlans }.map { it.toSnapshot() })
         schedules.upsertAll(remoteSchedules.filterNot { it.id in protection.schedules || it.clientId != null && it.clientId in scheduleKeys }.map { it.toSnapshot() })
+        val journalKeys = rows.filter { it.type == "journal_upsert" }
+            .mapNotNull { Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).item.clientId }
+            .toSet()
+        journals.upsertAll(remoteJournals.filterNot {
+            it.id in protection.journals || (it.clientId != null && it.clientId in journalKeys)
+        }.map { it.toSnapshot() })
     }
 
     private suspend fun removePlan(id: Long) {
@@ -204,4 +216,17 @@ internal class SnapshotReconciler(
 internal fun SyncPlanView.toSnapshot() = PlanSnapshotEntity(id,userId,name,type,startTime,endTime,repeatRule,color,icon,remindAdvanceMin,remindMethods,status,version,endedOccurrenceDate,statusLog)
 internal fun SyncStrategyView.toSnapshot() = StrategySnapshotEntity(id,planId,null,whitelistApps,autoDnd,notifySilence,version)
 internal fun SyncScheduleView.toSnapshot() = ScheduleSnapshotEntity(id,userId,title,startDate,startTime,endDate,endTime,allDay,location,note,remindAdvanceMin,repeatRule,linkedPlanId,false,tzId,status,version,locationLat=locationLat,locationLon=locationLon)
+internal fun SyncJournalView.toSnapshot() = JournalSnapshotEntity(
+    id = id,
+    userId = userId,
+    clientId = clientId,
+    entryDate = entryDate,
+    mood = mood,
+    tagsJson = tags.takeIf { it.isNotEmpty() }?.let { Json.encodeToString(it) },
+    content = content,
+    status = status,
+    version = version,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+)
 internal fun ScheduleSnapshotEntity.toRequest() = ScheduleUpsertRequest(title,startDate,startTime,endDate,endTime,allDay,location,note,remindAdvanceMin,repeatRule,linkedPlanId,tzId,locationLat=locationLat,locationLon=locationLon)
