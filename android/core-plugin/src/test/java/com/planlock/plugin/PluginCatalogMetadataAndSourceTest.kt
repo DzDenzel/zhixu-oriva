@@ -32,6 +32,13 @@ class PluginCatalogMetadataAndSourceTest {
                 """{"catalogFormatVersion":0,"sourceId":"official","sourceType":"OFFICIAL","plugins":[]}"""
             )
         }
+        for (invalid in listOf("\"1\"", "true", "1.5", "null", "-1")) {
+            assertThrows(IllegalArgumentException::class.java) {
+                PluginCatalogCodec.decode(
+                    """{"catalogFormatVersion":$invalid,"sourceId":"official","sourceType":"OFFICIAL","plugins":[]}"""
+                )
+            }
+        }
     }
 
     @Test
@@ -138,12 +145,64 @@ class PluginCatalogMetadataAndSourceTest {
             "http://192.168.1.20:8080/catalog.json",
             PluginSourcePolicy.validateCatalogUrl("http://192.168.1.20:8080/catalog.json", lanAllowed = true),
         )
+        assertEquals(
+            "http://192.168.1.20:8080/catalog.json",
+            PluginSourcePolicy.validateCatalogUrl(
+                "http://192.168.1.20:8080/catalog.json",
+                lanAllowed = true,
+                approvedLanOrigin = "http://192.168.1.20:8080/api/v1/plugins/catalog/",
+            ),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            PluginSourcePolicy.validateCatalogUrl(
+                "http://192.168.1.99:9000/catalog.json",
+                lanAllowed = true,
+                approvedLanOrigin = "http://192.168.1.20:8080/api/v1/plugins/catalog/",
+            )
+        }
         assertThrows(IllegalArgumentException::class.java) {
             PluginSourcePolicy.validateCatalogUrl("https://user:pass@plugins.example.org/catalog.json", lanAllowed = false)
         }
         assertThrows(IllegalArgumentException::class.java) {
             PluginSourcePolicy.validateCatalogUrl("https://plugins.example.org/catalog.json?token=1", lanAllowed = false)
         }
+    }
+
+    @Test
+    fun anchoredCustomSourceRejectsSourceIdMismatchBeforeInstallAndMatchesWhenAligned() {
+        val anchored = CustomPluginSource(
+            id = "alice-plugins",
+            name = "Alice",
+            catalogUrl = "https://alice.example.org/catalog.json",
+            trustedFingerprints = setOf("C5:9E:81:65:8F:31:08:29:B4:23:BE:24:2D:C3:28:B3:76:CB:CE:1B:C6:1C:1F:F2:31:31:61:12:41:2B:8C:44"),
+        )
+        val mismatchedDoc = PluginCatalogDocument(
+            sourceId = "different-id",
+            sourceType = PluginSourceType.THIRD_PARTY,
+            plugins = emptyList(),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            PluginSourcePolicy.validateCatalogForCustomSource(anchored, mismatchedDoc)
+        }
+        val alignedDoc = PluginCatalogDocument(
+            sourceId = "alice-plugins",
+            sourceType = PluginSourceType.THIRD_PARTY,
+            plugins = emptyList(),
+        )
+        assertEquals(alignedDoc, PluginSourcePolicy.validateCatalogForCustomSource(anchored, alignedDoc))
+
+        val unanchoredAuto = CustomPluginSource(
+            id = "custom-12345678",
+            name = "Discovery",
+            catalogUrl = "https://alice.example.org/catalog.json",
+            trustedFingerprints = emptySet(),
+        )
+        val discoveryDoc = PluginCatalogDocument(
+            sourceId = "alice-plugins",
+            sourceType = PluginSourceType.THIRD_PARTY,
+            plugins = emptyList(),
+        )
+        assertEquals(discoveryDoc, PluginSourcePolicy.validateCatalogForCustomSource(unanchoredAuto, discoveryDoc))
     }
 
     @Test

@@ -6,6 +6,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -195,31 +197,43 @@ data class PluginCatalogItem(
 
 object PluginCatalogCodec {
     private val json = Json { ignoreUnknownKeys = true }
-    fun decode(raw: String): PluginCatalogDocument = json.decodeFromString<PluginCatalogDocument>(raw).let { document ->
-        require(document.catalogFormatVersion >= 1) {
-            "Unsupported catalogFormatVersion: ${document.catalogFormatVersion}"
-        }
-        require(document.sourceId.isNotBlank()) { "Catalog sourceId must not be blank" }
-        val normalizedPlugins = document.plugins.map { item ->
-            require(item.id.isNotBlank() && item.name.isNotBlank() && item.version.isNotBlank() && item.entryPoint.isNotBlank()) {
-                "Catalog item missing required text field"
+    fun decode(raw: String): PluginCatalogDocument {
+        val root = Json.parseToJsonElement(raw).jsonObject
+        if ("catalogFormatVersion" in root) {
+            val primitive = root.getValue("catalogFormatVersion") as? JsonPrimitive
+                ?: throw IllegalArgumentException("Invalid catalogFormatVersion")
+            require(!primitive.isString) { "catalogFormatVersion must be a JSON integer, not a string" }
+            val parsed = primitive.content.toIntOrNull()
+            require(parsed != null && parsed >= 1 && primitive.content == parsed.toString()) {
+                "Invalid catalogFormatVersion: ${primitive.content}"
             }
-            require(item.contractVersion >= 1) { "Invalid catalog contractVersion: ${item.contractVersion}" }
-            require(item.downloadUrl.isNotBlank()) { "Catalog item downloadUrl must not be blank" }
-            if (item.downloadUrl.contains(":")) {
-                val lower = item.downloadUrl.trim().lowercase(java.util.Locale.ROOT)
-                require(lower.startsWith("http://") || lower.startsWith("https://")) {
-                    "Unsafe catalog downloadUrl scheme"
+        }
+        return json.decodeFromString<PluginCatalogDocument>(raw).let { document ->
+            require(document.catalogFormatVersion >= 1) {
+                "Unsupported catalogFormatVersion: ${document.catalogFormatVersion}"
+            }
+            require(document.sourceId.isNotBlank()) { "Catalog sourceId must not be blank" }
+            val normalizedPlugins = document.plugins.map { item ->
+                require(item.id.isNotBlank() && item.name.isNotBlank() && item.version.isNotBlank() && item.entryPoint.isNotBlank()) {
+                    "Catalog item missing required text field"
                 }
+                require(item.contractVersion >= 1) { "Invalid catalog contractVersion: ${item.contractVersion}" }
+                require(item.downloadUrl.isNotBlank()) { "Catalog item downloadUrl must not be blank" }
+                if (item.downloadUrl.contains(":")) {
+                    val lower = item.downloadUrl.trim().lowercase(java.util.Locale.ROOT)
+                    require(lower.startsWith("http://") || lower.startsWith("https://")) {
+                        "Unsafe catalog downloadUrl scheme"
+                    }
+                }
+                item.copy(
+                    author = PluginMetadataValidator.sanitizeOptionalText(item.author),
+                    homepage = PluginMetadataValidator.requireOptionalHttpUrl(item.homepage, "homepage"),
+                    repository = PluginMetadataValidator.requireOptionalHttpUrl(item.repository, "repository"),
+                    license = PluginMetadataValidator.sanitizeOptionalText(item.license),
+                )
             }
-            item.copy(
-                author = PluginMetadataValidator.sanitizeOptionalText(item.author),
-                homepage = PluginMetadataValidator.requireOptionalHttpUrl(item.homepage, "homepage"),
-                repository = PluginMetadataValidator.requireOptionalHttpUrl(item.repository, "repository"),
-                license = PluginMetadataValidator.sanitizeOptionalText(item.license),
-            )
+            document.copy(plugins = normalizedPlugins)
         }
-        document.copy(plugins = normalizedPlugins)
     }
 }
 

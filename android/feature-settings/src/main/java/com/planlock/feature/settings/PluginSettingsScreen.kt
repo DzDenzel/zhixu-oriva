@@ -92,6 +92,8 @@ fun PluginSettingsScreen(
     var showAddSourceDialog by remember { mutableStateOf(false) }
     var removeSourceTarget by remember { mutableStateOf<CustomPluginSource?>(null) }
     var uninstallTarget by remember { mutableStateOf<InstalledPluginRecord?>(null) }
+    val connection by com.planlock.app.api.ConnectionStore.state.collectAsState()
+    val connectionConfig = connection.config ?: com.planlock.app.api.ConnectionConfig.default
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     fun feedback(text: String) { scope.launch { snackbar.showSnackbar(text) } }
@@ -157,6 +159,7 @@ fun PluginSettingsScreen(
     if (showAddSourceDialog) {
         AddCustomPluginSourceDialog(
             existingIds = customSources.mapTo(mutableSetOf()) { it.id },
+            connectionConfig = connectionConfig,
             onDismiss = { showAddSourceDialog = false },
             onAdd = { source ->
                 platform.addCustomSource(source)
@@ -208,7 +211,7 @@ fun PluginSettingsScreen(
             }
             item {
                 Text(
-                    "自定义来源独立于内置官方/第三方信任锚；公网仅支持 HTTPS，未配置信任锚的源禁止安装未验签包；安全模式下禁止访问与下载。",
+                    "自定义来源独立于内置官方/第三方信任锚；独立第三方源须使用 HTTPS（私有 HTTP 仅限与当前后端插件目录同源且开启内网时可用）；未配置信任锚的源禁止安装未验签包；安全模式下禁止访问与下载。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -316,10 +319,7 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
             try {
                 val doc = client.fetch(catalogUrl, lanAllowed = lanAllowed)
                 if (activeCustomSource != null) {
-                    require(doc.sourceType == PluginSourceType.THIRD_PARTY) { "自定义来源不得声明为官方仓库" }
-                    require(!PluginSourcePolicy.isReservedSourceId(doc.sourceId)) {
-                        "自定义来源不得冒用内置来源 ID：${doc.sourceId}"
-                    }
+                    PluginSourcePolicy.validateCatalogForCustomSource(activeCustomSource, doc)
                 }
                 Result.success(doc)
             }
@@ -408,13 +408,18 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
                         if (installingId == null) scope.launch {
                             installingId = item.id
                             val message = try {
-                                val result = withContext(Dispatchers.IO) { platform.install(item.toEntry(catalog!!)) }
+                                val doc = catalog!!
+                                if (activeCustomSource != null) {
+                                    PluginSourcePolicy.validateCatalogForCustomSource(activeCustomSource, doc)
+                                }
+                                val result = withContext(Dispatchers.IO) { platform.install(item.toEntry(doc)) }
                                 platformSnapshot = platform.snapshot()
                                 when (result) {
                                     is PluginInstallResult.Installed -> "${result.manifest.name} 已安装，默认保持停用"
                                     is PluginInstallResult.Failed -> "安装失败：${formatPluginInstallError(result.message)}"
                                 }
                             } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (failure: IllegalArgumentException) { "安装失败：${failure.message ?: "来源校验未通过"}" }
                             catch (_: Exception) { "安装失败，请重试" }
                             finally { installingId = null }
                             snackbar.showSnackbar(message)
@@ -507,6 +512,7 @@ private fun CustomSourceCard(
 @Composable
 private fun AddCustomPluginSourceDialog(
     existingIds: Set<String>,
+    connectionConfig: com.planlock.app.api.ConnectionConfig,
     onDismiss: () -> Unit,
     onAdd: (CustomPluginSource) -> Unit,
 ) {
@@ -543,8 +549,8 @@ private fun AddCustomPluginSourceDialog(
                 OutlinedTextField(
                     value = sourceIdInput,
                     onValueChange = { sourceIdInput = it; errorMessage = null },
-                    label = { Text("来源 ID（可选）") },
-                    supportingText = { Text("留空自动生成；不可为 official / third-party") },
+                    label = { Text("来源 ID（配置信任锚时必填）") },
+                    supportingText = { Text("未配指纹留空则自动生成（仅目录发现）；配置指纹时须与目录及签名包 sourceId 一致") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -556,7 +562,11 @@ private fun AddCustomPluginSourceDialog(
                     maxLines = 3,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                PluginSwitchRow("允许内网地址", "仅私有局域网 HTTP/HTTPS 来源需要开启", lanAllowed) {
+                PluginSwitchRow(
+                    "允许同源内网地址",
+                    "独立来源须用 HTTPS；私有 HTTP 仅限与当前连接配置的插件目录同源且开启内网时可用",
+                    lanAllowed,
+                ) {
                     lanAllowed = it
                     errorMessage = null
                 }
@@ -567,12 +577,20 @@ private fun AddCustomPluginSourceDialog(
             Button(onClick = {
                 try {
                     val trimmedUrl = catalogUrl.trim()
+                    val fingerprints = PluginSourcePolicy.parseFingerprints(fingerprintsInput)
+                    if (fingerprints.isNotEmpty() && sourceIdInput.isBlank()) {
+                        throw IllegalArgumentException("配置信任锚时请填写来源 ID（须与目录及签名包中的 sourceId 一致）")
+                    }
+                    PluginSourcePolicy.validateCatalogUrl(
+                        raw = trimmedUrl,
+                        lanAllowed = lanAllowed && connectionConfig.lanAllowed,
+                        approvedLanOrigin = connectionConfig.pluginsCatalogUrl,
+                    )
                     val resolvedId = if (sourceIdInput.isBlank()) {
                         PluginSourcePolicy.deriveSourceId(trimmedUrl, existingIds)
                     } else {
                         PluginSourcePolicy.validateSourceId(sourceIdInput)
                     }
-                    val fingerprints = PluginSourcePolicy.parseFingerprints(fingerprintsInput)
                     onAdd(
                         CustomPluginSource(
                             id = resolvedId,

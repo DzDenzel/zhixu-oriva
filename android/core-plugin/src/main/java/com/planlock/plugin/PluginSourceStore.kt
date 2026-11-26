@@ -46,7 +46,11 @@ object PluginSourcePolicy {
         return "$base-$suffix"
     }
 
-    fun validateCatalogUrl(raw: String, lanAllowed: Boolean): String {
+    fun validateCatalogUrl(
+        raw: String,
+        lanAllowed: Boolean,
+        approvedLanOrigin: String? = null,
+    ): String {
         val trimmed = raw.trim()
         require(trimmed.length in 1..2048 && trimmed.none { it.isWhitespace() || it.isISOControl() || it == '\\' }) {
             "目录地址格式无效"
@@ -56,12 +60,54 @@ object PluginSourcePolicy {
             "目录地址不得包含凭据、查询参数或片段"
         }
         val scheme = uri.scheme?.lowercase(Locale.ROOT)
-        require(scheme == "https" || scheme == "http") { "目录地址仅支持 HTTPS（或受控内网 HTTP）" }
+        require(scheme == "https" || scheme == "http") { "目录地址仅支持 HTTPS（或同源受控内网 HTTP）" }
         val host = uri.host?.takeIf { it.isNotBlank() } ?: throw IllegalArgumentException("目录地址缺少主机名")
         val lanHost = isLanHost(host)
-        require(scheme == "https" || (lanAllowed && lanHost)) { "公网第三方目录仅支持 HTTPS" }
+        require(scheme == "https" || (lanAllowed && lanHost)) {
+            "独立自定义第三方来源须使用 HTTPS；私有 HTTP 仅限与当前连接配置同源且已启用内网连接时可用"
+        }
         require(!lanHost || lanAllowed) { "内网或本机目录须显式开启允许内网连接" }
+        if (scheme == "http" && approvedLanOrigin != null) {
+            require(hasSameOrigin(trimmed, approvedLanOrigin)) {
+                "独立自定义第三方来源仅支持 HTTPS；私有 HTTP 仅限与当前连接配置的插件目录同源"
+            }
+        }
         return trimmed
+    }
+
+    fun hasSameOrigin(urlA: String, urlB: String): Boolean {
+        val a = runCatching { URI(urlA.trim()) }.getOrNull() ?: return false
+        val b = runCatching { URI(urlB.trim()) }.getOrNull() ?: return false
+        val schemeA = a.scheme?.lowercase(Locale.ROOT) ?: return false
+        val schemeB = b.scheme?.lowercase(Locale.ROOT) ?: return false
+        val hostA = a.host?.lowercase(Locale.ROOT) ?: return false
+        val hostB = b.host?.lowercase(Locale.ROOT) ?: return false
+        val portA = effectivePort(schemeA, a.port)
+        val portB = effectivePort(schemeB, b.port)
+        return schemeA == schemeB && hostA == hostB && portA == portB
+    }
+
+    private fun effectivePort(scheme: String, port: Int): Int = when {
+        port > 0 -> port
+        scheme == "https" -> 443
+        scheme == "http" -> 80
+        else -> -1
+    }
+
+    fun validateCatalogForCustomSource(
+        source: CustomPluginSource,
+        document: PluginCatalogDocument,
+    ): PluginCatalogDocument {
+        require(document.sourceType == PluginSourceType.THIRD_PARTY) { "自定义来源不得声明为官方仓库" }
+        require(!isReservedSourceId(document.sourceId)) {
+            "自定义来源不得冒用内置来源 ID：${document.sourceId}"
+        }
+        if (source.trustedFingerprints.isNotEmpty()) {
+            require(document.sourceId == source.id) {
+                "目录来源 ID（${document.sourceId}）与已配置的来源 ID（${source.id}）不一致，无法匹配信任锚"
+            }
+        }
+        return document
     }
 
     fun validateResolvedDownloadUrl(catalogUrl: String, resolvedUrl: String, lanAllowed: Boolean): String {
