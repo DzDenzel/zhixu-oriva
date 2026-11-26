@@ -103,8 +103,12 @@ class PluginPlatform private constructor(context: Context) {
         reload()
     }
 
-    fun install(entry: PluginCatalogEntry): PluginInstallResult {
-        val result = installer.install(entry, safeMode = stateStore.snapshot().safeMode)
+    fun install(entry: PluginCatalogEntry, customSource: CustomPluginSource? = null): PluginInstallResult {
+        val result = installer.install(
+            entry,
+            safeMode = stateStore.snapshot().safeMode,
+            customSource = customSource,
+        )
         if (result is PluginInstallResult.Installed) {
             synchronized(reloadLock) {
             stateStore.save(

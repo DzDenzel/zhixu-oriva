@@ -285,6 +285,66 @@ class PluginCatalogMetadataAndSourceTest {
     }
 
     @Test
+    fun unanchoredCustomSourceBlocksInstallEvenIfCatalogClaimsAnchoredSourceId() {
+        val anchoredFp = "C5:9E:81:65:8F:31:08:29:B4:23:BE:24:2D:C3:28:B3:76:CB:CE:1B:C6:1C:1F:F2:31:31:61:12:41:2B:8C:44"
+        val anchored = CustomPluginSource(
+            id = "anchored-repo",
+            name = "Anchored",
+            catalogUrl = "https://anchored.example.org/catalog.json",
+            trustedFingerprints = setOf(anchoredFp),
+        )
+        val unanchored = CustomPluginSource(
+            id = "custom-discovery",
+            name = "Discovery Only",
+            catalogUrl = "https://discovery.example.org/catalog.json",
+            trustedFingerprints = emptySet(),
+        )
+        var downloadCalls = 0
+        val installer = PluginInstaller(
+            downloader = PluginDownloader { _, target ->
+                downloadCalls++
+                target.writeText("bytes")
+                5L
+            },
+            verifier = PluginPackageVerifier { _, claimedSourceId ->
+                VerifiedPluginPackage(
+                    manifest = PluginManifest("borrowed", "Borrowed", "1.0.0", 1, "b.Entry", claimedSourceId, PluginSourceType.THIRD_PARTY),
+                    signerFingerprint = anchoredFp,
+                    sha256 = "ABC",
+                )
+            },
+            artifactStore = PluginArtifactStore { _, _ -> File("unused.plp") },
+            tempFileFactory = { File.createTempFile("unanchored-", ".plp") },
+        )
+
+        for (claimedSourceId in listOf(anchored.id, "third-party", "official")) {
+            val doc = PluginCatalogDocument(
+                sourceId = claimedSourceId,
+                sourceType = PluginSourceType.THIRD_PARTY,
+                plugins = listOf(
+                    PluginCatalogItem(
+                        id = "borrowed",
+                        name = "Borrowed",
+                        version = "1.0.0",
+                        contractVersion = 1,
+                        entryPoint = "b.Entry",
+                        downloadUrl = "https://discovery.example.org/borrowed.plp",
+                        sha256 = "ABC",
+                    )
+                ),
+            )
+            val entry = doc.plugins.single().toEntry(doc)
+            assertThrows(IllegalArgumentException::class.java) {
+                PluginSourcePolicy.validateInstallForCustomSource(unanchored, entry)
+            }
+            val result = installer.install(entry, safeMode = false, customSource = unanchored)
+            assertTrue(result is PluginInstallResult.Failed)
+            assertTrue((result as PluginInstallResult.Failed).message.contains("信任锚"))
+        }
+        assertEquals(0, downloadCalls)
+    }
+
+    @Test
     fun catalogClientRejectsHttpsToHttpDowngrade() {
         PluginPublicTransport.get = {
             """

@@ -110,6 +110,25 @@ object PluginSourcePolicy {
         return document
     }
 
+    /** Enforces that an unanchored custom source stays discovery-only and cannot borrow another source's trust anchor. */
+    fun validateInstallForCustomSource(
+        source: CustomPluginSource,
+        entry: PluginCatalogEntry,
+    ) {
+        require(source.trustedFingerprints.isNotEmpty()) {
+            "该第三方来源尚未配置信任锚，仅支持目录发现，已禁止下载与安装"
+        }
+        require(entry.manifest.sourceType == PluginSourceType.THIRD_PARTY) {
+            "自定义来源不得声明为官方仓库"
+        }
+        require(!isReservedSourceId(entry.manifest.sourceId)) {
+            "自定义来源不得冒用内置来源 ID：${entry.manifest.sourceId}"
+        }
+        require(entry.manifest.sourceId == source.id) {
+            "目录来源 ID（${entry.manifest.sourceId}）与已配置的来源 ID（${source.id}）不一致，无法匹配信任锚"
+        }
+    }
+
     fun validateResolvedDownloadUrl(catalogUrl: String, resolvedUrl: String, lanAllowed: Boolean): String {
         val safeUrl = PluginMetadataValidator.requireOptionalHttpUrl(resolvedUrl, "downloadUrl")
             ?: throw IllegalArgumentException("Invalid plugin downloadUrl")

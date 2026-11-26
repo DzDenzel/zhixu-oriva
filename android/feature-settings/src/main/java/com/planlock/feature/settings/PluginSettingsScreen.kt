@@ -412,7 +412,9 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
                                 if (activeCustomSource != null) {
                                     PluginSourcePolicy.validateCatalogForCustomSource(activeCustomSource, doc)
                                 }
-                                val result = withContext(Dispatchers.IO) { platform.install(item.toEntry(doc)) }
+                                val result = withContext(Dispatchers.IO) {
+                                    platform.install(item.toEntry(doc), activeCustomSource)
+                                }
                                 platformSnapshot = platform.snapshot()
                                 when (result) {
                                     is PluginInstallResult.Installed -> "${result.manifest.name} 已安装，默认保持停用"
