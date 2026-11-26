@@ -1,133 +1,33 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { ApiError } from '../api/client';
+import { ApiError, StaleSessionError } from '../api/client';
 import { ConflictModal, type ConflictFieldRow } from '../components/ConflictModal';
-import type { PlanItem, ScheduleItem, ScheduleUpsertPayload } from '../types';
+import type { PlanItem, ScheduleItem } from '../types';
 import { buildSchedulesIcs, triggerTextDownload } from '../utils/export';
+import { formatScheduleRepeat, formatTimeShort, todayIsoDate } from '../utils/format';
 import {
-  formatScheduleRepeat,
-  formatTimeShort,
-  toBackendTime,
-  todayIsoDate,
-} from '../utils/format';
+  buildScheduleUpsertPayload,
+  emptyScheduleForm,
+  scheduleFormFromItem,
+  withScheduleField,
+  type ScheduleFormState,
+  type ScheduleRepeatMode,
+} from '../utils/payloads';
 
 export interface SchedulesPageProps {
   api: ApiClient;
   onNotify: (text: string, tone?: 'ok' | 'warn' | 'error') => void;
 }
 
-interface ScheduleFormState {
-  id: number | null;
-  version: number | null;
-  clientId: string | null;
-  title: string;
-  startDate: string;
-  endDate: string;
-  allDay: boolean;
-  startTime: string;
-  endTime: string;
-  location: string;
-  locationLat: number | null;
-  locationLon: number | null;
-  note: string;
-  remindAdvanceMin: string;
-  repeatMode: 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly';
-  linkedPlanId: string;
-  tzId: string | null;
-}
-
-function emptyScheduleForm(): ScheduleFormState {
-  const today = todayIsoDate();
-  return {
-    id: null,
-    version: null,
-    clientId: null,
-    title: '',
-    startDate: today,
-    endDate: today,
-    allDay: false,
-    startTime: '14:00',
-    endTime: '15:00',
-    location: '',
-    locationLat: null,
-    locationLon: null,
-    note: '',
-    remindAdvanceMin: '15',
-    repeatMode: 'none',
-    linkedPlanId: '',
-    tzId: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-  };
-}
-
-function parseRepeatMode(raw?: string | null): ScheduleFormState['repeatMode'] {
-  if (!raw) return 'none';
-  try {
-    const t = (JSON.parse(raw) as { type?: string }).type;
-    if (t === 'daily' || t === 'weekly' || t === 'monthly' || t === 'yearly') return t;
-  } catch {
-    // ignore
-  }
-  return 'none';
-}
-
-function fromScheduleItem(item: ScheduleItem): ScheduleFormState {
-  return {
-    id: item.id,
-    version: item.version,
-    clientId: item.clientId ?? null,
-    title: item.title,
-    startDate: item.startDate,
-    endDate: item.endDate,
-    allDay: Boolean(item.allDay),
-    startTime: item.startTime ? formatTimeShort(item.startTime) : '09:00',
-    endTime: item.endTime ? formatTimeShort(item.endTime) : '10:00',
-    location: item.location ?? '',
-    locationLat: item.locationLat ?? null,
-    locationLon: item.locationLon ?? null,
-    note: item.note ?? '',
-    remindAdvanceMin: item.remindAdvanceMin !== null && item.remindAdvanceMin !== undefined ? String(item.remindAdvanceMin) : '',
-    repeatMode: parseRepeatMode(item.repeatRule),
-    linkedPlanId: item.linkedPlanId ? String(item.linkedPlanId) : '',
-    tzId: item.tzId ?? null,
-  };
-}
-
-function buildRepeatRuleJson(form: ScheduleFormState): string | null {
-  if (form.repeatMode === 'none') return null;
-  const parts = form.startDate.split('-').map((n) => Number(n));
-  const month = parts[1] || 1;
-  const day = parts[2] || 1;
-  if (form.repeatMode === 'daily') return JSON.stringify({ type: 'daily' });
-  if (form.repeatMode === 'weekly') {
-    const dt = new Date(`${form.startDate}T00:00:00`);
-    const weekday = dt.getDay() === 0 ? 7 : dt.getDay();
-    return JSON.stringify({ type: 'weekly', weekdays: [weekday] });
-  }
-  if (form.repeatMode === 'monthly') return JSON.stringify({ type: 'monthly', day });
-  return JSON.stringify({ type: 'yearly', month, day });
-}
-
-function toSchedulePayload(form: ScheduleFormState): ScheduleUpsertPayload {
-  const hasCoords = form.locationLat !== null && form.locationLon !== null;
-  const remindNum = form.remindAdvanceMin.trim() === '' ? null : Math.max(0, Number(form.remindAdvanceMin) || 0);
-  return {
-    clientId: form.clientId || undefined,
-    title: form.title.trim(),
-    startDate: form.startDate,
-    endDate: form.endDate,
-    allDay: form.allDay,
-    startTime: form.allDay ? null : toBackendTime(form.startTime),
-    endTime: form.allDay ? null : toBackendTime(form.endTime),
-    location: form.location.trim() || null,
-    locationLat: hasCoords ? form.locationLat : null,
-    locationLon: hasCoords ? form.locationLon : null,
-    note: form.note.trim() || null,
-    remindAdvanceMin: remindNum,
-    repeatRule: buildRepeatRuleJson(form),
-    linkedPlanId: form.linkedPlanId ? Number(form.linkedPlanId) : null,
-    tzId: form.tzId || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-  };
-}
+const WEEKDAY_LABELS = [
+  { value: 1, label: '一' },
+  { value: 2, label: '二' },
+  { value: 3, label: '三' },
+  { value: 4, label: '四' },
+  { value: 5, label: '五' },
+  { value: 6, label: '六' },
+  { value: 7, label: '日' },
+];
 
 export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
@@ -142,6 +42,7 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
   const [conflictServer, setConflictServer] = useState<ScheduleItem | null>(null);
 
   async function loadAll() {
+    const gen = api.getSessionGeneration();
     setLoading(true);
     setErrorText(null);
     try {
@@ -149,14 +50,18 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
         api.listSchedules(),
         api.listPlans().catch(() => []),
       ]);
+      if (!api.isGenerationCurrent(gen)) return;
       setSchedules(schedList);
       setPlans(planList);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         setErrorText(err.message);
       }
     } finally {
-      setLoading(false);
+      if (api.isGenerationCurrent(gen)) {
+        setLoading(false);
+      }
     }
   }
 
@@ -164,7 +69,7 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
     void loadAll();
   }, []);
 
-  async function handleSave(evt?: Event, overrideVersion?: number) {
+  async function handleSave(evt?: Event, mergeServerSnapshot?: ScheduleItem) {
     evt?.preventDefault();
     if (!editing) return;
     if (!editing.title.trim()) {
@@ -175,28 +80,41 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
       onNotify('结束日期不能早于开始日期', 'warn');
       return;
     }
-    if (!editing.allDay && editing.startDate === editing.endDate && editing.endTime <= editing.startTime) {
+    if (
+      !editing.allDay &&
+      editing.startDate === editing.endDate &&
+      editing.endTime <= editing.startTime
+    ) {
       onNotify('同日定时日程的结束时间必须晚于开始时间', 'warn');
       return;
     }
 
+    const gen = api.getSessionGeneration();
     setSaving(true);
     try {
-      const payload = toSchedulePayload(editing);
+      const payload = buildScheduleUpsertPayload(editing, mergeServerSnapshot ?? null);
       if (editing.id === null) {
         await api.createSchedule(payload);
+        if (!api.isGenerationCurrent(gen)) return;
         onNotify('已新建日程');
       } else {
-        await api.updateSchedule(editing.id, overrideVersion ?? editing.version ?? 0, payload);
+        await api.updateSchedule(
+          editing.id,
+          mergeServerSnapshot?.version ?? editing.version ?? 0,
+          payload,
+        );
+        if (!api.isGenerationCurrent(gen)) return;
         onNotify('日程已保存');
       }
       setEditing(null);
       setConflictServer(null);
       await loadAll();
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && err.isConflict && editing.id !== null) {
         try {
           const latestList = await api.listSchedules();
+          if (!api.isGenerationCurrent(gen)) return;
           setSchedules(latestList);
           const latest = latestList.find((s) => s.id === editing.id) ?? null;
           setConflictServer(latest);
@@ -204,23 +122,29 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
             onNotify('该日程已在其他设备被删除', 'warn');
             setEditing(null);
           }
-        } catch {
+        } catch (reloadErr) {
+          if (reloadErr instanceof StaleSessionError) return;
           onNotify('检测到 1409 版本冲突，请刷新后重试', 'warn');
         }
       } else if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }
     } finally {
-      setSaving(false);
+      if (api.isGenerationCurrent(gen)) {
+        setSaving(false);
+      }
     }
   }
 
   async function handleDelete(item: ScheduleItem) {
+    const gen = api.getSessionGeneration();
     try {
       await api.deleteSchedule(item.id, item.version);
+      if (!api.isGenerationCurrent(gen)) return;
       setSchedules((prev) => prev.filter((s) => s.id !== item.id));
       onNotify(`已删除日程「${item.title}」`);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && err.isConflict) {
         onNotify('该日程版本已变化（1409），已刷新最新列表', 'warn');
         await loadAll();
@@ -263,8 +187,29 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
             draftValue: `${editing.startDate} ~ ${editing.endDate}`,
             serverValue: `${conflictServer.startDate} ~ ${conflictServer.endDate}`,
           },
-          { label: '地点', draftValue: editing.location || '（空）', serverValue: conflictServer.location || '（空）' },
-          { label: '版本', draftValue: `v${editing.version ?? 0}`, serverValue: `v${conflictServer.version}` },
+          {
+            label: '地点',
+            draftValue: editing.location || '（空）',
+            serverValue: conflictServer.location || '（空）',
+          },
+          {
+            label: '地图坐标',
+            draftValue: editing.coordsCleared
+              ? '（草稿已主动清除坐标）'
+              : '（未修改，合并时保留服务端最新坐标）',
+            serverValue:
+              conflictServer.locationLat !== null &&
+              conflictServer.locationLat !== undefined &&
+              conflictServer.locationLon !== null &&
+              conflictServer.locationLon !== undefined
+                ? `${conflictServer.locationLat}, ${conflictServer.locationLon}`
+                : '（无）',
+          },
+          {
+            label: '版本',
+            draftValue: `v${editing.version ?? 0}`,
+            serverValue: `v${conflictServer.version}`,
+          },
         ]
       : [];
 
@@ -275,7 +220,7 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
           <p class="eyebrow">W3 · 日程管理</p>
           <h1 class="page-title">日程</h1>
           <p class="page-subtitle">
-            编辑日程时完整保留移动端采集的地点经纬度（locationLat / locationLon），并支持 ICS 导出与 1409 冲突保护。
+            编辑日程时完整保留移动端采集的地点经纬度与多曜日/月/年重复规则，并支持 ICS 导出与 1409 冲突保护。
           </p>
         </div>
         <div class="header-actions">
@@ -354,7 +299,7 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                       <button
                         type="button"
                         class="btn btn-sm"
-                        onClick={() => setEditing(fromScheduleItem(item))}
+                        onClick={() => setEditing(scheduleFormFromItem(item))}
                       >
                         编辑
                       </button>
@@ -400,7 +345,7 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                         <button
                           type="button"
                           class="btn btn-sm"
-                          onClick={() => setEditing(fromScheduleItem(item))}
+                          onClick={() => setEditing(scheduleFormFromItem(item))}
                         >
                           查看/编辑
                         </button>
@@ -449,7 +394,14 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                   maxLength={100}
                   value={editing.title}
                   onInput={(evt) =>
-                    setEditing({ ...editing, title: (evt.currentTarget as HTMLInputElement).value })
+                    setEditing(
+                      withScheduleField(
+                        editing,
+                        'title',
+                        (evt.currentTarget as HTMLInputElement).value,
+                        'title',
+                      ),
+                    )
                   }
                 />
               </label>
@@ -464,11 +416,11 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                     value={editing.startDate}
                     onInput={(evt) => {
                       const val = (evt.currentTarget as HTMLInputElement).value;
-                      setEditing({
-                        ...editing,
-                        startDate: val,
-                        endDate: editing.endDate < val ? val : editing.endDate,
-                      });
+                      let next = withScheduleField(editing, 'startDate', val, 'startDate');
+                      if (next.endDate < val) {
+                        next = withScheduleField(next, 'endDate', val, 'endDate');
+                      }
+                      setEditing(next);
                     }}
                   />
                 </label>
@@ -480,10 +432,14 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                     required
                     value={editing.endDate}
                     onInput={(evt) =>
-                      setEditing({
-                        ...editing,
-                        endDate: (evt.currentTarget as HTMLInputElement).value,
-                      })
+                      setEditing(
+                        withScheduleField(
+                          editing,
+                          'endDate',
+                          (evt.currentTarget as HTMLInputElement).value,
+                          'endDate',
+                        ),
+                      )
                     }
                   />
                 </label>
@@ -494,10 +450,14 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                   type="checkbox"
                   checked={editing.allDay}
                   onChange={(evt) =>
-                    setEditing({
-                      ...editing,
-                      allDay: (evt.currentTarget as HTMLInputElement).checked,
-                    })
+                    setEditing(
+                      withScheduleField(
+                        editing,
+                        'allDay',
+                        (evt.currentTarget as HTMLInputElement).checked,
+                        'allDay',
+                      ),
+                    )
                   }
                 />
                 <span>全天日程</span>
@@ -512,10 +472,14 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                       class="input"
                       value={editing.startTime}
                       onInput={(evt) =>
-                        setEditing({
-                          ...editing,
-                          startTime: (evt.currentTarget as HTMLInputElement).value,
-                        })
+                        setEditing(
+                          withScheduleField(
+                            editing,
+                            'startTime',
+                            (evt.currentTarget as HTMLInputElement).value,
+                            'startTime',
+                          ),
+                        )
                       }
                     />
                   </label>
@@ -526,10 +490,14 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                       class="input"
                       value={editing.endTime}
                       onInput={(evt) =>
-                        setEditing({
-                          ...editing,
-                          endTime: (evt.currentTarget as HTMLInputElement).value,
-                        })
+                        setEditing(
+                          withScheduleField(
+                            editing,
+                            'endTime',
+                            (evt.currentTarget as HTMLInputElement).value,
+                            'endTime',
+                          ),
+                        )
                       }
                     />
                   </label>
@@ -543,16 +511,24 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                     class="select"
                     value={editing.repeatMode}
                     onChange={(evt) =>
-                      setEditing({
-                        ...editing,
-                        repeatMode: (evt.currentTarget as HTMLSelectElement)
-                          .value as ScheduleFormState['repeatMode'],
-                      })
+                      setEditing(
+                        withScheduleField(
+                          editing,
+                          'repeatMode',
+                          (evt.currentTarget as HTMLSelectElement).value as ScheduleRepeatMode,
+                          'repeatRule',
+                        ),
+                      )
                     }
                   >
+                    {editing.originalRepeatRule && (
+                      <option value="preserve">
+                        保留原有规则（{formatScheduleRepeat(editing.originalRepeatRule)}）
+                      </option>
+                    )}
                     <option value="none">不重复</option>
                     <option value="daily">每天</option>
-                    <option value="weekly">每周</option>
+                    <option value="weekly">每周（可选多星期）</option>
                     <option value="monthly">每月</option>
                     <option value="yearly">每年</option>
                   </select>
@@ -565,14 +541,51 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                     min={0}
                     value={editing.remindAdvanceMin}
                     onInput={(evt) =>
-                      setEditing({
-                        ...editing,
-                        remindAdvanceMin: (evt.currentTarget as HTMLInputElement).value,
-                      })
+                      setEditing(
+                        withScheduleField(
+                          editing,
+                          'remindAdvanceMin',
+                          (evt.currentTarget as HTMLInputElement).value,
+                          'remindAdvanceMin',
+                        ),
+                      )
                     }
                   />
                 </label>
               </div>
+
+              {editing.repeatMode === 'weekly' && (
+                <div class="field">
+                  <span class="field-label">重复星期</span>
+                  <div class="row-wrap">
+                    {WEEKDAY_LABELS.map((day) => {
+                      const active = editing.repeatWeekdays.includes(day.value);
+                      return (
+                        <button
+                          key={day.value}
+                          type="button"
+                          class={`btn btn-sm${active ? ' btn-primary' : ''}`}
+                          onClick={() => {
+                            const next = active
+                              ? editing.repeatWeekdays.filter((w) => w !== day.value)
+                              : [...editing.repeatWeekdays, day.value];
+                            setEditing(
+                              withScheduleField(
+                                editing,
+                                'repeatWeekdays',
+                                next.length ? next : [day.value],
+                                'repeatRule',
+                              ),
+                            );
+                          }}
+                        >
+                          周{day.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <label class="field">
                 <span class="field-label">地点</span>
@@ -582,24 +595,35 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                   maxLength={200}
                   value={editing.location}
                   onInput={(evt) =>
-                    setEditing({
-                      ...editing,
-                      location: (evt.currentTarget as HTMLInputElement).value,
-                    })
+                    setEditing(
+                      withScheduleField(
+                        editing,
+                        'location',
+                        (evt.currentTarget as HTMLInputElement).value,
+                        'location',
+                      ),
+                    )
                   }
                 />
               </label>
 
-              {editing.locationLat !== null && editing.locationLon !== null && (
+              {!editing.coordsCleared && editing.locationLat !== null && editing.locationLon !== null && (
                 <div class="paper-card-sunk row-between">
                   <span class="muted">
-                    已保留移动端地图坐标：<span class="mono">{editing.locationLat}, {editing.locationLon}</span>
+                    已保留移动端地图坐标：
+                    <span class="mono">
+                      {editing.locationLat}, {editing.locationLon}
+                    </span>
                   </span>
                   <button
                     type="button"
                     class="btn btn-sm btn-ghost"
                     onClick={() =>
-                      setEditing({ ...editing, locationLat: null, locationLon: null })
+                      setEditing({
+                        ...withScheduleField(editing, 'coordsCleared', true, 'coordsCleared'),
+                        locationLat: null,
+                        locationLon: null,
+                      })
                     }
                   >
                     清除坐标
@@ -613,10 +637,14 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                   class="select"
                   value={editing.linkedPlanId}
                   onChange={(evt) =>
-                    setEditing({
-                      ...editing,
-                      linkedPlanId: (evt.currentTarget as HTMLSelectElement).value,
-                    })
+                    setEditing(
+                      withScheduleField(
+                        editing,
+                        'linkedPlanId',
+                        (evt.currentTarget as HTMLSelectElement).value,
+                        'linkedPlanId',
+                      ),
+                    )
                   }
                 >
                   <option value="">不关联</option>
@@ -635,10 +663,14 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
                   maxLength={1000}
                   value={editing.note}
                   onInput={(evt) =>
-                    setEditing({
-                      ...editing,
-                      note: (evt.currentTarget as HTMLTextAreaElement).value,
-                    })
+                    setEditing(
+                      withScheduleField(
+                        editing,
+                        'note',
+                        (evt.currentTarget as HTMLTextAreaElement).value,
+                        'note',
+                      ),
+                    )
                   }
                 />
               </label>
@@ -664,16 +696,16 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
       {editing && conflictServer && (
         <ConflictModal
           title={`日程「${conflictServer.title}」已在其他设备修改`}
-          description="检测到 1409 版本冲突，加载服务端最新数据可完整保留最新地点坐标与备注。"
+          description="检测到 1409 版本冲突。覆盖保存将以服务端最新快照为基底，仅合并您明确修改的字段，并完整保留移动端并发更新的经纬度与重复规则。"
           rows={conflictRows}
           busy={saving}
           onReloadServer={() => {
-            setEditing(fromScheduleItem(conflictServer));
+            setEditing(scheduleFormFromItem(conflictServer));
             setConflictServer(null);
             onNotify('已重载服务端最新日程');
           }}
           onOverwriteWithLatest={() => {
-            void handleSave(undefined, conflictServer.version);
+            void handleSave(undefined, conflictServer);
           }}
           onCancel={() => setConflictServer(null)}
         />

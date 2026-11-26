@@ -1,45 +1,30 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { ApiError } from '../api/client';
+import { ApiError, StaleSessionError } from '../api/client';
 import { ConflictModal, type ConflictFieldRow } from '../components/ConflictModal';
-import type {
-  PlanItem,
-  PlanRepeatRule,
-  PlanUpsertPayload,
-  StrategyItem,
-} from '../types';
+import type { PlanItem, StrategyItem } from '../types';
 import { triggerTextDownload } from '../utils/export';
 import {
   formatRepeatRule,
   formatTimeShort,
   mergePlanTypes,
   resolvePlanTypeMeta,
-  toBackendTime,
   todayIsoDate,
   type PlanTypeOption,
 } from '../utils/format';
+import {
+  buildPlanUpsertPayload,
+  buildStrategyUpsertPayload,
+  emptyPlanForm,
+  planFormFromItem,
+  withPlanField,
+  type PlanFormState,
+  type PlanRepeatMode,
+} from '../utils/payloads';
 
 export interface PlansPageProps {
   api: ApiClient;
   onNotify: (text: string, tone?: 'ok' | 'warn' | 'error') => void;
-}
-
-interface PlanFormState {
-  id: number | null;
-  version: number | null;
-  clientId: string | null;
-  endedOccurrenceDate: string | null;
-  statusLog: string | null;
-  color: string | null;
-  icon: string | null;
-  remindMethods: PlanItem['remindMethods'];
-  name: string;
-  type: string;
-  startTime: string;
-  endTime: string;
-  repeatType: 'daily' | 'weekly' | 'once';
-  weekdays: number[];
-  remindAdvanceMin: number;
 }
 
 const WEEKDAY_LABELS = [
@@ -51,75 +36,6 @@ const WEEKDAY_LABELS = [
   { value: 6, label: '六' },
   { value: 7, label: '日' },
 ];
-
-function emptyPlanForm(): PlanFormState {
-  return {
-    id: null,
-    version: null,
-    clientId: null,
-    endedOccurrenceDate: null,
-    statusLog: null,
-    color: null,
-    icon: null,
-    remindMethods: { notification: true, sound: false, multiDevice: false, repeatMultiple: false },
-    name: '',
-    type: '学习',
-    startTime: '09:00',
-    endTime: '10:30',
-    repeatType: 'daily',
-    weekdays: [1, 2, 3, 4, 5],
-    remindAdvanceMin: 15,
-  };
-}
-
-function fromPlanItem(plan: PlanItem): PlanFormState {
-  const rt = plan.repeatRule?.type;
-  const repeatType: 'daily' | 'weekly' | 'once' =
-    rt === 'weekly' ? 'weekly' : rt === 'once' ? 'once' : 'daily';
-  return {
-    id: plan.id,
-    version: plan.version,
-    clientId: plan.clientId ?? null,
-    endedOccurrenceDate: plan.endedOccurrenceDate ?? null,
-    statusLog: plan.statusLog ?? null,
-    color: plan.color ?? null,
-    icon: plan.icon ?? null,
-    remindMethods: plan.remindMethods ?? {
-      notification: true,
-      sound: false,
-      multiDevice: false,
-      repeatMultiple: false,
-    },
-    name: plan.name,
-    type: plan.type,
-    startTime: formatTimeShort(plan.startTime),
-    endTime: formatTimeShort(plan.endTime),
-    repeatType,
-    weekdays: plan.repeatRule?.weekdays?.length ? [...plan.repeatRule.weekdays] : [1, 2, 3, 4, 5],
-    remindAdvanceMin: plan.remindAdvanceMin ?? 15,
-  };
-}
-
-function toPlanPayload(form: PlanFormState): PlanUpsertPayload {
-  const repeatRule: PlanRepeatRule =
-    form.repeatType === 'weekly'
-      ? { type: 'weekly', weekdays: form.weekdays.length ? form.weekdays : [1, 2, 3, 4, 5] }
-      : { type: form.repeatType };
-  return {
-    clientId: form.clientId || undefined,
-    endedOccurrenceDate: form.endedOccurrenceDate,
-    statusLog: form.statusLog,
-    name: form.name.trim(),
-    type: form.type,
-    startTime: toBackendTime(form.startTime),
-    endTime: toBackendTime(form.endTime),
-    repeatRule,
-    color: form.color,
-    icon: form.icon,
-    remindAdvanceMin: Math.max(0, Number(form.remindAdvanceMin) || 0),
-    remindMethods: form.remindMethods,
-  };
-}
 
 export function PlansPage({ api, onNotify }: PlansPageProps) {
   const [plans, setPlans] = useState<PlanItem[]>([]);
@@ -145,6 +61,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
   const [strategyConflict, setStrategyConflict] = useState<StrategyItem | null>(null);
 
   async function loadPlans() {
+    const gen = api.getSessionGeneration();
     setLoading(true);
     setErrorText(null);
     try {
@@ -152,16 +69,20 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
         api.listPlans(),
         api.pullSyncMetadata().catch(() => null),
       ]);
+      if (!api.isGenerationCurrent(gen)) return;
       setPlans(list);
       if (syncMeta?.planTypes) {
         setPlanTypes(mergePlanTypes(syncMeta.planTypes));
       }
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         setErrorText(err.message);
       }
     } finally {
-      setLoading(false);
+      if (api.isGenerationCurrent(gen)) {
+        setLoading(false);
+      }
     }
   }
 
@@ -169,31 +90,36 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
     void loadPlans();
   }, []);
 
-  async function handleSavePlan(evt?: Event, overrideVersion?: number) {
+  async function handleSavePlan(evt?: Event, mergeServerSnapshot?: PlanItem) {
     evt?.preventDefault();
     if (!editing) return;
     if (!editing.name.trim()) {
       onNotify('请填写计划名称', 'warn');
       return;
     }
+    const gen = api.getSessionGeneration();
     setSaving(true);
     try {
-      const payload = toPlanPayload(editing);
+      const payload = buildPlanUpsertPayload(editing, mergeServerSnapshot ?? null);
       if (editing.id === null) {
         await api.createPlan(payload);
+        if (!api.isGenerationCurrent(gen)) return;
         onNotify('已创建新计划');
       } else {
-        const baseVersion = overrideVersion ?? editing.version ?? 0;
+        const baseVersion = mergeServerSnapshot?.version ?? editing.version ?? 0;
         await api.updatePlan(editing.id, baseVersion, payload);
+        if (!api.isGenerationCurrent(gen)) return;
         onNotify('计划已更新');
       }
       setEditing(null);
       setConflictServer(null);
       await loadPlans();
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && err.isConflict && editing.id !== null) {
         try {
           const latestList = await api.listPlans();
+          if (!api.isGenerationCurrent(gen)) return;
           setPlans(latestList);
           const latest = latestList.find((p) => p.id === editing.id) ?? null;
           setConflictServer(latest);
@@ -201,23 +127,29 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
             onNotify('该计划已在其他设备被删除', 'warn');
             setEditing(null);
           }
-        } catch {
+        } catch (reloadErr) {
+          if (reloadErr instanceof StaleSessionError) return;
           onNotify('检测到 1409 版本冲突，请刷新后重试', 'warn');
         }
       } else if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }
     } finally {
-      setSaving(false);
+      if (api.isGenerationCurrent(gen)) {
+        setSaving(false);
+      }
     }
   }
 
   async function handleTogglePause(plan: PlanItem) {
+    const gen = api.getSessionGeneration();
     try {
       const updated = await api.pausePlan(plan.id, todayIsoDate());
+      if (!api.isGenerationCurrent(gen)) return;
       setPlans((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
       onNotify(updated.status === 1 ? `已恢复「${updated.name}」` : `已暂停「${updated.name}」`);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }
@@ -225,11 +157,14 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
   }
 
   async function handleDeletePlan(plan: PlanItem) {
+    const gen = api.getSessionGeneration();
     try {
       await api.deletePlan(plan.id, plan.version);
+      if (!api.isGenerationCurrent(gen)) return;
       setPlans((prev) => prev.filter((p) => p.id !== plan.id));
       onNotify(`已删除「${plan.name}」`);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && err.isConflict) {
         onNotify('该计划版本已变更（1409），已刷新最新列表', 'warn');
         await loadPlans();
@@ -240,11 +175,14 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
   }
 
   async function handleExportIcs() {
+    const gen = api.getSessionGeneration();
     try {
       const ics = await api.exportPlansIcs();
+      if (!api.isGenerationCurrent(gen)) return;
       triggerTextDownload(`oriva-plans-${todayIsoDate()}.ics`, ics, 'text/calendar;charset=utf-8');
       onNotify('已导出计划日历（.ics）');
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }
@@ -252,16 +190,19 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
   }
 
   async function openStrategyModal(plan: PlanItem) {
+    const gen = api.getSessionGeneration();
     setStrategyPlan(plan);
     setStrategyData(null);
     setStrategyConflict(null);
     setStrategyLoading(true);
     try {
       const st = await api.getPlanStrategy(plan.id);
+      if (!api.isGenerationCurrent(gen)) return;
       setStrategyData(st);
       setAutoDnd(Boolean(st.autoDnd));
       setNotifySilence(Boolean(st.notifySilence));
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && err.isNotFound) {
         setStrategyData(null);
         setAutoDnd(false);
@@ -271,42 +212,51 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
         setStrategyPlan(null);
       }
     } finally {
-      setStrategyLoading(false);
+      if (api.isGenerationCurrent(gen)) {
+        setStrategyLoading(false);
+      }
     }
   }
 
-  async function saveStrategy(overrideVersion?: number) {
+  /**
+   * 保存策略（Astra B6）：
+   * 1409 冲突重试时强制传入 strategyConflict 最新快照，同时从该最新快照取 version、
+   * blacklistApps 与 whitelistApps，仅合并两个布尔开关，绝不写回旧黑白名单。
+   */
+  async function saveStrategy(latestSnapshotOverride?: StrategyItem) {
     if (!strategyPlan) return;
+    const gen = api.getSessionGeneration();
+    const baseSnapshot = latestSnapshotOverride ?? strategyData;
+    const { payload, baseVersion } = buildStrategyUpsertPayload(baseSnapshot, {
+      autoDnd,
+      notifySilence,
+    });
     setStrategySaving(true);
     try {
-      // 严禁清空移动端的黑/白名单应用配置，原样透传保留
-      const saved = await api.upsertPlanStrategy(
-        strategyPlan.id,
-        {
-          blacklistApps: strategyData?.blacklistApps ?? null,
-          whitelistApps: strategyData?.whitelistApps ?? null,
-          autoDnd,
-          notifySilence,
-        },
-        overrideVersion ?? strategyData?.version,
-      );
+      const saved = await api.upsertPlanStrategy(strategyPlan.id, payload, baseVersion);
+      if (!api.isGenerationCurrent(gen)) return;
       setStrategyData(saved);
       setStrategyConflict(null);
       setStrategyPlan(null);
       onNotify(`已更新「${strategyPlan.name}」执行策略`);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && err.isConflict) {
         try {
           const latest = await api.getPlanStrategy(strategyPlan.id);
+          if (!api.isGenerationCurrent(gen)) return;
           setStrategyConflict(latest);
-        } catch {
+        } catch (reloadErr) {
+          if (reloadErr instanceof StaleSessionError) return;
           onNotify('策略版本冲突（1409），请重新打开', 'warn');
         }
       } else if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }
     } finally {
-      setStrategySaving(false);
+      if (api.isGenerationCurrent(gen)) {
+        setStrategySaving(false);
+      }
     }
   }
 
@@ -330,6 +280,13 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
             serverValue: `${formatTimeShort(conflictServer.startTime)}–${formatTimeShort(conflictServer.endTime)}`,
           },
           { label: '类型', draftValue: editing.type, serverValue: conflictServer.type },
+          {
+            label: '重复规则',
+            draftValue: editing.dirtyFields.has('repeatRule')
+              ? formatRepeatRule(buildPlanUpsertPayload(editing).repeatRule)
+              : '（未修改，合并时保留服务端最新）',
+            serverValue: formatRepeatRule(conflictServer.repeatRule),
+          },
           {
             label: '版本号',
             draftValue: `v${editing.version ?? 0}`,
@@ -421,10 +378,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
             const meta = resolvePlanTypeMeta(plan.type, planTypes);
             const isPaused = plan.status === 0;
             return (
-              <article
-                key={plan.id}
-                class={`ledger-item${isPaused ? ' is-paused' : ''}`}
-              >
+              <article key={plan.id} class={`ledger-item${isPaused ? ' is-paused' : ''}`}>
                 <div class={`ledger-time ${meta.hueClass}`}>
                   {formatTimeShort(plan.startTime)} – {formatTimeShort(plan.endTime)}
                 </div>
@@ -456,7 +410,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                   <button
                     type="button"
                     class="btn btn-sm"
-                    onClick={() => setEditing(fromPlanItem(plan))}
+                    onClick={() => setEditing(planFormFromItem(plan))}
                   >
                     编辑
                   </button>
@@ -497,7 +451,14 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                   maxLength={100}
                   value={editing.name}
                   onInput={(evt) =>
-                    setEditing({ ...editing, name: (evt.currentTarget as HTMLInputElement).value })
+                    setEditing(
+                      withPlanField(
+                        editing,
+                        'name',
+                        (evt.currentTarget as HTMLInputElement).value,
+                        'name',
+                      ),
+                    )
                   }
                 />
               </label>
@@ -510,7 +471,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                       key={opt.key}
                       type="button"
                       class={`hue-chip-btn ${opt.hueClass}${editing.type === opt.key ? ' is-selected' : ''}`}
-                      onClick={() => setEditing({ ...editing, type: opt.key })}
+                      onClick={() => setEditing(withPlanField(editing, 'type', opt.key, 'type'))}
                     >
                       {opt.label}
                     </button>
@@ -528,10 +489,14 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                     required
                     value={editing.startTime}
                     onInput={(evt) =>
-                      setEditing({
-                        ...editing,
-                        startTime: (evt.currentTarget as HTMLInputElement).value,
-                      })
+                      setEditing(
+                        withPlanField(
+                          editing,
+                          'startTime',
+                          (evt.currentTarget as HTMLInputElement).value,
+                          'startTime',
+                        ),
+                      )
                     }
                   />
                 </label>
@@ -544,10 +509,14 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                     required
                     value={editing.endTime}
                     onInput={(evt) =>
-                      setEditing({
-                        ...editing,
-                        endTime: (evt.currentTarget as HTMLInputElement).value,
-                      })
+                      setEditing(
+                        withPlanField(
+                          editing,
+                          'endTime',
+                          (evt.currentTarget as HTMLInputElement).value,
+                          'endTime',
+                        ),
+                      )
                     }
                   />
                 </label>
@@ -560,15 +529,21 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                     class="select"
                     value={editing.repeatType}
                     onChange={(evt) =>
-                      setEditing({
-                        ...editing,
-                        repeatType: (evt.currentTarget as HTMLSelectElement).value as
-                          | 'daily'
-                          | 'weekly'
-                          | 'once',
-                      })
+                      setEditing(
+                        withPlanField(
+                          editing,
+                          'repeatType',
+                          (evt.currentTarget as HTMLSelectElement).value as PlanRepeatMode,
+                          'repeatRule',
+                        ),
+                      )
                     }
                   >
+                    {editing.originalRepeatRule && editing.repeatType === 'preserve-custom' && (
+                      <option value="preserve-custom">
+                        保留原有规则（{formatRepeatRule(editing.originalRepeatRule)}）
+                      </option>
+                    )}
                     <option value="daily">每天</option>
                     <option value="weekly">按星期</option>
                     <option value="once">单次</option>
@@ -583,10 +558,14 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                     max={1440}
                     value={editing.remindAdvanceMin}
                     onInput={(evt) =>
-                      setEditing({
-                        ...editing,
-                        remindAdvanceMin: Number((evt.currentTarget as HTMLInputElement).value) || 0,
-                      })
+                      setEditing(
+                        withPlanField(
+                          editing,
+                          'remindAdvanceMin',
+                          Number((evt.currentTarget as HTMLInputElement).value) || 0,
+                          'remindAdvanceMin',
+                        ),
+                      )
                     }
                   />
                 </label>
@@ -607,7 +586,14 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                             const next = active
                               ? editing.weekdays.filter((w) => w !== day.value)
                               : [...editing.weekdays, day.value];
-                            setEditing({ ...editing, weekdays: next.length ? next : [day.value] });
+                            setEditing(
+                              withPlanField(
+                                editing,
+                                'weekdays',
+                                next.length ? next : [day.value],
+                                'repeatRule',
+                              ),
+                            );
                           }}
                         >
                           周{day.label}
@@ -639,16 +625,16 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
       {editing && conflictServer && (
         <ConflictModal
           title={`「${conflictServer.name}」已在其他设备修改`}
-          description="提交的 baseVersion 与服务端最新版本不一致（1409），请选择加载服务端最新数据或以当前草稿覆盖。"
+          description="提交的 baseVersion 与服务端最新版本不一致（1409）。选择「以我的草稿覆盖最新版本」时，系统将基于服务端最新快照仅合并您明确改动的字段，保留移动端未修改字段与自定义日期。"
           rows={conflictRows}
           busy={saving}
           onReloadServer={() => {
-            setEditing(fromPlanItem(conflictServer));
+            setEditing(planFormFromItem(conflictServer));
             setConflictServer(null);
             onNotify('已加载服务端最新计划版本');
           }}
           onOverwriteWithLatest={() => {
-            void handleSavePlan(undefined, conflictServer.version);
+            void handleSavePlan(undefined, conflictServer);
           }}
           onCancel={() => setConflictServer(null)}
         />
@@ -697,11 +683,11 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                 <div class="paper-card-sunk stack-sm">
                   <div class="eyebrow">移动端应用名单（只读保留）</div>
                   <div class="muted">
-                    黑名单应用：{strategyData?.blacklistApps?.length ?? 0} 项 · 白名单应用：
-                    {strategyData?.whitelistApps?.length ?? 0} 项
+                    黑名单应用：{(strategyConflict ?? strategyData)?.blacklistApps?.length ?? 0} 项 ·
+                    白名单应用：{(strategyConflict ?? strategyData)?.whitelistApps?.length ?? 0} 项
                   </div>
                   <div class="faint">
-                    保存基础策略时会自动原样保留您在手机端配置的应用黑白名单，不会覆盖清空。
+                    保存或冲突重试时均会基于服务端最新快照原样透传移动端应用黑白名单，仅更新上述两个开关。
                   </div>
                 </div>
 
@@ -712,7 +698,9 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                       <span>
                         服务端已更新至 v{strategyConflict.version}（免打扰：
                         {strategyConflict.autoDnd ? '开' : '关'}，通知静默：
-                        {strategyConflict.notifySilence ? '开' : '关'}）。
+                        {strategyConflict.notifySilence ? '开' : '关'}，黑名单：
+                        {strategyConflict.blacklistApps?.length ?? 0} 项，白名单：
+                        {strategyConflict.whitelistApps?.length ?? 0} 项）。
                       </span>
                       <div class="row-wrap">
                         <button
@@ -730,9 +718,9 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                         <button
                           type="button"
                           class="btn btn-sm btn-vermilion"
-                          onClick={() => void saveStrategy(strategyConflict.version)}
+                          onClick={() => void saveStrategy(strategyConflict)}
                         >
-                          基于 v{strategyConflict.version} 覆盖保存
+                          保留最新名单并基于 v{strategyConflict.version} 保存开关
                         </button>
                       </div>
                     </div>

@@ -274,8 +274,9 @@ export interface PluginCatalogEntry {
   id: string;
   name: string;
   version: string;
+  versionCode?: number;
   contractVersion: number;
-  type?: string;
+  type?: 'js' | 'dex';
   entryPoint: string;
   requiredCapabilities: string[];
   description: string;

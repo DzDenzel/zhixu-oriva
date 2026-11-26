@@ -16,12 +16,15 @@ import type {
   SyncPullResponse,
   TodaySummary,
 } from '../types';
+import { MAX_CATALOG_BYTES, validateSameOriginCatalog } from '../utils/catalog';
+import { utf8ByteLength } from '../utils/security';
 import {
   buildWebDeviceName,
   clearSessionToken,
   getOrCreateDeviceUid,
   readSessionToken,
   writeSessionToken,
+  type ClearSessionResult,
 } from '../utils/session';
 
 export const ERROR_UNAUTHORIZED = 1001;
@@ -53,6 +56,17 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 会话已登出或切换后，旧代际在途请求返回时抛出的静默中止异常（Astra B3）：
+ * 调用方应静默丢弃响应，绝不触发导出下载、覆盖新会话状态或误报错误。
+ */
+export class StaleSessionError extends Error {
+  constructor() {
+    super('会话已切换或已退出，已丢弃过期的在途响应');
+    this.name = 'StaleSessionError';
+  }
+}
+
 export interface ApiClientOptions {
   fetchImpl?: typeof fetch;
   onUnauthorized?: (reason: string) => void;
@@ -61,21 +75,39 @@ export interface ApiClientOptions {
 export function createApiClient(options: ApiClientOptions = {}) {
   const fetchFn = options.fetchImpl ?? ((...args: Parameters<typeof fetch>) => window.fetch(...args));
   let memoryToken: string | null = readSessionToken();
+  let sessionGeneration = 0;
 
-  function getToken(): string | null {
-    return readSessionToken() ?? memoryToken;
+  function getSessionGeneration(): number {
+    return sessionGeneration;
   }
 
-  function setToken(token: string | null): void {
+  function isGenerationCurrent(gen: number): boolean {
+    return gen === sessionGeneration;
+  }
+
+  function getToken(): string | null {
+    return memoryToken;
+  }
+
+  function setToken(token: string | null): ClearSessionResult {
+    sessionGeneration += 1;
     memoryToken = token;
     if (token) {
       writeSessionToken(token);
-    } else {
-      clearSessionToken();
+      return { storageCleared: true };
+    }
+    return clearSessionToken();
+  }
+
+  function assertGeneration(requestGen: number): void {
+    if (requestGen !== sessionGeneration) {
+      throw new StaleSessionError();
     }
   }
 
-  function handleUnauthorized(message: string): never {
+  function handleUnauthorized(message: string, requestGen: number): never {
+    // 若在途旧请求在登出/重新登录后才返回 401/1001，绝不可误清新会话！
+    assertGeneration(requestGen);
     setToken(null);
     options.onUnauthorized?.(message);
     throw new ApiError(ERROR_UNAUTHORIZED, message, 401);
@@ -86,6 +118,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
     init: RequestInit = {},
     requireAuth = true,
   ): Promise<T> {
+    const requestGen = sessionGeneration;
     const headers = new Headers(init.headers ?? {});
     if (init.body !== undefined && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
@@ -93,7 +126,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
     if (requireAuth) {
       const token = getToken();
       if (!token) {
-        handleUnauthorized('请先登录您的知序实例');
+        handleUnauthorized('请先登录您的知序实例', requestGen);
       }
       headers.set('Authorization', `Bearer ${token}`);
     }
@@ -107,22 +140,28 @@ export function createApiClient(options: ApiClientOptions = {}) {
         credentials: 'same-origin',
       });
     } catch {
+      assertGeneration(requestGen);
       throw new ApiError(2001, '网络请求失败，请检查个人后端连接是否正常', 0);
     }
 
+    assertGeneration(requestGen);
+
     if (response.status === 401) {
-      handleUnauthorized('登录会话已失效，请重新登录');
+      handleUnauthorized('登录会话已失效，请重新登录', requestGen);
     }
 
     let payload: ApiResponse<T>;
     try {
       payload = (await response.json()) as ApiResponse<T>;
     } catch {
+      assertGeneration(requestGen);
       throw new ApiError(2001, `服务端返回了非 JSON 响应（HTTP ${response.status}）`, response.status);
     }
 
+    assertGeneration(requestGen);
+
     if (payload.code === ERROR_UNAUTHORIZED) {
-      handleUnauthorized(payload.message || '登录状态已过期，请重新登录');
+      handleUnauthorized(payload.message || '登录状态已过期，请重新登录', requestGen);
     }
     if (payload.code !== 0) {
       throw new ApiError(payload.code, payload.message || '请求失败', response.status);
@@ -131,11 +170,12 @@ export function createApiClient(options: ApiClientOptions = {}) {
   }
 
   async function requestRawText(path: string, requireAuth = true): Promise<string> {
+    const requestGen = sessionGeneration;
     const headers = new Headers();
     if (requireAuth) {
       const token = getToken();
       if (!token) {
-        handleUnauthorized('请先登录您的知序实例');
+        handleUnauthorized('请先登录您的知序实例', requestGen);
       }
       headers.set('Authorization', `Bearer ${token}`);
     }
@@ -148,24 +188,31 @@ export function createApiClient(options: ApiClientOptions = {}) {
         credentials: 'same-origin',
       });
     } catch {
+      assertGeneration(requestGen);
       throw new ApiError(2001, '导出请求失败，请检查网络连接', 0);
     }
+
+    assertGeneration(requestGen);
+
     if (response.status === 401) {
-      handleUnauthorized('登录会话已失效，请重新登录');
+      handleUnauthorized('登录会话已失效，请重新登录', requestGen);
     }
     const contentType = response.headers.get('content-type') || '';
     const text = await response.text();
+
+    assertGeneration(requestGen);
+
     if (contentType.includes('application/json')) {
       try {
         const parsed = JSON.parse(text) as Partial<ApiResponse<unknown>>;
         if (typeof parsed.code === 'number' && parsed.code !== 0) {
           if (parsed.code === ERROR_UNAUTHORIZED) {
-            handleUnauthorized(parsed.message || '登录状态已过期，请重新登录');
+            handleUnauthorized(parsed.message || '登录状态已过期，请重新登录', requestGen);
           }
           throw new ApiError(parsed.code, parsed.message || '导出失败', response.status);
         }
       } catch (err) {
-        if (err instanceof ApiError) throw err;
+        if (err instanceof ApiError || err instanceof StaleSessionError) throw err;
       }
     }
     if (!response.ok) {
@@ -175,14 +222,15 @@ export function createApiClient(options: ApiClientOptions = {}) {
   }
 
   return {
+    getSessionGeneration,
+    isGenerationCurrent,
     getToken,
     setToken,
-    clearSession: () => setToken(null),
+    clearSession: (): ClearSessionResult => setToken(null),
 
     /**
-     * 登录：优先发送 ADR-022 D2 规定的 platform="web"；
-     * 若后端尚未放宽 LoginRequest.platform 正则（当前仅允许 android|ios|windows），
-     * Jakarta 校验会在限流计数前返回 1002，此时自动以 platform="windows" 重试一次（仍保持 web-<UUID> deviceUid）。
+     * 登录：优先发送 ADR-022 D2 规定的 platform="web"。
+     * TODO(req041-integration): remove platform="windows" fallback once Package A v1.1 (9fdcda9, supporting platform="web") merges to main.
      */
     async login(account: string, password: string): Promise<AuthResponse> {
       const deviceUid = getOrCreateDeviceUid();
@@ -247,14 +295,18 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     updatePlan(id: number, baseVersion: number, payload: PlanUpsertPayload): Promise<PlanItem> {
-      return requestJson<PlanItem>(`/api/v1/plans/${id}?baseVersion=${encodeURIComponent(String(baseVersion))}`, {
-        method: 'PUT',
-        body: JSON.stringify(payload),
-      });
+      return requestJson<PlanItem>(
+        `/api/v1/plans/${id}?baseVersion=${encodeURIComponent(String(baseVersion))}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        },
+      );
     },
 
     deletePlan(id: number, baseVersion?: number): Promise<void> {
-      const suffix = baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
+      const suffix =
+        baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
       return requestJson<void>(`/api/v1/plans/${id}${suffix}`, { method: 'DELETE' });
     },
 
@@ -277,7 +329,8 @@ export function createApiClient(options: ApiClientOptions = {}) {
       payload: StrategyUpsertPayload,
       baseVersion?: number,
     ): Promise<StrategyItem> {
-      const suffix = baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
+      const suffix =
+        baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
       return requestJson<StrategyItem>(`/api/v1/plans/${planId}/strategy${suffix}`, {
         method: 'PUT',
         body: JSON.stringify(payload),
@@ -296,7 +349,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
-    updateSchedule(id: number, baseVersion: number, payload: ScheduleUpsertPayload): Promise<ScheduleItem> {
+    updateSchedule(
+      id: number,
+      baseVersion: number,
+      payload: ScheduleUpsertPayload,
+    ): Promise<ScheduleItem> {
       return requestJson<ScheduleItem>(
         `/api/v1/schedules/${id}?baseVersion=${encodeURIComponent(String(baseVersion))}`,
         {
@@ -307,7 +364,8 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     deleteSchedule(id: number, baseVersion?: number): Promise<void> {
-      const suffix = baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
+      const suffix =
+        baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
       return requestJson<void>(`/api/v1/schedules/${id}${suffix}`, { method: 'DELETE' });
     },
 
@@ -342,7 +400,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
-    updateJournal(id: number, baseVersion: number, payload: JournalUpsertPayload): Promise<JournalItem> {
+    updateJournal(
+      id: number,
+      baseVersion: number,
+      payload: JournalUpsertPayload,
+    ): Promise<JournalItem> {
       return requestJson<JournalItem>(
         `/api/v1/journals/${id}?baseVersion=${encodeURIComponent(String(baseVersion))}`,
         {
@@ -353,7 +415,8 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     deleteJournal(id: number, baseVersion?: number): Promise<void> {
-      const suffix = baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
+      const suffix =
+        baseVersion !== undefined ? `?baseVersion=${encodeURIComponent(String(baseVersion))}` : '';
       return requestJson<void>(`/api/v1/journals/${id}${suffix}`, { method: 'DELETE' });
     },
 
@@ -374,30 +437,53 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return requestJson<void>(`/api/v1/devices/${id}`, { method: 'DELETE' });
     },
 
-    // Same-origin Plugin Catalog（注意：PluginCatalogController 返回原始 JSON Map，不包 ApiResponse）
+    /**
+     * 同源公开插件目录（WebConfig PUBLIC_API_PATTERNS 明确放行 /api/v1/plugins/**）：
+     * - 不携带 Bearer JWT（遵循最小权限原则，Astra B3）；
+     * - 校验会话代际防止过时响应回写页面；
+     * - 施加 2 MiB 体积上限与完整有界 schema 校验（Astra B5）。
+     */
     async getPluginCatalog(source: 'official' | 'third-party'): Promise<PluginCatalogDocument> {
-      const headers = new Headers();
-      const token = getToken();
-      if (token) headers.set('Authorization', `Bearer ${token}`);
+      const requestGen = sessionGeneration;
       let response: Response;
       try {
         response = await fetchFn(`/api/v1/plugins/catalog/${source}`, {
           method: 'GET',
-          headers,
           cache: 'no-store',
           credentials: 'same-origin',
         });
       } catch {
+        assertGeneration(requestGen);
         throw new ApiError(2001, '无法连接插件目录接口', 0);
       }
+
+      assertGeneration(requestGen);
+
       if (!response.ok) {
         throw new ApiError(2001, `插件目录加载失败（HTTP ${response.status}）`, response.status);
       }
-      const data = (await response.json()) as PluginCatalogDocument;
-      if (!data || !Array.isArray(data.plugins)) {
-        throw new ApiError(2001, '插件目录响应格式无效', response.status);
+
+      const contentLength = Number(response.headers.get('content-length') || '0');
+      if (Number.isFinite(contentLength) && contentLength > MAX_CATALOG_BYTES) {
+        throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
       }
-      return data;
+
+      const rawText = await response.text();
+      assertGeneration(requestGen);
+
+      if (utf8ByteLength(rawText) > MAX_CATALOG_BYTES) {
+        throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
+      }
+
+      const validated = validateSameOriginCatalog(rawText, source);
+      if (!validated.valid || !validated.catalog) {
+        throw new ApiError(
+          2001,
+          `插件目录响应未通过安全结构校验：${validated.errors[0] || '结构无效'}`,
+          response.status,
+        );
+      }
+      return validated.catalog;
     },
   };
 }

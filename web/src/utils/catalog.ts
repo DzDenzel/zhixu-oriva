@@ -1,9 +1,30 @@
 import type { PluginCatalogDocument, PluginCatalogEntry } from '../types';
-import { isSafeArtifactFilename, isValidFingerprint, safeHttpUrl, stripDisallowedControlChars } from './security';
+import {
+  isSafeArtifactFilename,
+  isSafePositiveInt32,
+  isValidFingerprint,
+  isValidSha256Hex,
+  safeDiagnosticValue,
+  safeFormBDownloadUrl,
+  safeHttpUrl,
+  safeSameOriginDownloadUrl,
+  stripDisallowedControlChars,
+  utf8ByteLength,
+} from './security';
+
+export const MAX_CATALOG_BYTES = 2 * 1024 * 1024; // 2 MiB
+export const MAX_PLUGINS_COUNT = 256;
+export const MAX_FINGERPRINTS_COUNT = 32;
+export const MAX_CAPABILITIES_COUNT = 32;
+export const MAX_ERRORS_COLLECTED = 50;
+
+export type CatalogTrustState = 'format-only-anchored' | 'unanchored' | 'invalid';
 
 export interface CatalogValidationResult {
   valid: boolean;
+  trustState: CatalogTrustState;
   errors: string[];
+  omittedErrorCount: number;
   warnings: string[];
   catalog: PluginCatalogDocument | null;
 }
@@ -21,9 +42,12 @@ export const SAMPLE_FORM_B_CATALOG = JSON.stringify(
     plugins: [
       {
         artifact: 'ink-focus-cue-0.1.0.pljs',
+        downloadUrl: './artifacts/ink-focus-cue-0.1.0.pljs',
+        sha256: '4D3F3CD63C17F964F1C891D1F0DD959691F38F2B3F680CC1EDB898C169DC74F1',
         id: 'ink-focus-cue',
         name: '墨序专注提示',
         version: '0.1.0',
+        versionCode: 1,
         contractVersion: 2,
         type: 'js',
         entryPoint: 'entryPoint',
@@ -40,12 +64,36 @@ export const SAMPLE_FORM_B_CATALOG = JSON.stringify(
   2,
 );
 
-/**
- * 校验 REQ-037 形态 B catalog.json，并剔除一切不安全 URL 与控制字符。
- */
-export function validateFormBCatalog(rawJson: string): CatalogValidationResult {
+type ValidationMode = 'form-b' | 'same-origin';
+
+function validateCatalogInternal(
+  rawJson: string,
+  mode: ValidationMode,
+  expectedSource?: 'official' | 'third-party',
+): CatalogValidationResult {
   const errors: string[] = [];
+  let omittedErrorCount = 0;
   const warnings: string[] = [];
+
+  function pushError(msg: string) {
+    if (errors.length < MAX_ERRORS_COLLECTED) {
+      errors.push(msg);
+    } else {
+      omittedErrorCount += 1;
+    }
+  }
+
+  const byteLen = utf8ByteLength(rawJson);
+  if (byteLen > MAX_CATALOG_BYTES) {
+    return {
+      valid: false,
+      trustState: 'invalid',
+      errors: [`目录 JSON 体积超过上限（最大 ${MAX_CATALOG_BYTES / (1024 * 1024)} MiB）`],
+      omittedErrorCount: 0,
+      warnings,
+      catalog: null,
+    };
+  }
 
   let doc: unknown;
   try {
@@ -53,97 +101,184 @@ export function validateFormBCatalog(rawJson: string): CatalogValidationResult {
   } catch (err) {
     return {
       valid: false,
-      errors: [`JSON 解析失败：${err instanceof Error ? err.message : String(err)}`],
+      trustState: 'invalid',
+      errors: [`JSON 解析失败：${err instanceof Error ? err.message : safeDiagnosticValue(err)}`],
+      omittedErrorCount: 0,
       warnings,
       catalog: null,
     };
   }
 
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
-    return { valid: false, errors: ['catalog.json 根节点必须为 JSON 对象'], warnings, catalog: null };
+    return {
+      valid: false,
+      trustState: 'invalid',
+      errors: ['catalog.json 根节点必须为 JSON 对象'],
+      omittedErrorCount: 0,
+      warnings,
+      catalog: null,
+    };
   }
 
   const obj = doc as Record<string, unknown>;
-  const catalogFormatVersion =
-    typeof obj.catalogFormatVersion === 'number' && Number.isInteger(obj.catalogFormatVersion) && obj.catalogFormatVersion >= 1
-      ? obj.catalogFormatVersion
-      : null;
-  if (catalogFormatVersion === null) {
-    errors.push('catalogFormatVersion 必须为 >= 1 的整数');
+
+  let catalogFormatVersion = 1;
+  if (!isSafePositiveInt32(obj.catalogFormatVersion)) {
+    pushError('catalogFormatVersion 必须为 1 至 2147483647 的整数');
+  } else {
+    catalogFormatVersion = obj.catalogFormatVersion;
   }
 
-  const sourceId = typeof obj.sourceId === 'string' ? stripDisallowedControlChars(obj.sourceId).trim() : '';
-  if (!sourceId || !/^[A-Za-z0-9._-]+$/.test(sourceId)) {
-    errors.push('sourceId 缺失或包含非法字符（仅允许字母/数字/._-）');
+  const sourceId =
+    typeof obj.sourceId === 'string' ? stripDisallowedControlChars(obj.sourceId).trim() : '';
+  if (!sourceId || !/^[A-Za-z0-9._-]{1,128}$/.test(sourceId)) {
+    pushError('sourceId 缺失、超长或包含非法字符（仅允许 1–128 位字母/数字/._-）');
+  } else if (expectedSource && sourceId !== expectedSource) {
+    pushError(`sourceId（${sourceId}）与请求目录源（${expectedSource}）不匹配`);
   }
 
   const sourceType = typeof obj.sourceType === 'string' ? obj.sourceType.trim() : '';
   if (sourceType !== 'OFFICIAL' && sourceType !== 'THIRD_PARTY') {
-    errors.push('sourceType 必须为 OFFICIAL 或 THIRD_PARTY');
+    pushError('sourceType 必须为 OFFICIAL 或 THIRD_PARTY');
   }
 
   const trustedFingerprints: string[] = [];
-  if (obj.trustedFingerprints !== undefined) {
+  if (obj.trustedFingerprints !== undefined && obj.trustedFingerprints !== null) {
     if (!Array.isArray(obj.trustedFingerprints)) {
-      errors.push('trustedFingerprints 必须为字符串数组');
+      pushError('trustedFingerprints 必须为字符串数组');
     } else {
-      for (const fp of obj.trustedFingerprints) {
+      if (obj.trustedFingerprints.length > MAX_FINGERPRINTS_COUNT) {
+        pushError(`trustedFingerprints 数量超过上限（最多 ${MAX_FINGERPRINTS_COUNT} 项）`);
+      }
+      const seenFp = new Set<string>();
+      const slice = obj.trustedFingerprints.slice(0, MAX_FINGERPRINTS_COUNT);
+      for (const fp of slice) {
         if (!isValidFingerprint(fp)) {
-          errors.push(`发现非法 SHA-256 指纹格式：${String(fp).slice(0, 40)}`);
+          pushError(`发现非法 SHA-256 指纹格式：${safeDiagnosticValue(fp)}`);
         } else {
-          trustedFingerprints.push(String(fp).trim().toUpperCase());
+          const normalized = String(fp).trim().toUpperCase();
+          if (!seenFp.has(normalized)) {
+            seenFp.add(normalized);
+            trustedFingerprints.push(normalized);
+          }
         }
       }
     }
-  } else {
-    warnings.push('未提供 trustedFingerprints，Android 客户端添加该源时需手动输入或核对证书指纹');
+  }
+
+  if (mode === 'form-b' && trustedFingerprints.length === 0) {
+    warnings.push(
+      '未声明任何有效信任锚指纹（trustedFingerprints 为空）：仅完成结构预检，Android 客户端要求非空且经独立可信渠道核对的证书指纹。',
+    );
   }
 
   if (!Array.isArray(obj.plugins)) {
-    errors.push('plugins 必须为数组');
+    pushError('plugins 必须为数组');
   }
 
   const parsedPlugins: PluginCatalogEntry[] = [];
   const seenIds = new Set<string>();
 
   if (Array.isArray(obj.plugins)) {
-    obj.plugins.forEach((rawEntry, index) => {
+    if (obj.plugins.length > MAX_PLUGINS_COUNT) {
+      pushError(`plugins 条目数量超过上限（最多 ${MAX_PLUGINS_COUNT} 项，当前 ${obj.plugins.length} 项）`);
+    }
+    const capped = obj.plugins.slice(0, MAX_PLUGINS_COUNT);
+    capped.forEach((rawEntry, index) => {
       if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
-        errors.push(`plugins[${index}] 必须为对象`);
+        pushError(`plugins[${index}] 必须为对象`);
         return;
       }
       const e = rawEntry as Record<string, unknown>;
-      const id = typeof e.id === 'string' ? e.id.trim() : '';
+      const id = typeof e.id === 'string' ? stripDisallowedControlChars(e.id).trim() : '';
       const name = typeof e.name === 'string' ? stripDisallowedControlChars(e.name).trim() : '';
-      const version = typeof e.version === 'string' ? stripDisallowedControlChars(e.version).trim() : '';
-      const entryPoint = typeof e.entryPoint === 'string' ? stripDisallowedControlChars(e.entryPoint).trim() : '';
-      const description = typeof e.description === 'string' ? stripDisallowedControlChars(e.description, true) : null;
-      const contractVersion =
-        typeof e.contractVersion === 'number' && Number.isInteger(e.contractVersion) && e.contractVersion >= 1
-          ? e.contractVersion
-          : null;
+      const version =
+        typeof e.version === 'string' ? stripDisallowedControlChars(e.version).trim() : '';
+      const entryPoint =
+        typeof e.entryPoint === 'string' ? stripDisallowedControlChars(e.entryPoint).trim() : '';
+      const description =
+        typeof e.description === 'string' ? stripDisallowedControlChars(e.description, true) : null;
 
-      if (!id) errors.push(`plugins[${index}].id 不能为空`);
-      else if (seenIds.has(id)) errors.push(`存在重复插件 ID：${id}`);
+      if (!id || id.length > 128) pushError(`plugins[${index}].id 缺失或超过 128 字符`);
+      else if (seenIds.has(id)) pushError(`存在重复插件 ID：${safeDiagnosticValue(id)}`);
       else seenIds.add(id);
 
-      if (!name) errors.push(`plugins[${index}].name 不能为空`);
-      if (!version) errors.push(`plugins[${index}].version 不能为空`);
-      if (!entryPoint) errors.push(`plugins[${index}].entryPoint 不能为空`);
-      if (contractVersion === null) errors.push(`plugins[${index}].contractVersion 必须为正整数`);
-      if (description === null) errors.push(`plugins[${index}].description 必须为字符串`);
+      if (!name || name.length > 120) pushError(`plugins[${index}].name 缺失或超过 120 字符`);
+      if (!version || version.length > 64) pushError(`plugins[${index}].version 缺失或超过 64 字符`);
+      if (!entryPoint || entryPoint.length > 200) {
+        pushError(`plugins[${index}].entryPoint 缺失或超过 200 字符`);
+      }
+      if (description === null || description.length > 2000) {
+        pushError(`plugins[${index}].description 必须为不超过 2000 字符的字符串`);
+      }
 
-      if (e.artifact !== undefined && !isSafeArtifactFilename(e.artifact)) {
-        errors.push(`plugins[${index}].artifact 文件名不合法（仅允许安全 .plp / .pljs 文件名）`);
+      if (!isSafePositiveInt32(e.contractVersion)) {
+        pushError(`plugins[${index}].contractVersion 必须为正 Int32 整数`);
+      }
+
+      let versionCode: number | undefined;
+      if (e.versionCode !== undefined && e.versionCode !== null) {
+        if (!isSafePositiveInt32(e.versionCode)) {
+          pushError(`plugins[${index}].versionCode 必须为正 Int32 整数`);
+        } else {
+          versionCode = e.versionCode;
+        }
+      }
+
+      let runtimeType: 'js' | 'dex' | undefined;
+      if (e.type !== undefined && e.type !== null) {
+        if (e.type === 'js' || e.type === 'dex') {
+          runtimeType = e.type;
+        } else {
+          pushError(`plugins[${index}].type 仅支持 js 或 dex，收到：${safeDiagnosticValue(e.type)}`);
+        }
+      }
+
+      let artifact: string | undefined;
+      if (e.artifact !== undefined && e.artifact !== null) {
+        if (!isSafeArtifactFilename(e.artifact)) {
+          pushError(`plugins[${index}].artifact 文件名不合法（仅允许安全 .plp / .pljs 文件名）`);
+        } else {
+          artifact = String(e.artifact);
+        }
+      }
+
+      let downloadUrl: string | undefined;
+      if (e.downloadUrl !== undefined && e.downloadUrl !== null) {
+        const validated =
+          mode === 'form-b'
+            ? safeFormBDownloadUrl(e.downloadUrl)
+            : safeSameOriginDownloadUrl(e.downloadUrl, expectedSource);
+        if (!validated) {
+          pushError(
+            mode === 'form-b'
+              ? `plugins[${index}].downloadUrl 仅允许规范化相对路径 ./artifacts/<安全文件名>`
+              : `plugins[${index}].downloadUrl 不符合本实例同源 /api/v1/plugins/artifacts/ 路径契约`,
+          );
+        } else {
+          downloadUrl = validated;
+        }
+      }
+
+      let sha256: string | undefined;
+      if (e.sha256 !== undefined && e.sha256 !== null && e.sha256 !== '') {
+        if (!isValidSha256Hex(e.sha256)) {
+          pushError(`plugins[${index}].sha256 必须为 64 位十六进制摘要`);
+        } else {
+          sha256 = String(e.sha256).trim().toUpperCase();
+        }
       }
 
       const requiredCapabilities: string[] = [];
       if (!Array.isArray(e.requiredCapabilities)) {
-        errors.push(`plugins[${index}].requiredCapabilities 必须为字符串数组`);
+        pushError(`plugins[${index}].requiredCapabilities 必须为字符串数组`);
       } else {
-        for (const cap of e.requiredCapabilities) {
-          if (typeof cap !== 'string' || !cap.trim()) {
-            errors.push(`plugins[${index}].requiredCapabilities 包含空项`);
+        if (e.requiredCapabilities.length > MAX_CAPABILITIES_COUNT) {
+          pushError(`plugins[${index}].requiredCapabilities 超过上限（最多 ${MAX_CAPABILITIES_COUNT} 项）`);
+        }
+        for (const cap of e.requiredCapabilities.slice(0, MAX_CAPABILITIES_COUNT)) {
+          if (typeof cap !== 'string' || !cap.trim() || cap.trim().length > 64) {
+            pushError(`plugins[${index}].requiredCapabilities 包含无效能力项`);
           } else {
             requiredCapabilities.push(stripDisallowedControlChars(cap).trim());
           }
@@ -154,7 +289,7 @@ export function validateFormBCatalog(rawJson: string): CatalogValidationResult {
       if (e.homepage !== undefined && e.homepage !== null && e.homepage !== '') {
         const checked = safeHttpUrl(e.homepage);
         if (!checked) {
-          errors.push(`plugins[${index}].homepage 存在不安全协议、凭据或非法 URL`);
+          pushError(`plugins[${index}].homepage 存在不安全协议、凭据或非法 URL`);
         } else {
           homepage = checked;
         }
@@ -164,9 +299,27 @@ export function validateFormBCatalog(rawJson: string): CatalogValidationResult {
       if (e.repository !== undefined && e.repository !== null && e.repository !== '') {
         const checked = safeHttpUrl(e.repository);
         if (!checked) {
-          errors.push(`plugins[${index}].repository 存在不安全协议、凭据或非法 URL`);
+          pushError(`plugins[${index}].repository 存在不安全协议、凭据或非法 URL`);
         } else {
           repository = checked;
+        }
+      }
+
+      let author: string | undefined;
+      if (e.author !== undefined && e.author !== null) {
+        if (typeof e.author !== 'string' || e.author.trim().length > 200) {
+          pushError(`plugins[${index}].author 必须为不超过 200 字符的字符串`);
+        } else if (e.author.trim()) {
+          author = stripDisallowedControlChars(e.author).trim();
+        }
+      }
+
+      let license: string | undefined;
+      if (e.license !== undefined && e.license !== null) {
+        if (typeof e.license !== 'string' || e.license.trim().length > 200) {
+          pushError(`plugins[${index}].license 必须为不超过 200 字符的字符串`);
+        } else if (e.license.trim()) {
+          license = stripDisallowedControlChars(e.license).trim();
         }
       }
 
@@ -174,37 +327,73 @@ export function validateFormBCatalog(rawJson: string): CatalogValidationResult {
         id: id || `invalid-${index}`,
         name: name || '(未命名)',
         version: version || '0.0.0',
-        contractVersion: contractVersion ?? 1,
-        type: typeof e.type === 'string' ? stripDisallowedControlChars(e.type).trim() : undefined,
+        versionCode,
+        contractVersion: isSafePositiveInt32(e.contractVersion) ? e.contractVersion : 1,
+        type: runtimeType,
         entryPoint: entryPoint || '',
         requiredCapabilities,
         description: description ?? '',
-        artifact: typeof e.artifact === 'string' ? e.artifact : undefined,
-        sha256: typeof e.sha256 === 'string' ? stripDisallowedControlChars(e.sha256).trim() : undefined,
-        author: typeof e.author === 'string' ? stripDisallowedControlChars(e.author).trim() : undefined,
+        artifact,
+        downloadUrl,
+        sha256,
+        author,
         homepage,
         repository,
-        license: typeof e.license === 'string' ? stripDisallowedControlChars(e.license).trim() : undefined,
+        license,
       });
     });
   }
 
+  const valid = errors.length === 0;
+  const trustState: CatalogTrustState = !valid
+    ? 'invalid'
+    : trustedFingerprints.length > 0
+      ? 'format-only-anchored'
+      : 'unanchored';
+
+  const sourceName =
+    typeof obj.sourceName === 'string'
+      ? stripDisallowedControlChars(obj.sourceName).trim().slice(0, 120) || undefined
+      : undefined;
+  const sourceDescription =
+    typeof obj.sourceDescription === 'string'
+      ? stripDisallowedControlChars(obj.sourceDescription, true).trim().slice(0, 1000) || undefined
+      : undefined;
+
   return {
-    valid: errors.length === 0,
+    valid,
+    trustState,
     errors,
+    omittedErrorCount,
     warnings,
-    catalog: {
-      catalogFormatVersion: catalogFormatVersion ?? 1,
-      sourceId: sourceId || 'unknown',
-      sourceType: sourceType || 'THIRD_PARTY',
-      sourceName:
-        typeof obj.sourceName === 'string' ? stripDisallowedControlChars(obj.sourceName).trim() : undefined,
-      sourceDescription:
-        typeof obj.sourceDescription === 'string'
-          ? stripDisallowedControlChars(obj.sourceDescription, true).trim()
-          : undefined,
-      trustedFingerprints,
-      plugins: parsedPlugins,
-    },
+    // 校验失败时不再返回可信预览文档，仅保留诊断错误供排查
+    catalog: valid
+      ? {
+          catalogFormatVersion,
+          sourceId,
+          sourceType,
+          sourceName,
+          sourceDescription,
+          trustedFingerprints,
+          plugins: parsedPlugins,
+        }
+      : null,
   };
+}
+
+/**
+ * 校验 REQ-037 形态 B catalog.json（本地粘贴或文件读取，严格有界，不作签名背书）。
+ */
+export function validateFormBCatalog(rawJson: string): CatalogValidationResult {
+  return validateCatalogInternal(rawJson, 'form-b');
+}
+
+/**
+ * 校验本实例同源 `/api/v1/plugins/catalog/{source}` 返回的原始目录文本（同样施加体积、数量与字段边界）。
+ */
+export function validateSameOriginCatalog(
+  rawJson: string,
+  expectedSource: 'official' | 'third-party',
+): CatalogValidationResult {
+  return validateCatalogInternal(rawJson, 'same-origin', expectedSource);
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { ApiError } from '../api/client';
+import { ApiError, StaleSessionError } from '../api/client';
 import { SundialDial } from '../components/SundialDial';
 import type { MeResponse, PlanItem, ScheduleItem, TodaySummary } from '../types';
 import {
@@ -27,6 +27,7 @@ export function TodayPage({ api, me }: TodayPageProps) {
   const [errorText, setErrorText] = useState<string | null>(null);
 
   async function loadAll() {
+    const gen = api.getSessionGeneration();
     setLoading(true);
     setErrorText(null);
     try {
@@ -36,6 +37,7 @@ export function TodayPage({ api, me }: TodayPageProps) {
         api.listSchedules(),
         api.pullSyncMetadata().catch(() => null),
       ]);
+      if (!api.isGenerationCurrent(gen)) return;
       setTodaySummary(todayData);
       setPlans(planList);
       setSchedules(scheduleList);
@@ -43,11 +45,14 @@ export function TodayPage({ api, me }: TodayPageProps) {
         setPlanTypes(mergePlanTypes(syncMeta.planTypes));
       }
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         setErrorText(err.message);
       }
     } finally {
-      setLoading(false);
+      if (api.isGenerationCurrent(gen)) {
+        setLoading(false);
+      }
     }
   }
 

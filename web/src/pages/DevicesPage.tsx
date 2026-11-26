@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { ApiError } from '../api/client';
+import { ApiError, StaleSessionError } from '../api/client';
 import type { DeviceItem, MeResponse } from '../types';
 
 export interface DevicesPageProps {
@@ -18,17 +18,22 @@ export function DevicesPage({ api, me, onNotify, onLogout }: DevicesPageProps) {
   const [busyId, setBusyId] = useState<number | null>(null);
 
   async function loadDevices() {
+    const gen = api.getSessionGeneration();
     setLoading(true);
     setErrorText(null);
     try {
       const list = await api.listDevices();
+      if (!api.isGenerationCurrent(gen)) return;
       setDevices(list);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         setErrorText(err.message);
       }
     } finally {
-      setLoading(false);
+      if (api.isGenerationCurrent(gen)) {
+        setLoading(false);
+      }
     }
   }
 

@@ -10,7 +10,17 @@ export function escapeMarkdownInline(value: string): string {
   let out = '';
   for (let i = 0; i < sanitized.length; i += 1) {
     const ch = sanitized.charAt(i);
-    if (i === 0 && (ch === '=' || ch === '+' || ch === '-' || ch === '@')) {
+    if (
+      i === 0 &&
+      (ch === '=' ||
+        ch === '+' ||
+        ch === '-' ||
+        ch === '@' ||
+        ch === '＝' ||
+        ch === '＋' ||
+        ch === '－' ||
+        ch === '＠')
+    ) {
       out += '\\';
     } else if ('\\`*_#>|[]<()!'.includes(ch)) {
       out += '\\';
@@ -81,11 +91,12 @@ export function buildSafeJournalMarkdown(entries: JournalItem[], exportedAt = ne
 }
 
 function escapeIcsText(value: string): string {
-  return stripDisallowedControlChars(value, true)
+  const normalizedLineBreaks = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return stripDisallowedControlChars(normalizedLineBreaks, true)
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
-    .replace(/\r?\n/g, '\\n');
+    .replace(/\n/g, '\\n');
 }
 
 function formatIcsDate(date: string): string {

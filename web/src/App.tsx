@@ -71,6 +71,7 @@ export function App({ apiClient, initialPath }: AppProps) {
   }, []);
 
   const hydrateSession = useCallback(async () => {
+    const gen = api.getSessionGeneration();
     if (!api.getToken()) {
       setMe(null);
       setBootstrapping(false);
@@ -78,12 +79,16 @@ export function App({ apiClient, initialPath }: AppProps) {
     }
     try {
       const profile = await api.getMe();
+      if (!api.isGenerationCurrent(gen)) return;
       setMe(profile);
       setLoginNotice(null);
     } catch {
+      if (!api.isGenerationCurrent(gen)) return;
       setMe(null);
     } finally {
-      setBootstrapping(false);
+      if (api.isGenerationCurrent(gen)) {
+        setBootstrapping(false);
+      }
     }
   }, [api]);
 
@@ -112,9 +117,13 @@ export function App({ apiClient, initialPath }: AppProps) {
   }
 
   function handleLogout() {
-    api.clearSession();
+    const result = api.clearSession();
     setMe(null);
-    setLoginNotice('您已安全退出当前浏览器会话。');
+    setLoginNotice(
+      result.storageCleared
+        ? '您已安全退出当前浏览器会话。'
+        : '已清除当前页面会话并拒绝复用旧凭据；浏览器存储清理受限，建议随后关闭本标签页。',
+    );
     navigateTo('/login', true);
   }
 

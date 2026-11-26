@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { ApiError } from '../api/client';
+import { ApiError, StaleSessionError } from '../api/client';
 import { ConflictModal, type ConflictFieldRow } from '../components/ConflictModal';
 import type { JournalItem, JournalUpsertPayload } from '../types';
 import { buildSafeJournalMarkdown, triggerTextDownload } from '../utils/export';
@@ -167,8 +167,10 @@ export function JournalPage({ api, onNotify }: JournalPageProps) {
   }
 
   async function handleServerExportMarkdown() {
+    const gen = api.getSessionGeneration();
     try {
       const md = await api.exportJournalsMarkdown();
+      if (!api.isGenerationCurrent(gen)) return;
       triggerTextDownload(
         `oriva-journals-${todayIsoDate()}.md`,
         md,
@@ -176,6 +178,7 @@ export function JournalPage({ api, onNotify }: JournalPageProps) {
       );
       onNotify('已导出全量日常记录（防注入 Markdown）');
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }

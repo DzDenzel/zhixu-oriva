@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { ApiError } from '../api/client';
+import { ApiError, StaleSessionError } from '../api/client';
 import type { PluginCatalogDocument, PluginCatalogEntry } from '../types';
 import {
+  MAX_CATALOG_BYTES,
   SAMPLE_FORM_B_CATALOG,
   validateFormBCatalog,
   type CatalogValidationResult,
 } from '../utils/catalog';
-import { safeHttpUrl } from '../utils/security';
+import { safeHttpUrl, utf8ByteLength } from '../utils/security';
 
 export interface PluginsPageProps {
   api: ApiClient;
@@ -21,15 +22,20 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
   const [errorText, setErrorText] = useState<string | null>(null);
 
   const [formBInput, setFormBInput] = useState('');
+  const [formBSizeWarning, setFormBSizeWarning] = useState<string | null>(null);
   const [formBResult, setFormBResult] = useState<CatalogValidationResult | null>(null);
 
   async function loadCatalog(source: 'official' | 'third-party') {
+    const gen = api.getSessionGeneration();
     setLoading(true);
     setErrorText(null);
     try {
       const doc = await api.getPluginCatalog(source);
+      if (!api.isGenerationCurrent(gen)) return;
       setCatalog(doc);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
+      if (!api.isGenerationCurrent(gen)) return;
       setCatalog(null);
       if (err instanceof ApiError) {
         setErrorText(err.message);
@@ -37,7 +43,9 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
         setErrorText('加载插件目录失败');
       }
     } finally {
-      setLoading(false);
+      if (api.isGenerationCurrent(gen)) {
+        setLoading(false);
+      }
     }
   }
 
@@ -58,27 +66,45 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
     onNotify(`无法自动写入剪贴板，请手动选中复制${label}`, 'warn');
   }
 
-  function handleValidateFormB(raw: string) {
-    setFormBInput(raw);
-    if (!raw.trim()) {
+  function handleDraftChange(raw: string) {
+    const bytes = utf8ByteLength(raw);
+    if (bytes > MAX_CATALOG_BYTES) {
+      setFormBSizeWarning(
+        `输入文本超过 ${MAX_CATALOG_BYTES / (1024 * 1024)} MiB 安全上限，已阻止自动解析，请精简后再校验。`,
+      );
+      setFormBInput(raw.slice(0, 65536));
       setFormBResult(null);
       return;
     }
-    setFormBResult(validateFormBCatalog(raw));
+    setFormBSizeWarning(null);
+    setFormBInput(raw);
+  }
+
+  function runFormBValidation(rawOverride?: string) {
+    const text = rawOverride ?? formBInput;
+    if (rawOverride !== undefined) {
+      setFormBInput(rawOverride);
+      setFormBSizeWarning(null);
+    }
+    if (!text.trim()) {
+      setFormBResult(null);
+      return;
+    }
+    setFormBResult(validateFormBCatalog(text));
   }
 
   function handleLocalFileChange(evt: Event) {
     const input = evt.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    if (file.size > 1024 * 1024) {
-      onNotify('catalog.json 文件超过 1 MiB 上限，已拒绝解析', 'error');
+    if (file.size > MAX_CATALOG_BYTES) {
+      onNotify('catalog.json 文件超过 2 MiB 上限，已拒绝解析', 'error');
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       const text = typeof reader.result === 'string' ? reader.result : '';
-      handleValidateFormB(text);
+      runFormBValidation(text);
     };
     reader.onerror = () => {
       onNotify('读取本地 catalog.json 失败', 'error');
@@ -97,6 +123,9 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
             <h3 class="ledger-title">{plugin.name}</h3>
             <span class="tag tag-indigo mono">{plugin.id}</span>
             <span class="tag">v{plugin.version}</span>
+            {plugin.versionCode !== undefined && (
+              <span class="tag mono">code {plugin.versionCode}</span>
+            )}
             <span class="tag">契约 v{plugin.contractVersion}</span>
             {plugin.type && <span class="tag tag-brass">{plugin.type}</span>}
           </div>
@@ -115,6 +144,11 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
 
         <div class="ledger-meta">
           入口：<span class="mono">{plugin.entryPoint}</span>
+          {plugin.downloadUrl ? (
+            <>
+              {' · '}产物路径：<span class="mono">{plugin.downloadUrl}</span>
+            </>
+          ) : null}
           {plugin.author ? ` · 作者：${plugin.author}` : ''}
         </div>
 
@@ -124,7 +158,9 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
             <button
               type="button"
               class="btn btn-sm"
-              onClick={() => void copyText(plugin.sha256 || '', '产物 SHA-256 摘要')}
+              onClick={() =>
+                void copyText(plugin.sha256 || '', '产物 SHA-256 摘要（须经独立渠道核对）')
+              }
             >
               复制摘要
             </button>
@@ -156,14 +192,14 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
           <p class="eyebrow">W5 · REQ-037 开源插件站只读视图</p>
           <h1 class="page-title">插件站</h1>
           <p class="page-subtitle">
-            同源浏览本实例插件目录，并在浏览器本地校验预览形态 B 开源插件站 catalog.json 与信任锚指纹（零外部网络请求）。
+            同源浏览本实例公开插件目录（不携带会话令牌），并在浏览器本地对形态 B catalog.json 执行有界格式预检（零外部网络请求）。
           </p>
         </div>
       </header>
 
       <div class="notice notice-brass" role="note">
         <span>
-          Web 数字站仅提供插件目录只读审查与签名指纹核对指引；.plp / .pljs 插件运行与签名校验均在 Android 端「设置 › 插件工坊」沙箱内完成。
+          Web 数字站仅提供目录只读审查与格式预检，未下载也未对插件包字节验签；.plp / .pljs 签名校验与运行均在 Android 端「设置 › 插件工坊」沙箱内完成。
         </span>
       </div>
 
@@ -203,7 +239,7 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
         )}
 
         {loading ? (
-          <div class="paper-card muted">正在拉取同源插件目录…</div>
+          <div class="paper-card muted">正在拉取同源公开插件目录…</div>
         ) : !catalog || catalog.plugins.length === 0 ? (
           <div class="paper-card empty-state">
             当前目录（{sourceTab}）暂无已收录插件产物。
@@ -218,16 +254,16 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
       <section class="paper-card stack-md">
         <div class="row-between">
           <div>
-            <h2 class="section-title">形态 B 开源插件站 catalog.json 校验预览与指纹核对</h2>
+            <h2 class="section-title">形态 B 开源插件站 catalog.json 本地格式预检与指纹查看</h2>
             <p class="muted">
-              粘贴或选择本地下载的开源插件站 <span class="mono">catalog.json</span>，浏览器纯本地校验结构、危险链接与 SHA-256 证书信任锚指纹（绝不发起外部跨域请求）。
+              粘贴或选择本地下载的开源插件站 <span class="mono">catalog.json</span>（上限 2 MiB、最多 256 项插件），点击「校验并预览」在浏览器本地检查结构与安全边界。
             </p>
           </div>
           <div class="row-wrap">
             <button
               type="button"
               class="btn btn-sm"
-              onClick={() => handleValidateFormB(SAMPLE_FORM_B_CATALOG)}
+              onClick={() => runFormBValidation(SAMPLE_FORM_B_CATALOG)}
             >
               载入示例 catalog.json
             </button>
@@ -240,31 +276,59 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
                 onChange={handleLocalFileChange}
               />
             </label>
+            <button
+              type="button"
+              class="btn btn-sm btn-primary"
+              disabled={!formBInput.trim() || Boolean(formBSizeWarning)}
+              onClick={() => runFormBValidation()}
+            >
+              校验并预览
+            </button>
           </div>
         </div>
 
         <textarea
           class="textarea mono"
           aria-label="形态 B catalog.json 输入"
-          placeholder='粘贴 REQ-037 形态 B catalog.json 原文（含 trustedFingerprints 与 plugins 数组）…'
+          placeholder='粘贴 REQ-037 形态 B catalog.json 原文后点击「校验并预览」…'
           value={formBInput}
-          onInput={(evt) => handleValidateFormB((evt.currentTarget as HTMLTextAreaElement).value)}
+          onInput={(evt) => handleDraftChange((evt.currentTarget as HTMLTextAreaElement).value)}
         />
+
+        {formBSizeWarning && (
+          <div class="notice notice-crimson" role="alert">
+            <span>{formBSizeWarning}</span>
+          </div>
+        )}
 
         {formBResult && (
           <div class="stack-md">
-            <div class={`notice ${formBResult.valid ? 'notice-jade' : 'notice-crimson'}`}>
-              <div>
+            <div
+              class={`notice ${
+                formBResult.trustState === 'invalid' ? 'notice-crimson' : 'notice-brass'
+              }`}
+            >
+              <div class="stack-sm">
                 <strong>
-                  {formBResult.valid
-                    ? '校验通过：结构、安全链接与指纹格式均符合 REQ-037 形态 B 契约'
-                    : `校验未通过：发现 ${formBResult.errors.length} 项问题`}
+                  {formBResult.trustState === 'invalid'
+                    ? `格式预检未通过：发现 ${formBResult.errors.length + formBResult.omittedErrorCount} 项问题`
+                    : formBResult.trustState === 'unanchored'
+                      ? '格式预检完成（缺少信任锚指纹）：不可作为可信源背书'
+                      : '本地格式预检通过（仅校验 JSON 结构与边界，未验签插件包字节）'}
                 </strong>
+                {formBResult.trustState !== 'invalid' && (
+                  <span class="muted">
+                    浏览器未下载插件包也未验证 JAR/包体签名；下方展示的指纹来自所粘贴的目录文本自身，导入 Android 端前请务必通过独立可信渠道核对。
+                  </span>
+                )}
                 {formBResult.errors.length > 0 && (
                   <ul>
                     {formBResult.errors.map((err) => (
                       <li key={err}>{err}</li>
                     ))}
+                    {formBResult.omittedErrorCount > 0 && (
+                      <li>……其余 {formBResult.omittedErrorCount} 项错误已省略</li>
+                    )}
                   </ul>
                 )}
                 {formBResult.warnings.length > 0 && (
@@ -277,7 +341,7 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
               </div>
             </div>
 
-            {formBResult.catalog && (
+            {formBResult.valid && formBResult.catalog && (
               <div class="stack-md">
                 <div class="paper-card-sunk stack-sm">
                   <div class="row-between">
@@ -290,9 +354,9 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
                     <p class="muted">{formBResult.catalog.sourceDescription}</p>
                   )}
                   <div class="eyebrow">
-                    Android 端接入步骤：设置 › 插件工坊 › 添加外部插件源 › 填写目录地址并核对下方 SHA-256 证书指纹
+                    Android 端接入指引：设置 › 插件工坊 › 添加外部插件源 › 填入目录地址并通过独立可信渠道核对下方证书指纹
                   </div>
-                  {(formBResult.catalog.trustedFingerprints ?? []).length > 0 && (
+                  {(formBResult.catalog.trustedFingerprints ?? []).length > 0 ? (
                     <div class="stack-sm">
                       {(formBResult.catalog.trustedFingerprints ?? []).map((fp) => (
                         <div key={fp} class="row-between code-box">
@@ -300,13 +364,22 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
                           <button
                             type="button"
                             class="btn btn-sm"
-                            onClick={() => void copyText(fp, '信任锚指纹')}
+                            onClick={() =>
+                              void copyText(
+                                fp,
+                                '目录声明的指纹文本（请务必通过独立可信渠道核对）',
+                              )
+                            }
                           >
-                            复制指纹
+                            复制指纹（须独立渠道核对）
                           </button>
                         </div>
                       ))}
                     </div>
+                  ) : (
+                    <p class="muted">
+                      当前目录未声明 trustedFingerprints，无法提供证书指纹复制。
+                    </p>
                   )}
                 </div>
 

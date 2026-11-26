@@ -1,19 +1,26 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, createApiClient } from '../src/api/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, createApiClient, StaleSessionError } from '../src/api/client';
 import { PORTAL_ROUTES, resolveRoute } from '../src/utils/router';
 import {
   clearSessionToken,
   DEVICE_UID_KEY,
   getOrCreateDeviceUid,
   readSessionToken,
+  resetSessionGuardForTest,
   TOKEN_SESSION_KEY,
   writeSessionToken,
 } from '../src/utils/session';
 
-describe('session & deviceUid lifecycle', () => {
+describe('session & deviceUid lifecycle (B3)', () => {
   beforeEach(() => {
+    resetSessionGuardForTest();
     window.localStorage.clear();
     window.sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetSessionGuardForTest();
   });
 
   it('generates and persists stable web-<UUID> deviceUid', () => {
@@ -24,14 +31,25 @@ describe('session & deviceUid lifecycle', () => {
     expect(window.localStorage.getItem(DEVICE_UID_KEY)).toBe(first);
   });
 
-  it('stores JWT strictly in sessionStorage and never in localStorage', () => {
+  it('stores JWT strictly in sessionStorage and never re-reads stale token if removeItem fails', () => {
     writeSessionToken('jwt-token-xyz');
     expect(readSessionToken()).toBe('jwt-token-xyz');
     expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe('jwt-token-xyz');
     expect(window.localStorage.getItem(TOKEN_SESSION_KEY)).toBeNull();
 
-    clearSessionToken();
+    // Simulate Storage.removeItem throwing while leaving old token in sessionStorage
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('storage locked');
+    });
+    const result = clearSessionToken();
+    expect(result.storageCleared).toBe(false);
+    // In-memory invalidation fence MUST refuse to read back the lingering stale token
     expect(readSessionToken()).toBeNull();
+    removeSpy.mockRestore();
+
+    // Writing a brand new token lifts the fence
+    writeSessionToken('jwt-new-session');
+    expect(readSessionToken()).toBe('jwt-new-session');
   });
 });
 
@@ -53,10 +71,58 @@ describe('SPA explicit 9-route contract', () => {
   });
 });
 
-describe('API client auth, 1001 auto-logout, platform fallback, and 1409 conflict', () => {
+describe('API client generation isolation, 1001 auto-logout, public catalog, and 1409 conflict (B3)', () => {
   beforeEach(() => {
+    resetSessionGuardForTest();
     window.localStorage.clear();
     window.sessionStorage.clear();
+  });
+
+  it('drops in-flight export response after logout and prevents old 401/1001 from clearing a new session', async () => {
+    writeSessionToken('session-A');
+    const onUnauthorized = vi.fn();
+
+    let resolveExport!: (res: Response) => void;
+    let resolveStale401!: (res: Response) => void;
+    const mockFetch = vi.fn((url: RequestInfo | URL) => {
+      const s = String(url);
+      if (s.includes('/records/export')) {
+        return new Promise<Response>((r) => {
+          resolveExport = r;
+        });
+      }
+      return new Promise<Response>((r) => {
+        resolveStale401 = r;
+      });
+    });
+
+    const api = createApiClient({
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      onUnauthorized,
+    });
+
+    // Start in-flight export and in-flight /me under session-A
+    const exportPromise = api.exportRecords('json');
+    const staleMePromise = api.getMe();
+
+    // User logs out and logs into session-B before those responses return
+    api.clearSession();
+    api.setToken('session-B');
+
+    // Old export finishes -> MUST reject with StaleSessionError (never download)
+    resolveExport(new Response('{"old":true}', { status: 200 }));
+    await expect(exportPromise).rejects.toBeInstanceOf(StaleSessionError);
+
+    // Old /me returns 401 -> MUST reject with StaleSessionError and NOT clear session-B!
+    resolveStale401(
+      new Response(JSON.stringify({ code: 1001, message: 'expired', data: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await expect(staleMePromise).rejects.toBeInstanceOf(StaleSessionError);
+    expect(api.getToken()).toBe('session-B');
+    expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
   it('sends web-<UUID> deviceUid and falls back to windows platform if backend rejects web', async () => {
@@ -66,7 +132,11 @@ describe('API client auth, 1001 auto-logout, platform fallback, and 1409 conflic
       sentBodies.push(body);
       if (body.platform === 'web') {
         return new Response(
-          JSON.stringify({ code: 1002, message: 'platform 平台取值仅支持 android/ios/windows', data: null }),
+          JSON.stringify({
+            code: 1002,
+            message: 'platform 平台取值仅支持 android/ios/windows',
+            data: null,
+          }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
         );
       }
@@ -103,16 +173,17 @@ describe('API client auth, 1001 auto-logout, platform fallback, and 1409 conflic
 
     await expect(api.getMe()).rejects.toThrow(ApiError);
     expect(readSessionToken()).toBeNull();
+    expect(api.getToken()).toBeNull();
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces 1409 version conflict as ApiError with isConflict=true', async () => {
     writeSessionToken('valid-jwt');
     const mockFetch = vi.fn(async () =>
-      new Response(JSON.stringify({ code: 1409, message: '版本冲突（其他设备有更改）', data: null }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
+      new Response(
+        JSON.stringify({ code: 1409, message: '版本冲突（其他设备有更改）', data: null }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
     );
     const api = createApiClient({ fetchImpl: mockFetch as unknown as typeof fetch });
 
@@ -131,12 +202,14 @@ describe('API client auth, 1001 auto-logout, platform fallback, and 1409 conflic
     }
   });
 
-  it('passes IANA timezone to rhythm endpoint and reads raw JSON for plugin catalog', async () => {
+  it('passes IANA timezone to rhythm endpoint and fetches public plugin catalog WITHOUT Bearer header', async () => {
     writeSessionToken('valid-jwt');
+    const seenHeaders: Array<HeadersInit | undefined> = [];
     const requestedUrls: string[] = [];
-    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       requestedUrls.push(url);
+      seenHeaders.push(init?.headers);
       if (url.startsWith('/api/v1/stats/rhythm')) {
         return new Response(
           JSON.stringify({
@@ -179,5 +252,7 @@ describe('API client auth, 1001 auto-logout, platform fallback, and 1409 conflic
     const catalog = await api.getPluginCatalog('official');
     expect(catalog.sourceId).toBe('official');
     expect(catalog.plugins).toEqual([]);
+    // Public catalog request must NOT carry Authorization header (Astra B3)
+    expect(seenHeaders[1]).toBeUndefined();
   });
 });

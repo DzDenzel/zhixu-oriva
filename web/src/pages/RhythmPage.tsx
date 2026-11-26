@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { ApiError } from '../api/client';
+import { ApiError, StaleSessionError } from '../api/client';
 import { CompletionRing, RhythmBarChart } from '../components/RhythmCharts';
 import type { RhythmSummary } from '../types';
 import { triggerTextDownload } from '../utils/export';
@@ -22,19 +22,24 @@ export function RhythmPage({ api, onNotify }: RhythmPageProps) {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   async function loadRhythm() {
+    const gen = api.getSessionGeneration();
     setLoading(true);
     setErrorText(null);
     try {
       const summary = await api.getRhythm(62, tz);
+      if (!api.isGenerationCurrent(gen)) return;
       setData(summary);
       const todayCell = summary.days.find((d) => d.isToday) ?? summary.days[summary.days.length - 1];
       setSelectedDate(todayCell?.date ?? null);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         setErrorText(err.message);
       }
     } finally {
-      setLoading(false);
+      if (api.isGenerationCurrent(gen)) {
+        setLoading(false);
+      }
     }
   }
 
@@ -43,12 +48,15 @@ export function RhythmPage({ api, onNotify }: RhythmPageProps) {
   }, []);
 
   async function handleExport(format: 'json' | 'csv') {
+    const gen = api.getSessionGeneration();
     try {
       const body = await api.exportRecords(format);
+      if (!api.isGenerationCurrent(gen)) return;
       const mime = format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8';
       triggerTextDownload(`oriva-records-${todayIsoDate()}.${format}`, body, mime);
       onNotify(`已导出执行记录（.${format}）`);
     } catch (err) {
+      if (err instanceof StaleSessionError) return;
       if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }
