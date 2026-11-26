@@ -1,5 +1,6 @@
 package com.planlock;
 
+import org.apache.ibatis.annotations.Mapper;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -11,7 +12,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * 模块只依赖 common，不互相调用。契约见 Obsidian/04-技术实现/接口设计.md。
  */
 @SpringBootApplication
-@MapperScan("com.planlock")
+@MapperScan(basePackages = "com.planlock", annotationClass = Mapper.class)
 public class PlanLockApplication {
 
     public static void main(String[] args) {

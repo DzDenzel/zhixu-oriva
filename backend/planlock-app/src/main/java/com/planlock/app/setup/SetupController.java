@@ -7,10 +7,12 @@ import org.springframework.http.*;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 @RestController
 public class SetupController {
+    private static final MediaType TEXT_HTML_UTF8 = new MediaType("text", "html", StandardCharsets.UTF_8);
     private final SetupService setup;
     private final JdbcTemplate jdbc;
     private final StringRedisTemplate redis;
@@ -34,10 +36,17 @@ public class SetupController {
         if(healthy) body.put("status","UP");
         return ResponseEntity.status(healthy?HttpStatus.OK:HttpStatus.SERVICE_UNAVAILABLE).cacheControl(CacheControl.noStore()).body(body);
     }
-    @GetMapping(value="/setup",produces=MediaType.TEXT_HTML_VALUE)
-    public ResponseEntity<ClassPathResource> page() {
+    @GetMapping("/setup")
+    public ResponseEntity<ClassPathResource> page(@RequestHeader(value = HttpHeaders.ACCEPT, required = false) String accept) {
         setup.requirePage();
-        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).header("Referrer-Policy","no-referrer").header("X-Content-Type-Options","nosniff")
+        if (accept != null && !accept.isBlank() && !acceptsHtml(accept)) {
+            throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE, "该页面仅支持 text/html 响应");
+        }
+        return ResponseEntity.ok()
+                .contentType(TEXT_HTML_UTF8)
+                .cacheControl(CacheControl.noStore())
+                .header("Referrer-Policy","no-referrer")
+                .header("X-Content-Type-Options","nosniff")
                 .header("Content-Security-Policy","default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'")
                 .body(new ClassPathResource("setup/index.html"));
     }
@@ -47,10 +56,28 @@ public class SetupController {
     }
     @ExceptionHandler(ResponseStatusException.class)
     public ResponseEntity<Map<String,String>> rejected(ResponseStatusException error) {
-        return ResponseEntity.status(error.getStatusCode()).cacheControl(CacheControl.noStore()).body(Map.of("message",Objects.requireNonNullElse(error.getReason(),"请求无法完成")));
+        return ResponseEntity.status(error.getStatusCode())
+                .contentType(MediaType.APPLICATION_JSON)
+                .cacheControl(CacheControl.noStore())
+                .body(Map.of("message",Objects.requireNonNullElse(error.getReason(),"请求无法完成")));
     }
     @ExceptionHandler(org.springframework.http.converter.HttpMessageNotReadableException.class)
     public ResponseEntity<Map<String,String>> malformed() {
-        return ResponseEntity.badRequest().cacheControl(CacheControl.noStore()).body(Map.of("message","请求格式无效，请检查输入"));
+        return ResponseEntity.badRequest()
+                .contentType(MediaType.APPLICATION_JSON)
+                .cacheControl(CacheControl.noStore())
+                .body(Map.of("message","请求格式无效，请检查输入"));
+    }
+    private static boolean acceptsHtml(String accept) {
+        try {
+            for (MediaType mediaType : MediaType.parseMediaTypes(accept)) {
+                if (mediaType.getQualityValue() > 0 && mediaType.isCompatibleWith(MediaType.TEXT_HTML)) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (InvalidMediaTypeException invalid) {
+            return false;
+        }
     }
 }

@@ -70,7 +70,7 @@ class MeControllerTest {
                 deploymentAuthLimiter
         );
         DeploymentMetadataProvider provider = () -> new DeploymentMetadataProvider.DeploymentMetadata(
-                "测试个人后端", true, true, "2.2.0");
+                "测试个人后端", true, true, 1L, "2.2.0");
         ReflectionTestUtils.setField(authService, "deploymentMetadataProvider", provider);
 
         mvc = MockMvcBuilders.standaloneSetup(new MeController(authService))
@@ -169,14 +169,32 @@ class MeControllerTest {
                 .andExpect(jsonPath("$.data.deviceId").doesNotExist())
                 .andExpect(jsonPath("$.data.deviceName").doesNotExist());
 
-        // Phone user JWT sees only own masked phone and own device.
+        // Phone user (non-owner userId=3 != ownerUserId=1) gets STANDARD and only own masked phone/device.
         String phoneToken = jwtUtil.generate(3L, 33L);
         mvc.perform(get("/api/v1/me").header("Authorization", "Bearer " + phoneToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.userId").value(3))
+                .andExpect(jsonPath("$.data.userType").value("STANDARD"))
                 .andExpect(jsonPath("$.data.accountMasked").value("139****5678"))
                 .andExpect(jsonPath("$.data.deviceId").value(33))
                 .andExpect(jsonPath("$.data.deviceName").value("User3 Phone"));
+
+        // Unbound/deleted device must return null deviceId (never echo stale JWT did).
+        when(deviceMapper.findById(99L)).thenReturn(null);
+        String unboundToken = jwtUtil.generate(3L, 99L);
+        mvc.perform(get("/api/v1/me").header("Authorization", "Bearer " + unboundToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.deviceId").doesNotExist())
+                .andExpect(jsonPath("$.data.deviceName").doesNotExist())
+                .andExpect(jsonPath("$.data.devicePlatform").doesNotExist());
+
+        // Unauthenticated request with Accept: text/html must still return JSON 1001, never 500 HTML.
+        mvc.perform(get("/api/v1/me").header("Accept", "text/html"))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
+                        .contentTypeCompatibleWith(org.springframework.http.MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()));
     }
 }

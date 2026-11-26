@@ -9,6 +9,7 @@ import com.planlock.common.auth.UserContext;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.CacheControl;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -31,6 +32,7 @@ public class MeController {
     public ResponseEntity<ApiResponse<MeResponse>> me() {
         MeResponse profile = authService.getCurrentProfile(UserContext.userId(), UserContext.deviceId());
         return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_JSON)
                 .cacheControl(CacheControl.noStore())
                 .body(ApiResponse.ok(profile));
     }

@@ -63,35 +63,42 @@ public class AuthService {
             throw new BusinessException(ErrorCode.UNAUTHORIZED);
         }
         boolean guest = !hasText(user.getPhone()) && !hasText(user.getEmail());
-        Long resolvedDeviceId = deviceId;
+        Long resolvedDeviceId = null;
         String deviceName = null;
         String devicePlatform = null;
         if (deviceId != null) {
             Device device = deviceMapper.findById(deviceId);
-            if (device != null) {
-                if (userId.equals(device.getUserId())) {
-                    deviceName = device.getDeviceName();
-                    devicePlatform = device.getPlatform();
-                } else {
-                    // Never expose cross-user device metadata if JWT device claim is stale/mismatched.
-                    resolvedDeviceId = null;
-                }
+            if (device != null && userId.equals(device.getUserId())) {
+                resolvedDeviceId = device.getId();
+                deviceName = device.getDeviceName();
+                devicePlatform = device.getPlatform();
             }
         }
         String instanceLabel = null;
         boolean effectiveDeploymentEnabled = this.deploymentEnabled;
+        boolean initialized = false;
+        Long ownerUserId = null;
         String version = hasText(this.appVersion) ? this.appVersion : "2.2.0";
         if (deploymentMetadataProvider != null) {
             DeploymentMetadataProvider.DeploymentMetadata metadata = deploymentMetadataProvider.getMetadata();
             if (metadata != null) {
                 instanceLabel = metadata.instanceLabel();
                 effectiveDeploymentEnabled = metadata.deploymentEnabled();
+                initialized = metadata.initialized();
+                ownerUserId = metadata.ownerUserId();
                 if (hasText(metadata.version())) {
                     version = metadata.version();
                 }
             }
         }
-        String userType = guest ? "GUEST" : (effectiveDeploymentEnabled ? "OWNER" : "REGISTERED");
+        String userType;
+        if (guest) {
+            userType = "GUEST";
+        } else if (effectiveDeploymentEnabled && initialized && ownerUserId != null && ownerUserId.equals(user.getId())) {
+            userType = "OWNER";
+        } else {
+            userType = "STANDARD";
+        }
         return MeResponse.builder()
                 .userId(user.getId())
                 .deviceId(resolvedDeviceId)
@@ -108,35 +115,88 @@ public class AuthService {
 
     static String maskAccount(String email, String phone) {
         if (email != null && !email.isBlank()) {
-            String trimmed = email.trim();
-            int at = trimmed.lastIndexOf('@');
-            if (at <= 0 || at == trimmed.length() - 1) {
-                return "***";
-            }
-            String local = trimmed.substring(0, at);
-            String domain = trimmed.substring(at);
-            if (local.length() <= 1) {
-                return "*" + domain;
-            }
-            if (local.length() == 2) {
-                return local.charAt(0) + "*" + domain;
-            }
-            if (local.length() <= 4) {
-                return local.charAt(0) + "***" + domain;
-            }
-            return local.substring(0, 2) + "***" + local.charAt(local.length() - 1) + domain;
+            return maskEmail(email.trim());
         }
         if (phone != null && !phone.isBlank()) {
-            String trimmed = phone.trim();
-            if (trimmed.length() <= 4) {
-                return "****";
-            }
-            if (trimmed.length() <= 7) {
-                return trimmed.substring(0, 1) + "****" + trimmed.substring(trimmed.length() - 2);
-            }
-            return trimmed.substring(0, 3) + "****" + trimmed.substring(trimmed.length() - 4);
+            return maskPhone(phone.trim());
         }
         return null;
+    }
+
+    private static String maskEmail(String trimmed) {
+        if (containsControlOrWhitespace(trimmed)) {
+            return "***";
+        }
+        int firstAt = trimmed.indexOf('@');
+        int lastAt = trimmed.lastIndexOf('@');
+        if (firstAt <= 0 || firstAt != lastAt || firstAt == trimmed.length() - 1) {
+            return "***";
+        }
+        String local = trimmed.substring(0, firstAt);
+        String domain = trimmed.substring(firstAt + 1);
+        if (!isSafeEmailDomain(domain)) {
+            return "***";
+        }
+        int[] localCps = local.codePoints().toArray();
+        int len = localCps.length;
+        if (len <= 1) {
+            return "*@" + domain;
+        }
+        if (len == 2) {
+            return sliceCodePoints(localCps, 0, 1) + "*@" + domain;
+        }
+        if (len <= 4) {
+            return sliceCodePoints(localCps, 0, 1) + "***@" + domain;
+        }
+        return sliceCodePoints(localCps, 0, 2) + "***" + sliceCodePoints(localCps, len - 1, len) + "@" + domain;
+    }
+
+    private static String maskPhone(String trimmed) {
+        if (containsControlOrWhitespace(trimmed)) {
+            return "***";
+        }
+        if (!trimmed.matches("\\+?[0-9][0-9-]*[0-9]|\\+?[0-9]")) {
+            return "***";
+        }
+        int[] cps = trimmed.codePoints().toArray();
+        int len = cps.length;
+        if (len <= 4) {
+            return "****";
+        }
+        if (len <= 8) {
+            return sliceCodePoints(cps, 0, 1) + "****" + sliceCodePoints(cps, len - 2, len);
+        }
+        return sliceCodePoints(cps, 0, 3) + "****" + sliceCodePoints(cps, len - 4, len);
+    }
+
+    private static boolean containsControlOrWhitespace(String value) {
+        return value.codePoints().anyMatch(cp -> Character.isISOControl(cp) || Character.isWhitespace(cp));
+    }
+
+    private static boolean isSafeEmailDomain(String domain) {
+        if (domain.isEmpty() || domain.length() > 253 || domain.startsWith(".") || domain.endsWith(".")
+                || domain.contains("..")) {
+            return false;
+        }
+        if (!domain.contains(".")) {
+            return false;
+        }
+        for (int i = 0; i < domain.length(); i++) {
+            char c = domain.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')
+                    || c == '.'
+                    || c == '-';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String sliceCodePoints(int[] cps, int startInclusive, int endExclusive) {
+        return new String(cps, startInclusive, endExclusive - startInclusive);
     }
 
     @Transactional

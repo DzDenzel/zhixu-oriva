@@ -81,7 +81,8 @@ class WebPortalControllerTest {
             DeploymentMetadataService.class,
             SetupService.class,
             SetupController.class,
-            WebPortalController.class
+            WebPortalController.class,
+            ApiFallbackController.class
     })
     static class Config {
         @Bean JdbcTemplate jdbcTemplate() { return mock(JdbcTemplate.class); }
@@ -113,6 +114,7 @@ class WebPortalControllerTest {
         deploymentRow.put("instance_id", "2c6f9664-1c46-4b9f-9710-cac1de5e389d");
         deploymentRow.put("initialized", false);
         deploymentRow.put("instance_label", null);
+        deploymentRow.put("owner_user_id", null);
         when(jdbc.queryForMap(anyString())).thenAnswer(inv -> new HashMap<>(deploymentRow));
         mvc = MockMvcBuilders.webAppContextSetup(context).build();
     }
@@ -151,8 +153,17 @@ class WebPortalControllerTest {
                     .doesNotContain("portal-test-secret", "cdn.", "https://", "http://", "<script");
         }
 
-        // /setup remains 410 GONE once initialized.
-        mvc.perform(get("/setup")).andExpect(status().isGone());
+        // /setup remains 410 GONE + no-store across all Accept headers once initialized.
+        for (String accept : List.of("", "text/html", "application/json", "*/*")) {
+            var req = get("/setup");
+            if (!accept.isEmpty()) {
+                req = req.header("Accept", accept);
+            }
+            mvc.perform(req)
+                    .andExpect(status().isGone())
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
+        }
     }
 
     @Test
@@ -179,28 +190,41 @@ class WebPortalControllerTest {
     @Test
     void unknownApiPathsNeverFallBackToHtmlWhetherUnauthenticatedOrAuthenticated() throws Exception {
         deploymentRow.put("initialized", true);
+        List<String> accepts = List.of("", "application/json", "text/html", "text/html,application/json;q=0.8", "*/*");
 
-        // Unauthenticated unknown /api/v1/** returns 404 JSON (never SPA HTML).
+        // Unauthenticated unknown /api/v1/** preserves pre-auth contract (200 JSON 1001, never 500 HTML).
         for (String unknownApi : List.of("/api/v1/not-exists", "/api/v1/me/unknown")) {
-            var res = mvc.perform(get(unknownApi))
-                    .andExpect(status().isNotFound())
-                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                    .andExpect(jsonPath("$.code").value(ErrorCode.NOT_FOUND.getCode()))
-                    .andReturn()
-                    .getResponse();
-            assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("<html", "<!doctype");
+            for (String accept : accepts) {
+                var req = get(unknownApi);
+                if (!accept.isEmpty()) {
+                    req = req.header("Accept", accept);
+                }
+                var res = mvc.perform(req)
+                        .andExpect(status().isOk())
+                        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                        .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()))
+                        .andReturn()
+                        .getResponse();
+                assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("<html", "<!doctype");
+            }
         }
 
-        // Authenticated unknown /api/v1/** likewise returns 404 JSON (never SPA HTML).
+        // Authenticated unknown /api/v1/** returns deterministic 404 JSON 1003 across all Accept headers.
         String token = jwtUtil.generate(1L, 10L);
         for (String unknownApi : List.of("/api/v1/not-exists", "/api/v1/me/unknown")) {
-            var res = mvc.perform(get(unknownApi).header("Authorization", "Bearer " + token))
-                    .andExpect(status().isNotFound())
-                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                    .andExpect(jsonPath("$.code").value(ErrorCode.NOT_FOUND.getCode()))
-                    .andReturn()
-                    .getResponse();
-            assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("<html", "<!doctype");
+            for (String accept : accepts) {
+                var req = get(unknownApi).header("Authorization", "Bearer " + token);
+                if (!accept.isEmpty()) {
+                    req = req.header("Accept", accept);
+                }
+                var res = mvc.perform(req)
+                        .andExpect(status().isNotFound())
+                        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                        .andExpect(jsonPath("$.code").value(ErrorCode.NOT_FOUND.getCode()))
+                        .andReturn()
+                        .getResponse();
+                assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("<html", "<!doctype");
+            }
         }
     }
 
@@ -208,6 +232,7 @@ class WebPortalControllerTest {
     void meEndpointIntegratesWithDeploymentMetadataProviderAndProtectsUnauthenticatedAccess() throws Exception {
         deploymentRow.put("initialized", true);
         deploymentRow.put("instance_label", "书房服务器");
+        deploymentRow.put("owner_user_id", 5L);
 
         // Must require JWT (not in PUBLIC_API_PATTERNS).
         mvc.perform(get("/api/v1/me"))

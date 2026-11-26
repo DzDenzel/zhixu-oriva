@@ -30,14 +30,16 @@ public class DeploymentMetadataService implements DeploymentMetadataProvider {
     public DeploymentMetadata getMetadata() {
         try {
             Map<String, Object> row = jdbc.queryForMap(
-                    "SELECT initialized, instance_label FROM deployment_instance WHERE id = 1");
+                    "SELECT initialized, instance_label, owner_user_id FROM deployment_instance WHERE id = 1");
             boolean initialized = toBoolean(row.get("initialized"));
             Object rawLabel = row.get("instance_label");
             String label = rawLabel instanceof String text && !text.isBlank() ? text : null;
-            return new DeploymentMetadata(label, deploymentEnabled, initialized, version);
+            Object rawOwner = row.get("owner_user_id");
+            Long ownerUserId = rawOwner instanceof Number number ? number.longValue() : null;
+            return new DeploymentMetadata(label, deploymentEnabled, initialized, ownerUserId, version);
         } catch (Exception ignored) {
             // Never expose JDBC or persistence diagnostics through metadata snapshots.
-            return new DeploymentMetadata(null, deploymentEnabled, false, version);
+            return new DeploymentMetadata(null, deploymentEnabled, false, null, version);
         }
     }
 

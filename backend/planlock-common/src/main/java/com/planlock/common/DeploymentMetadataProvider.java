@@ -17,7 +17,15 @@ public interface DeploymentMetadataProvider {
             String instanceLabel,
             boolean deploymentEnabled,
             boolean initialized,
+            Long ownerUserId,
             String version
     ) {
+        public DeploymentMetadata(
+                String instanceLabel,
+                boolean deploymentEnabled,
+                boolean initialized,
+                String version) {
+            this(instanceLabel, deploymentEnabled, initialized, null, version);
+        }
     }
 }

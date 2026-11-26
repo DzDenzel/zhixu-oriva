@@ -415,7 +415,7 @@ class AuthServiceTest {
         when(userMapper.findById(10L)).thenReturn(owner);
         when(deviceMapper.findById(77L)).thenReturn(webDevice);
         DeploymentMetadataProvider provider = () -> new DeploymentMetadataProvider.DeploymentMetadata(
-                "我的知序", true, true, "2.2.0");
+                "我的知序", true, true, 10L, "2.2.0");
         ReflectionTestUtils.setField(authService, "deploymentMetadataProvider", provider);
 
         MeResponse ownerProfile = authService.getCurrentProfile(10L, 77L);
@@ -429,6 +429,29 @@ class AuthServiceTest {
         assertThat(ownerProfile.getInstanceLabel()).isEqualTo("我的知序");
         assertThat(ownerProfile.isDeploymentEnabled()).isTrue();
         assertThat(ownerProfile.getVersion()).isEqualTo("2.2.0");
+
+        // Non-owner account in initialized deployment mode must NOT be marked OWNER.
+        User nonOwner = new User();
+        nonOwner.setId(11L);
+        nonOwner.setEmail("member@example.org");
+        when(userMapper.findById(11L)).thenReturn(nonOwner);
+        MeResponse nonOwnerProfile = authService.getCurrentProfile(11L, null);
+        assertThat(nonOwnerProfile.getUserType()).isEqualTo("STANDARD");
+        assertThat(nonOwnerProfile.isGuest()).isFalse();
+
+        // Existing user before deployment initialization must NOT be marked OWNER.
+        DeploymentMetadataProvider pendingProvider = () -> new DeploymentMetadataProvider.DeploymentMetadata(
+                null, true, false, 10L, "2.2.0");
+        ReflectionTestUtils.setField(authService, "deploymentMetadataProvider", pendingProvider);
+        assertThat(authService.getCurrentProfile(10L, 77L).getUserType()).isEqualTo("STANDARD");
+        ReflectionTestUtils.setField(authService, "deploymentMetadataProvider", provider);
+
+        // Deleted/missing device must clear deviceId/deviceName/devicePlatform completely (never echo stale JWT did).
+        when(deviceMapper.findById(99L)).thenReturn(null);
+        MeResponse missingDevice = authService.getCurrentProfile(10L, 99L);
+        assertThat(missingDevice.getDeviceId()).isNull();
+        assertThat(missingDevice.getDeviceName()).isNull();
+        assertThat(missingDevice.getDevicePlatform()).isNull();
 
         // Cross-user device must never leak deviceId/name/platform.
         Device otherUserDevice = device(88L, 999L, "other-device");
@@ -454,13 +477,31 @@ class AuthServiceTest {
         assertThat(guestProfile.isDeploymentEnabled()).isFalse();
         assertThat(guestProfile.getVersion()).isEqualTo("2.2.0");
 
-        // Masking edge cases for phone & short email.
+        // Masking edge cases: normal, 8-digit phone, Unicode/Emoji code points, malformed/control inputs.
         assertThat(AuthService.maskAccount("a@b.co", null)).isEqualTo("*@b.co");
         assertThat(AuthService.maskAccount("ab@b.co", null)).isEqualTo("a*@b.co");
         assertThat(AuthService.maskAccount("alex@b.co", null)).isEqualTo("a***@b.co");
+        assertThat(AuthService.maskAccount("😀🎉abc@example.com", null)).isEqualTo("😀🎉***c@example.com");
+        assertThat(AuthService.maskAccount("a@b@c.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("bad\nuser@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user@bad..com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user@localhost", null)).isEqualTo("***");
         assertThat(AuthService.maskAccount(null, "13800138000")).isEqualTo("138****8000");
+        assertThat(AuthService.maskAccount(null, "12345678")).isEqualTo("1****78");
         assertThat(AuthService.maskAccount(null, "123456")).isEqualTo("1****56");
         assertThat(AuthService.maskAccount(null, "1234")).isEqualTo("****");
+        assertThat(AuthService.maskAccount(null, "not-a-phone")).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "138\u000012345678")).isEqualTo("***");
+
+        // LoginRequest platform validation accepts web alongside android/ios/windows.
+        try (var factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+            var validator = factory.getValidator();
+            LoginRequest webReq = loginReq("owner@example.org", "pass", null);
+            webReq.setPlatform("web");
+            assertThat(validator.validate(webReq)).isEmpty();
+            webReq.setPlatform("invalid-os");
+            assertThat(validator.validate(webReq)).isNotEmpty();
+        }
 
         // Missing user fails closed with UNAUTHORIZED.
         when(userMapper.findById(404L)).thenReturn(null);
