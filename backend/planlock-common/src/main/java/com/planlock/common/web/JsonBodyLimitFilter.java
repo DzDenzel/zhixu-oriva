@@ -34,8 +34,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * Servlet 级 JSON 请求体预读拦截器：
  * <ol>
  *   <li>受保护 JSON 路由在读取/缓冲任何请求字节之前先行验证 Bearer JWT；</li>
- *   <li>所有堆缓冲分配严格遵循「预算先于分配」：已知长度先 CAS 预留再定容分配，未知长度（chunked）按分段 slab 先预留再分配，杜绝扩容倍增峰值与未计账预分配；</li>
- *   <li>结合大路由上限隔离与小载荷保底配额，防止慢速大包饿死公共登录与常规小请求；所有退出与异常路径均经 {@code finally} 精确归还。</li>
+ *   <li>零未记账临时读流数组：已知长度先 CAS 预留再直接读入单块定容数组；未知长度（chunked）在首个字节到达后按可用并发配额先预留再分配 {@code <= 8 KiB} 分段 slab 并直接读入，杜绝隐藏 scratch 数组与倍增峰值；</li>
+ *   <li>非正总预算（{@code <= 0}）视为关闭并发限额，预留与释放对称跳过原子计数器更新，绝不产生负计数；路由上限锚定于 {@code Integer.MAX_VALUE - 8} 防溢出；</li>
+ *   <li>结合大路由上限隔离与小载荷保底配额，防止慢速大包饿死公共登录与常规小请求；所有退出与异常/Error 路径均经 {@code finally} 精确归还。</li>
  * </ol>
  */
 @Slf4j
@@ -54,7 +55,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             + ErrorCode.UNAUTHORIZED.getDefaultMessage()
             + "\"}";
     static final int CHUNK_SIZE = 8192;
-    private static final int MAX_BUFFER_ARRAY_BYTES = Integer.MAX_VALUE - 8;
+    static final int MAX_BUFFER_ARRAY_BYTES = Integer.MAX_VALUE - 8;
 
     private final JsonBodyLimitProperties properties;
     private final JwtUtil jwtUtil;
@@ -81,8 +82,8 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             writeSafeJsonError(response, SAFE_UNAUTHORIZED_JSON);
             return;
         }
-        long limit = resolveLimit(path);
-        if (limit <= 0L) {
+        int maxLimit = resolveBoundedLimit(path);
+        if (maxLimit <= 0) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -92,88 +93,89 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             filterChain.doFilter(request, response);
             return;
         }
-        if (contentLength > limit) {
+        if (contentLength > maxLimit) {
             log.warn("rejected oversized request: category=payload_limit, stage=content_length, method={}, uri={}",
                     request.getMethod(), request.getRequestURI());
             writeSafeJsonError(response, SAFE_ERROR_JSON);
             return;
         }
 
-        int maxLimit = (int) Math.min(limit, MAX_BUFFER_ARRAY_BYTES);
-        long effectiveMaxConcurrent = resolveEffectiveConcurrentLimit(limit);
+        long effectiveMaxConcurrent = resolveEffectiveConcurrentLimit(maxLimit);
         long reserved = 0L;
         List<byte[]> segments = new ArrayList<>();
         byte[] currentSlab = null;
         int currentSlabOffset = 0;
-        long total = 0L;
+        int total = 0;
 
         try {
             // Known positive Content-Length without Transfer-Encoding: reserve BEFORE allocating.
             if (contentLength > 0L && !hasTransferEncoding) {
-                int preallocateCap = (int) Math.min(contentLength, maxLimit);
-                if (!tryReserveConcurrentBytes(preallocateCap, effectiveMaxConcurrent)) {
-                    log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, stage=preallocate, method={}, uri={}",
-                            request.getMethod(), request.getRequestURI());
-                    writeSafeJsonError(response, SAFE_ERROR_JSON);
-                    return;
+                int preallocateCap = (int) contentLength;
+                if (effectiveMaxConcurrent > 0L) {
+                    if (!tryReserveConcurrentBytes(preallocateCap, effectiveMaxConcurrent)) {
+                        log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, stage=preallocate, method={}, uri={}",
+                                request.getMethod(), request.getRequestURI());
+                        writeSafeJsonError(response, SAFE_ERROR_JSON);
+                        return;
+                    }
+                    reserved += preallocateCap;
                 }
-                reserved += preallocateCap;
                 currentSlab = new byte[preallocateCap];
                 segments.add(currentSlab);
             }
 
             ServletInputStream in = request.getInputStream();
-            int scratchSize = (int) Math.min(CHUNK_SIZE, Math.min(limit + 1L, MAX_BUFFER_ARRAY_BYTES));
-            byte[] scratch = new byte[Math.max(1, scratchSize)];
             while (true) {
-                long remaining = limit - total;
-                int maxRead = remaining >= scratch.length ? scratch.length : (int) remaining + 1;
-                int count = in.read(scratch, 0, maxRead);
+                if (total == maxLimit) {
+                    int extra = in.read();
+                    if (extra == -1) {
+                        break;
+                    }
+                    log.warn("rejected oversized request: category=payload_limit, stage=stream, method={}, uri={}",
+                            request.getMethod(), request.getRequestURI());
+                    writeSafeJsonError(response, SAFE_ERROR_JSON);
+                    return;
+                }
+                if (currentSlab == null || currentSlabOffset >= currentSlab.length) {
+                    int nextByte = in.read();
+                    if (nextByte == -1) {
+                        break;
+                    }
+                    int desiredSlab = Math.min(CHUNK_SIZE, maxLimit - total);
+                    int slabCap;
+                    if (effectiveMaxConcurrent > 0L) {
+                        int granted = tryReserveAtMost(desiredSlab, effectiveMaxConcurrent);
+                        if (granted <= 0) {
+                            log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, stage=stream, method={}, uri={}",
+                                    request.getMethod(), request.getRequestURI());
+                            writeSafeJsonError(response, SAFE_ERROR_JSON);
+                            return;
+                        }
+                        reserved += granted;
+                        slabCap = granted;
+                    } else {
+                        slabCap = desiredSlab;
+                    }
+                    currentSlab = new byte[slabCap];
+                    currentSlabOffset = 0;
+                    segments.add(currentSlab);
+                    currentSlab[currentSlabOffset++] = (byte) nextByte;
+                    total++;
+                    continue;
+                }
+                int maxRead = Math.min(currentSlab.length - currentSlabOffset, maxLimit - total);
+                int count = in.read(currentSlab, currentSlabOffset, maxRead);
                 if (count == -1) {
                     break;
                 }
                 if (count == 0) {
                     continue;
                 }
+                currentSlabOffset += count;
                 total += count;
-                if (total > limit) {
-                    log.warn("rejected oversized request: category=payload_limit, stage=stream, method={}, uri={}",
-                            request.getMethod(), request.getRequestURI());
-                    writeSafeJsonError(response, SAFE_ERROR_JSON);
-                    return;
-                }
-                int srcOffset = 0;
-                int remainingToStore = count;
-                while (remainingToStore > 0) {
-                    if (currentSlab == null || currentSlabOffset >= currentSlab.length) {
-                        long storedSoFar = total - remainingToStore;
-                        long remainingForRequest = maxLimit - storedSoFar;
-                        int slabCap = computeNextSlabCapacity(
-                                segments.isEmpty(), remainingToStore, remainingForRequest, effectiveMaxConcurrent);
-                        if (!tryReserveConcurrentBytes(slabCap, effectiveMaxConcurrent)) {
-                            if (slabCap > remainingToStore
-                                    && tryReserveConcurrentBytes(remainingToStore, effectiveMaxConcurrent)) {
-                                slabCap = remainingToStore;
-                            } else {
-                                log.warn("rejected request over concurrent json buffer budget: category=concurrent_payload_limit, stage=stream, method={}, uri={}",
-                                        request.getMethod(), request.getRequestURI());
-                                writeSafeJsonError(response, SAFE_ERROR_JSON);
-                                return;
-                            }
-                        }
-                        reserved += slabCap;
-                        currentSlab = new byte[slabCap];
-                        currentSlabOffset = 0;
-                        segments.add(currentSlab);
-                    }
-                    int writable = Math.min(remainingToStore, currentSlab.length - currentSlabOffset);
-                    System.arraycopy(scratch, srcOffset, currentSlab, currentSlabOffset, writable);
-                    currentSlabOffset += writable;
-                    srcOffset += writable;
-                    remainingToStore -= writable;
-                }
             }
-            if (total == 0L) {
+
+            if (total == 0) {
                 currentSlab = null;
                 segments.clear();
                 releaseConcurrentBytes(reserved);
@@ -182,7 +184,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
                 return;
             }
             CachedBodyHttpServletRequest wrapped = new CachedBodyHttpServletRequest(
-                    request, segments, (int) total);
+                    request, segments, total);
             filterChain.doFilter(wrapped, response);
         } catch (Exception ex) {
             if (hasPayloadLimitCause(ex) && !response.isCommitted()) {
@@ -223,7 +225,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         if (maxConcurrent <= 0L) {
             return 0L;
         }
-        long defaultLimit = properties.getMaxJsonRequestBytes();
+        long defaultLimit = Math.min(properties.getMaxJsonRequestBytes(), MAX_BUFFER_ARRAY_BYTES);
         boolean isLargeRoute = defaultLimit > 0L && routeLimit > defaultLimit;
         if (!isLargeRoute) {
             return maxConcurrent;
@@ -235,19 +237,12 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
         return maxConcurrent - configuredReserve;
     }
 
-    private static int computeNextSlabCapacity(
-            boolean firstSegment, int remainingToStore, long remainingForRequest, long effectiveMaxConcurrent) {
-        if (firstSegment) {
-            return remainingToStore;
+    int resolveBoundedLimit(String path) {
+        long raw = resolveLimit(path);
+        if (raw <= 0L) {
+            return 0;
         }
-        long desired = Math.min(CHUNK_SIZE, remainingForRequest);
-        if (effectiveMaxConcurrent > 0L && desired > effectiveMaxConcurrent) {
-            desired = effectiveMaxConcurrent;
-        }
-        if (desired < remainingToStore) {
-            desired = remainingToStore;
-        }
-        return (int) desired;
+        return (int) Math.min(raw, MAX_BUFFER_ARRAY_BYTES);
     }
 
     boolean isProtectedApiRoute(String path) {
@@ -284,7 +279,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
     private boolean tryReserveConcurrentBytes(long delta, long maxConcurrent) {
         if (delta <= 0L || maxConcurrent <= 0L) {
-            return true;
+            return false;
         }
         while (true) {
             long current = activeBufferedBytes.get();
@@ -297,6 +292,26 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             }
             if (activeBufferedBytes.compareAndSet(current, next)) {
                 return true;
+            }
+        }
+    }
+
+    private int tryReserveAtMost(int desired, long maxConcurrent) {
+        if (desired <= 0 || maxConcurrent <= 0L) {
+            return -1;
+        }
+        while (true) {
+            long current = activeBufferedBytes.get();
+            long available = maxConcurrent - current;
+            if (available <= 0L) {
+                return -1;
+            }
+            int grant = (int) Math.min(desired, available);
+            if (current > Long.MAX_VALUE - grant) {
+                return -1;
+            }
+            if (activeBufferedBytes.compareAndSet(current, current + grant)) {
+                return grant;
             }
         }
     }

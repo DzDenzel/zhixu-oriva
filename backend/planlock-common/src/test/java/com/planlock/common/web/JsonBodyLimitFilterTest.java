@@ -7,6 +7,7 @@ import com.planlock.common.auth.JwtUtil;
 import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.ServletInputStream;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -702,7 +704,10 @@ class JsonBodyLimitFilterTest {
                 "/api/v1/plugins/catalog/official;jsessionid=deadbeef",
                 "/api/v1/plugins/../sync/push",
                 "/api/v1/plugins/..;/journals",
-                "/api/v1/plugins/%2e%2e/sync/push"
+                "/api/v1/plugins/%2e%2e/sync/push",
+                "/api/v1/plugins\\..\\sync\\push",
+                "/api/v1/auth\\login",
+                "/api/v1/plugins/catalog\\official"
         );
         for (String variant : mustRequirePreAuth) {
             assertThat(filter.isProtectedApiRoute(variant)).as("must protect %s", variant).isTrue();
@@ -721,7 +726,9 @@ class JsonBodyLimitFilterTest {
                 "/api/v1/sync/push;jsessionid=1",
                 "/api/v1/sync/push/",
                 "/api/v1/plugins/../sync/push",
-                "/api/v1/plugins/%2e%2e/journals")) {
+                "/api/v1/plugins/%2e%2e/journals",
+                "/api/v1/plugins\\..\\sync\\push",
+                "/api/v1/auth\\login")) {
             AtomicInteger bytesRead = new AtomicInteger(0);
             MockHttpServletRequest req = new MockHttpServletRequest("POST", variant) {
                 @Override
@@ -741,6 +748,279 @@ class JsonBodyLimitFilterTest {
             assertThat(chainReached.get()).isFalse();
             assertThat(filter.getActiveBufferedBytes()).isZero();
         }
+    }
+
+    @Test
+    void nonPositiveConcurrentBudgetKeepsCounterStrictlyZeroForEmptyKnownAndChunkedRequests() throws Exception {
+        for (long disabledBudget : List.of(0L, -1L, -1024L)) {
+            var props = new JsonBodyLimitProperties();
+            props.setMaxConcurrentJsonBufferBytes(disabledBudget);
+            var filter = new JsonBodyLimitFilter(props, jwtUtil());
+
+            // 1. Explicit empty body (Content-Length: 0)
+            MockHttpServletRequest emptyReq = new MockHttpServletRequest("POST", "/api/v1/journals");
+            emptyReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            emptyReq.addHeader("Authorization", bearerToken());
+            emptyReq.setContent(new byte[0]);
+            AtomicLong activeDuringEmpty = new AtomicLong(-1L);
+            filter.doFilter(emptyReq, new MockHttpServletResponse(), (r, s) -> activeDuringEmpty.set(filter.getActiveBufferedBytes()));
+            assertThat(activeDuringEmpty.get()).isZero();
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+
+            // 2. Known-length normal payload
+            byte[] knownBody = "{\"content\":\"known-body\"}".getBytes(StandardCharsets.UTF_8);
+            MockHttpServletRequest knownReq = new MockHttpServletRequest("POST", "/api/v1/journals");
+            knownReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            knownReq.addHeader("Authorization", bearerToken());
+            knownReq.setContent(knownBody);
+            AtomicLong activeDuringKnown = new AtomicLong(-1L);
+            filter.doFilter(knownReq, new MockHttpServletResponse(), (r, s) -> activeDuringKnown.set(filter.getActiveBufferedBytes()));
+            assertThat(activeDuringKnown.get()).isZero();
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+
+            // 3. Chunked multi-slab payload (12 KiB)
+            byte[] chunkedBody = ("{\"data\":\"" + "k".repeat(12_000) + "\"}").getBytes(StandardCharsets.UTF_8);
+            MockHttpServletRequest chunkedReq = new MockHttpServletRequest("POST", "/api/v1/sync/push") {
+                @Override public long getContentLengthLong() { return -1L; }
+                @Override public int getContentLength() { return -1; }
+                @Override public ServletInputStream getInputStream() { return new ChunkedDeliveryInputStream(chunkedBody, 1024); }
+            };
+            chunkedReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            chunkedReq.addHeader("Authorization", bearerToken());
+            AtomicLong activeDuringChunked = new AtomicLong(-1L);
+            filter.doFilter(chunkedReq, new MockHttpServletResponse(), (r, s) -> activeDuringChunked.set(filter.getActiveBufferedBytes()));
+            assertThat(activeDuringChunked.get()).isZero();
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+        }
+    }
+
+    @Test
+    void tight100ByteBudgetHasNoHiddenScratchBufferAndReleasesEmptyPreallocatedStreamsBeforeChain() throws Exception {
+        var props = new JsonBodyLimitProperties();
+        props.setMaxConcurrentJsonBufferBytes(100L);
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+
+        // 1. Empty chunked stream enters chain with 0 bytes reserved and 0 allocated.
+        MockHttpServletRequest emptyChunked = new MockHttpServletRequest("POST", "/api/v1/journals") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() { return new UnsizedInputStream(new byte[0]); }
+        };
+        emptyChunked.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        emptyChunked.addHeader("Authorization", bearerToken());
+        AtomicLong activeOnEmptyChunked = new AtomicLong(-1L);
+        filter.doFilter(emptyChunked, new MockHttpServletResponse(), (r, s) -> activeOnEmptyChunked.set(filter.getActiveBufferedBytes()));
+        assertThat(activeOnEmptyChunked.get()).isZero();
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 2. Declared Content-Length: 60 that immediately EOFs (0 bytes) releases budget BEFORE invoking chain.
+        MockHttpServletRequest declaredEmpty = new MockHttpServletRequest("POST", "/api/v1/journals") {
+            @Override public long getContentLengthLong() { return 60L; }
+            @Override public int getContentLength() { return 60; }
+            @Override public ServletInputStream getInputStream() { return new UnsizedInputStream(new byte[0]); }
+        };
+        declaredEmpty.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        declaredEmpty.addHeader("Authorization", bearerToken());
+        AtomicLong activeOnDeclaredEmpty = new AtomicLong(-1L);
+        filter.doFilter(declaredEmpty, new MockHttpServletResponse(), (r, s) -> activeOnDeclaredEmpty.set(filter.getActiveBufferedBytes()));
+        assertThat(activeOnDeclaredEmpty.get()).isZero();
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 3. Chunked stream > 100 B (within 64 KiB route limit) is strictly bounded to <= 100 B with zero 8 KiB scratch.
+        AtomicInteger maxReadLenObserved = new AtomicInteger(0);
+        byte[] payload150 = ("{\"v\":\"" + "x".repeat(140) + "\"}").getBytes(StandardCharsets.UTF_8);
+        MockHttpServletRequest chunkedOver100 = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() {
+                return new ObservingMaxLenInputStream(payload150, maxReadLenObserved);
+            }
+        };
+        chunkedOver100.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        MockHttpServletResponse resOver100 = new MockHttpServletResponse();
+        AtomicBoolean reachedOver100 = new AtomicBoolean(false);
+        filter.doFilter(chunkedOver100, resOver100, (r, s) -> reachedOver100.set(true));
+        assertThat(resOver100.getContentAsString()).contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
+        assertThat(reachedOver100.get()).isFalse();
+        // Read array length passed into in.read(b, off, len) must never exceed 100 B (no hidden 8 KiB scratch!).
+        assertThat(maxReadLenObserved.get()).isLessThanOrEqualTo(100);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // 4. Blocking chunked stream stalled before first byte allocates 0 bytes in activeBufferedBytes.
+        var blockedLatch = new CountDownLatch(1);
+        var releaseLatch = new CountDownLatch(1);
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var future = executor.submit(() -> {
+                MockHttpServletRequest stalledChunked = new MockHttpServletRequest("POST", "/api/v1/auth/login") {
+                    @Override public long getContentLengthLong() { return -1L; }
+                    @Override public int getContentLength() { return -1; }
+                    @Override public ServletInputStream getInputStream() {
+                        return new BlockingServletInputStream(blockedLatch, releaseLatch, false);
+                    }
+                };
+                stalledChunked.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                filter.doFilter(stalledChunked, new MockHttpServletResponse(), (r, s) -> { });
+                return null;
+            });
+            assertThat(blockedLatch.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+            releaseLatch.countDown();
+            future.get(5, TimeUnit.SECONDS);
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+        } finally {
+            releaseLatch.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void errorThrownDownstreamReleasesBudgetStrictlyToZero() {
+        var props = new JsonBodyLimitProperties();
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+        byte[] payload = "{\"content\":\"error-path\"}".getBytes(StandardCharsets.UTF_8);
+
+        // Known-length Error path
+        MockHttpServletRequest knownReq = new MockHttpServletRequest("POST", "/api/v1/journals");
+        knownReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        knownReq.addHeader("Authorization", bearerToken());
+        knownReq.setContent(payload);
+        assertThatThrownBy(() -> filter.doFilter(knownReq, new MockHttpServletResponse(), (r, s) -> {
+            assertThat(filter.getActiveBufferedBytes()).isEqualTo(payload.length);
+            throw new AssertionError("simulated fatal Error");
+        })).isInstanceOf(AssertionError.class);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+
+        // Chunked Error path
+        MockHttpServletRequest chunkedReq = new MockHttpServletRequest("POST", "/api/v1/journals") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() { return new UnsizedInputStream(payload); }
+        };
+        chunkedReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        chunkedReq.addHeader("Authorization", bearerToken());
+        assertThatThrownBy(() -> filter.doFilter(chunkedReq, new MockHttpServletResponse(), (r, s) -> {
+            assertThat(filter.getActiveBufferedBytes()).isGreaterThanOrEqualTo(payload.length);
+            throw new AssertionError("simulated chunked Error");
+        })).isInstanceOf(AssertionError.class);
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+    }
+
+    @Test
+    void segmentedReplaySupportsMixedSingleMultiZeroLengthReadsEofAndRepeatedStreams() throws Exception {
+        var props = new JsonBodyLimitProperties();
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+
+        // 20 KiB payload including high-bit UTF-8 Chinese characters spanning >= 3 slabs (8 KiB each).
+        String text = "{\"note\":\"" + "知序ORIVA-".repeat(2200) + "\"}";
+        byte[] expected = text.getBytes(StandardCharsets.UTF_8);
+        assertThat(expected.length).isGreaterThan(JsonBodyLimitFilter.CHUNK_SIZE * 2);
+
+        MockHttpServletRequest req = new MockHttpServletRequest("POST", "/api/v1/journals") {
+            @Override public long getContentLengthLong() { return -1L; }
+            @Override public int getContentLength() { return -1; }
+            @Override public ServletInputStream getInputStream() { return new ChunkedDeliveryInputStream(expected, 1300); }
+        };
+        req.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        req.addHeader("Authorization", bearerToken());
+
+        filter.doFilter(req, new MockHttpServletResponse(), (wrappedReq, s) -> {
+            HttpServletRequest httpReq = (HttpServletRequest) wrappedReq;
+            assertThat(httpReq.getContentLength()).isEqualTo(expected.length);
+            assertThat(httpReq.getContentLengthLong()).isEqualTo(expected.length);
+
+            // First pass: mixed single-byte read(), zero-length read(b, 0, 0), and multi-byte reads across slab boundaries.
+            ServletInputStream in1 = httpReq.getInputStream();
+            assertThat(in1.isReady()).isTrue();
+            assertThat(in1.isFinished()).isFalse();
+            assertThat(in1.available()).isEqualTo(expected.length);
+
+            ByteArrayOutputStream collected = new ByteArrayOutputStream(expected.length);
+            byte[] buf = new byte[500];
+            assertThat(in1.read(buf, 0, 0)).isZero();
+
+            // Read 10 single bytes (tests unsigned & 0xFF semantics)
+            for (int i = 0; i < 10; i++) {
+                int b = in1.read();
+                assertThat(b).isBetween(0, 255);
+                collected.write(b);
+            }
+            assertThat(in1.available()).isEqualTo(expected.length - 10);
+            assertThat(in1.isFinished()).isFalse();
+
+            // Read remaining in 500-byte chunks interleaved with single-byte reads across slab boundaries
+            while (true) {
+                int n = in1.read(buf, 0, buf.length);
+                if (n == -1) {
+                    break;
+                }
+                collected.write(buf, 0, n);
+                int single = in1.read();
+                if (single != -1) {
+                    collected.write(single);
+                }
+            }
+            assertThat(in1.available()).isZero();
+            assertThat(in1.isFinished()).isTrue();
+            assertThat(in1.read()).isEqualTo(-1);
+            assertThat(in1.read(buf, 0, 10)).isEqualTo(-1);
+            assertThat(in1.read(buf, 0, 0)).isZero();
+            assertThat(collected.toByteArray()).isEqualTo(expected);
+
+            // Second pass: fresh getInputStream() replays exact bytes from offset 0.
+            ServletInputStream in2 = httpReq.getInputStream();
+            assertThat(in2.available()).isEqualTo(expected.length);
+            assertThat(in2.readAllBytes()).isEqualTo(expected);
+            assertThat(in2.isFinished()).isTrue();
+        });
+        assertThat(filter.getActiveBufferedBytes()).isZero();
+    }
+
+    @Test
+    void routeLimitsExceedingIntegerMaxAreClampedWithoutOverflow() throws Exception {
+        var props = new JsonBodyLimitProperties();
+        props.setMaxJsonRequestBytes(Long.MAX_VALUE);
+        props.setJsonRouteLimits(List.of(
+                new JsonBodyLimitProperties.RouteLimit("/api/v1/sync/push", (long) Integer.MAX_VALUE + 4096L)
+        ));
+        var filter = new JsonBodyLimitFilter(props, jwtUtil());
+
+        assertThat(filter.resolveBoundedLimit("/api/v1/auth/login"))
+                .isEqualTo(JsonBodyLimitFilter.MAX_BUFFER_ARRAY_BYTES);
+        assertThat(filter.resolveBoundedLimit("/api/v1/sync/push"))
+                .isEqualTo(JsonBodyLimitFilter.MAX_BUFFER_ARRAY_BYTES);
+
+        // Content-Length: Long.MAX_VALUE and Integer.MAX_VALUE are rejected cleanly before allocation.
+        for (long hugeLength : List.of(Long.MAX_VALUE, (long) Integer.MAX_VALUE)) {
+            AtomicBoolean streamCalled = new AtomicBoolean(false);
+            MockHttpServletRequest hugeReq = new MockHttpServletRequest("POST", "/api/v1/sync/push") {
+                @Override public long getContentLengthLong() { return hugeLength; }
+                @Override public ServletInputStream getInputStream() {
+                    streamCalled.set(true);
+                    throw new AssertionError("stream must not be touched for > MAX_BUFFER_ARRAY_BYTES");
+                }
+            };
+            hugeReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            hugeReq.addHeader("Authorization", bearerToken());
+            MockHttpServletResponse res = new MockHttpServletResponse();
+
+            filter.doFilter(hugeReq, res, (r, s) -> {
+                throw new AssertionError("chain must not be invoked");
+            });
+            assertThat(res.getContentAsString()).contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
+            assertThat(streamCalled.get()).isFalse();
+            assertThat(filter.getActiveBufferedBytes()).isZero();
+        }
+
+        // Normal request under clamped Long.MAX_VALUE limit still works without overflow.
+        byte[] okBody = "{\"ok\":true}".getBytes(StandardCharsets.UTF_8);
+        MockHttpServletRequest normalReq = new MockHttpServletRequest("POST", "/api/v1/auth/login");
+        normalReq.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        normalReq.setContent(okBody);
+        AtomicBoolean normalReached = new AtomicBoolean(false);
+        filter.doFilter(normalReq, new MockHttpServletResponse(), (r, s) -> normalReached.set(true));
+        assertThat(normalReached.get()).isTrue();
+        assertThat(filter.getActiveBufferedBytes()).isZero();
     }
 
     private static MockHttpServletRequest blockingDeclaredLengthRequest(
@@ -904,6 +1184,41 @@ class JsonBodyLimitFilterTest {
             }
             delivered += step;
             return step;
+        }
+    }
+
+    private static final class ObservingMaxLenInputStream extends ServletInputStream {
+        private final ByteArrayInputStream delegate;
+        private final AtomicInteger maxLenObserved;
+
+        private ObservingMaxLenInputStream(byte[] bytes, AtomicInteger maxLenObserved) {
+            this.delegate = new ByteArrayInputStream(bytes);
+            this.maxLenObserved = maxLenObserved;
+        }
+
+        @Override
+        public boolean isFinished() {
+            return delegate.available() == 0;
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        @Override
+        public void setReadListener(ReadListener readListener) {
+        }
+
+        @Override
+        public int read() {
+            return delegate.read();
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) {
+            maxLenObserved.accumulateAndGet(b.length, Math::max);
+            return delegate.read(b, off, len);
         }
     }
 
