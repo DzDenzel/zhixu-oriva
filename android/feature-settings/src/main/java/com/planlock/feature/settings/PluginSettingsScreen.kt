@@ -1,6 +1,7 @@
 package com.planlock.feature.settings
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,12 +11,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,6 +62,7 @@ import androidx.compose.material3.SnackbarHostState
 import kotlinx.coroutines.CancellationException
 import com.planlock.design.PageAtmosphere
 import com.planlock.design.planLockAtmosphere
+import com.planlock.plugin.CustomPluginSource
 import com.planlock.plugin.InstalledPluginRecord
 import com.planlock.plugin.PluginCatalogClient
 import com.planlock.plugin.PluginCatalogDocument
@@ -65,6 +70,7 @@ import com.planlock.plugin.PluginCatalogItem
 import com.planlock.plugin.PluginInstallResult
 import com.planlock.plugin.PluginPlatform
 import com.planlock.plugin.PluginPlatformSnapshot
+import com.planlock.plugin.PluginSourcePolicy
 import com.planlock.plugin.PluginSourceType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -81,8 +87,13 @@ fun PluginSettingsScreen(
     val platform = remember { PluginPlatform.get(context) }
     var snapshot by remember { mutableStateOf(platform.snapshot()) }
     LaunchedEffect(platform) { platform.snapshots.collect { snapshot = it } }
+    val customSources by platform.customSources.collectAsState()
     var confirmDisableSafeMode by remember { mutableStateOf(false) }
+    var showAddSourceDialog by remember { mutableStateOf(false) }
+    var removeSourceTarget by remember { mutableStateOf<CustomPluginSource?>(null) }
     var uninstallTarget by remember { mutableStateOf<InstalledPluginRecord?>(null) }
+    val connection by com.planlock.app.api.ConnectionStore.state.collectAsState()
+    val connectionConfig = connection.config ?: com.planlock.app.api.ConnectionConfig.default
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     fun feedback(text: String) { scope.launch { snackbar.showSnackbar(text) } }
@@ -130,6 +141,33 @@ fun PluginSettingsScreen(
         }) },
         dismissButton = { TextButton(onClick = { uninstallTarget = null }) { Text("取消") } },
     ) }
+    removeSourceTarget?.let { source ->
+        AlertDialog(
+            onDismissRequest = { removeSourceTarget = null },
+            title = { Text("移除自定义来源 ${source.name}？") },
+            text = { Text("移除后将不再从该地址获取目录，其配置的信任锚也会一并撤销。") },
+            confirmButton = {
+                DestructiveButton("移除", onClick = {
+                    platform.removeCustomSource(source.id)
+                    removeSourceTarget = null
+                    feedback("已移除自定义来源")
+                })
+            },
+            dismissButton = { TextButton(onClick = { removeSourceTarget = null }) { Text("取消") } },
+        )
+    }
+    if (showAddSourceDialog) {
+        AddCustomPluginSourceDialog(
+            existingIds = customSources.mapTo(mutableSetOf()) { it.id },
+            connectionConfig = connectionConfig,
+            onDismiss = { showAddSourceDialog = false },
+            onAdd = { source ->
+                platform.addCustomSource(source)
+                showAddSourceDialog = false
+                feedback("已添加自定义来源：${source.name}")
+            },
+        )
+    }
     PluginScaffold(title = "插件", onBack = onBack, snackbar = snackbar) { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),
@@ -148,11 +186,49 @@ fun PluginSettingsScreen(
                 }
             }
             item {
-                RepositoryRow("官方插件仓库", "仅接受官方信任锚签名的插件") { onOpenRepository(PluginSourceType.OFFICIAL) }
+                RepositoryRow("官方插件仓库", "仅接受官方信任锚签名的插件") {
+                    platform.selectThirdPartySource(null)
+                    onOpenRepository(PluginSourceType.OFFICIAL)
+                }
             }
             if (!snapshot.safeMode) {
                 item {
-                    RepositoryRow("第三方插件仓库", "第三方来源不受项目审核或保证") { onOpenRepository(PluginSourceType.THIRD_PARTY) }
+                    RepositoryRow("第三方插件仓库", "第三方来源不受项目审核或保证") {
+                        platform.selectThirdPartySource(null)
+                        onOpenRepository(PluginSourceType.THIRD_PARTY)
+                    }
+                }
+            }
+            item {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("自定义第三方来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = com.planlock.design.InkTone.text)
+                    OutlinedButton(onClick = { showAddSourceDialog = true }) { Text("添加来源") }
+                }
+            }
+            item {
+                Text(
+                    "自定义来源独立于内置官方/第三方信任锚；独立第三方源须使用 HTTPS（私有 HTTP 仅限与当前后端插件目录同源且开启内网时可用）；未配置信任锚的源禁止安装未验签包；安全模式下禁止访问与下载。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (customSources.isEmpty()) {
+                item { Text("暂无自定义第三方来源", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            } else {
+                items(customSources, key = { it.id }) { source ->
+                    CustomSourceCard(
+                        source = source,
+                        safeMode = snapshot.safeMode,
+                        onBrowse = {
+                            platform.selectThirdPartySource(source.id)
+                            onOpenRepository(PluginSourceType.THIRD_PARTY)
+                        },
+                        onRemove = { removeSourceTarget = source },
+                    )
                 }
             }
             item {
@@ -212,6 +288,12 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var catalog by remember { mutableStateOf<PluginCatalogDocument?>(null) }
     var platformSnapshot by remember { mutableStateOf(platform.snapshot()) }
+    LaunchedEffect(platform) { platform.snapshots.collect { platformSnapshot = it } }
+    val customSources by platform.customSources.collectAsState()
+    val selectedCustomId by platform.selectedThirdPartySourceId.collectAsState()
+    val activeCustomSource = if (sourceType == PluginSourceType.THIRD_PARTY) {
+        customSources.firstOrNull { it.id == selectedCustomId }
+    } else null
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -220,12 +302,27 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
 
     val sourcePath = if (sourceType == PluginSourceType.OFFICIAL) "official" else "third-party"
     val connection by com.planlock.app.api.ConnectionStore.state.collectAsState()
-    val catalogUrl = (connection.config ?: com.planlock.app.api.ConnectionConfig.default).catalogUrl(sourcePath)
+    val connectionConfig = connection.config ?: com.planlock.app.api.ConnectionConfig.default
+    val catalogUrl = activeCustomSource?.catalogUrl ?: connectionConfig.catalogUrl(sourcePath)
+    val lanAllowed = activeCustomSource?.lanAllowed ?: connectionConfig.lanAllowed
+    val blockedBySafeMode = sourceType == PluginSourceType.THIRD_PARTY && platformSnapshot.safeMode
 
     suspend fun load() {
+        if (blockedBySafeMode) {
+            catalog = null
+            loadError = null
+            loading = false
+            return
+        }
         loading = true
         val result = withContext(Dispatchers.IO) {
-            try { Result.success(client.fetch(catalogUrl)) }
+            try {
+                val doc = client.fetch(catalogUrl, lanAllowed = lanAllowed)
+                if (activeCustomSource != null) {
+                    PluginSourcePolicy.validateCatalogForCustomSource(activeCustomSource, doc)
+                }
+                Result.success(doc)
+            }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { Result.failure(failure) }
         }
@@ -233,12 +330,17 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
         loadError = if (catalog == null) "仓库读取失败：${result.exceptionOrNull()?.message ?: "来源不匹配"}" else null
         loading = false
     }
-    LaunchedEffect(sourceType, catalogUrl) { load() }
+    LaunchedEffect(sourceType, catalogUrl, blockedBySafeMode) { load() }
     val visible = catalog?.plugins.orEmpty().filter {
         query.isBlank() || it.name.contains(query, ignoreCase = true) || it.description.contains(query, ignoreCase = true)
     }
 
-    PluginScaffold(title = if (sourceType == PluginSourceType.OFFICIAL) "官方插件仓库" else "第三方插件仓库", onBack = onBack, snackbar = snackbar) { padding ->
+    val title = when {
+        sourceType == PluginSourceType.OFFICIAL -> "官方插件仓库"
+        activeCustomSource != null -> activeCustomSource.name
+        else -> "第三方插件仓库"
+    }
+    PluginScaffold(title = title, onBack = onBack, snackbar = snackbar) { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 28.dp),
@@ -254,34 +356,76 @@ fun PluginRepositoryScreen(sourceType: PluginSourceType, onBack: () -> Unit) {
                         )
                     }
                 }
-            }
-            item { OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索插件") }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
-            when {
-                loading -> item { UIStatePanel(UiState.LOADING, "正在读取仓库") }
-                loadError != null -> item { RepositoryFailurePanel(loadError!!) { scope.launch { load() } } }
-                visible.isEmpty() -> item { UIStatePanel(UiState.EMPTY, if (query.isBlank()) "仓库暂无插件" else "未找到匹配插件", emptySubject = "插件") }
-                else -> item { Text("${visible.size} 个插件", style = MaterialTheme.typography.labelMedium) }
-            }
-            items(visible, key = { it.id }) { item ->
-                val installed = platformSnapshot.installed.firstOrNull { it.manifest.id == item.id }
-                val presentation = catalogPluginPresentation(
-                    isInstalled = installed != null,
-                    isEnabled = installed?.enabled == true,
-                )
-                CatalogPluginCard(item, sourceType, presentation, installingId == item.id, installingId == null) {
-                    if (installingId == null) scope.launch {
-                        installingId = item.id
-                        val message = try {
-                            val result = withContext(Dispatchers.IO) { platform.install(item.toEntry(catalog!!)) }
-                            platformSnapshot = platform.snapshot()
-                            when (result) {
-                                is PluginInstallResult.Installed -> "${result.manifest.name} 已安装，默认保持停用"
-                                is PluginInstallResult.Failed -> "安装失败：${result.message}"
+                if (customSources.isNotEmpty() && !blockedBySafeMode) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilterChip(
+                                selected = activeCustomSource == null,
+                                onClick = { platform.selectThirdPartySource(null) },
+                                label = { Text("内置第三方仓库") },
+                            )
+                            customSources.forEach { custom ->
+                                FilterChip(
+                                    selected = activeCustomSource?.id == custom.id,
+                                    onClick = { platform.selectThirdPartySource(custom.id) },
+                                    label = { Text(custom.name) },
+                                )
                             }
-                        } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (_: Exception) { "安装失败，请重试" }
-                        finally { installingId = null }
-                        snackbar.showSnackbar(message)
+                        }
+                    }
+                }
+                if (activeCustomSource != null && activeCustomSource.trustedFingerprints.isEmpty()) {
+                    item {
+                        PersistentStatus(
+                            "未配置信任锚 · 仅目录发现",
+                            "当前自定义来源未登记受信任签名证书指纹，系统不会跳过签名校验；安装任何未信任签名包都会被安全拒绝。",
+                        )
+                    }
+                }
+            }
+            if (blockedBySafeMode) {
+                item {
+                    UIStatePanel(UiState.EMPTY, "安全模式已开启，已禁止访问和下载任意第三方插件源", emptySubject = "插件")
+                }
+            } else {
+                item { OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索插件") }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
+                when {
+                    loading -> item { UIStatePanel(UiState.LOADING, "正在读取仓库") }
+                    loadError != null -> item { RepositoryFailurePanel(loadError!!) { scope.launch { load() } } }
+                    visible.isEmpty() -> item { UIStatePanel(UiState.EMPTY, if (query.isBlank()) "仓库暂无插件" else "未找到匹配插件", emptySubject = "插件") }
+                    else -> item { Text("${visible.size} 个插件", style = MaterialTheme.typography.labelMedium) }
+                }
+                items(visible, key = { it.id }) { item ->
+                    val installed = platformSnapshot.installed.firstOrNull { it.manifest.id == item.id }
+                    val presentation = catalogPluginPresentation(
+                        isInstalled = installed != null,
+                        isEnabled = installed?.enabled == true,
+                    )
+                    CatalogPluginCard(item, sourceType, presentation, installingId == item.id, installingId == null) {
+                        if (installingId == null) scope.launch {
+                            installingId = item.id
+                            val message = try {
+                                val doc = catalog!!
+                                if (activeCustomSource != null) {
+                                    PluginSourcePolicy.validateCatalogForCustomSource(activeCustomSource, doc)
+                                }
+                                val result = withContext(Dispatchers.IO) {
+                                    platform.install(item.toEntry(doc), activeCustomSource)
+                                }
+                                platformSnapshot = platform.snapshot()
+                                when (result) {
+                                    is PluginInstallResult.Installed -> "${result.manifest.name} 已安装，默认保持停用"
+                                    is PluginInstallResult.Failed -> "安装失败：${formatPluginInstallError(result.message)}"
+                                }
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (failure: IllegalArgumentException) { "安装失败：${failure.message ?: "来源校验未通过"}" }
+                            catch (_: Exception) { "安装失败，请重试" }
+                            finally { installingId = null }
+                            snackbar.showSnackbar(message)
+                        }
                     }
                 }
             }
@@ -310,16 +454,161 @@ private fun CatalogPluginCard(
     actionsEnabled: Boolean,
     onInstall: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val metadata = formatPluginMetadata(item.author, item.license, item.homepage, item.repository)
     PluginCard {
         Text(item.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(item.version, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(pluginSourceLabel(sourceType), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(presentation.statusLabel, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
         if (item.description.isNotBlank()) Text(item.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        metadata.author?.let { Text("作者：$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        metadata.license?.let { Text("许可证：$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        metadata.homepageUrl?.let { url ->
+            Text(
+                "主页：$url",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable { safeOpenExternalUrl(context, url) },
+            )
+        }
+        metadata.repositoryUrl?.let { url ->
+            Text(
+                "源码仓库：$url",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable { safeOpenExternalUrl(context, url) },
+            )
+        }
         Text("申请能力：${item.requiredCapabilities.joinToString("、") { pluginCapabilityLabel(it) }.ifBlank { "无" }}", style = MaterialTheme.typography.bodyMedium)
         PersistentStatus("技术标识 · 详情", "插件：${item.id}\n协议：v${item.contractVersion}\n来源类型：${sourceType.name}\n能力：${item.requiredCapabilities.joinToString { it.name }}")
         Button(onClick = onInstall, enabled = presentation.installAvailable && actionsEnabled) { Text(if (installing) "正在下载并校验…" else presentation.actionLabel) }
     }
+}
+
+@Composable
+private fun CustomSourceCard(
+    source: CustomPluginSource,
+    safeMode: Boolean,
+    onBrowse: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    PluginCard {
+        Text(source.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(source.catalogUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("来源 ID：${source.id} · ${if (source.lanAllowed) "允许指定内网" else "仅限 HTTPS"}", style = MaterialTheme.typography.bodySmall)
+        Text(
+            customSourceTrustLabel(source),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (source.trustedFingerprints.isEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onBrowse, enabled = !safeMode) {
+                Text(if (safeMode) "安全模式已禁用" else "浏览目录")
+            }
+            TextButton(onClick = onRemove) { Text("删除") }
+        }
+    }
+}
+
+@Composable
+private fun AddCustomPluginSourceDialog(
+    existingIds: Set<String>,
+    connectionConfig: com.planlock.app.api.ConnectionConfig,
+    onDismiss: () -> Unit,
+    onAdd: (CustomPluginSource) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var catalogUrl by remember { mutableStateOf("") }
+    var sourceIdInput by remember { mutableStateOf("") }
+    var fingerprintsInput by remember { mutableStateOf("") }
+    var lanAllowed by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加自定义第三方来源") },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it; errorMessage = null },
+                    label = { Text("来源名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = catalogUrl,
+                    onValueChange = { catalogUrl = it; errorMessage = null },
+                    label = { Text("目录 JSON 地址") },
+                    placeholder = { Text("https://example.org/catalog.json") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = sourceIdInput,
+                    onValueChange = { sourceIdInput = it; errorMessage = null },
+                    label = { Text("来源 ID（配置信任锚时必填）") },
+                    supportingText = { Text("未配指纹留空则自动生成（仅目录发现）；配置指纹时须与目录及签名包 sourceId 一致") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = fingerprintsInput,
+                    onValueChange = { fingerprintsInput = it; errorMessage = null },
+                    label = { Text("信任锚指纹（可选）") },
+                    supportingText = { Text("SHA-256 十六进制指纹；留空则禁止安装未验签包") },
+                    maxLines = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                PluginSwitchRow(
+                    "允许同源内网地址",
+                    "独立来源须用 HTTPS；私有 HTTP 仅限与当前连接配置的插件目录同源且开启内网时可用",
+                    lanAllowed,
+                ) {
+                    lanAllowed = it
+                    errorMessage = null
+                }
+                errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                try {
+                    val trimmedUrl = catalogUrl.trim()
+                    val fingerprints = PluginSourcePolicy.parseFingerprints(fingerprintsInput)
+                    if (fingerprints.isNotEmpty() && sourceIdInput.isBlank()) {
+                        throw IllegalArgumentException("配置信任锚时请填写来源 ID（须与目录及签名包中的 sourceId 一致）")
+                    }
+                    PluginSourcePolicy.validateCatalogUrl(
+                        raw = trimmedUrl,
+                        lanAllowed = lanAllowed && connectionConfig.lanAllowed,
+                        approvedLanOrigin = connectionConfig.pluginsCatalogUrl,
+                    )
+                    val resolvedId = if (sourceIdInput.isBlank()) {
+                        PluginSourcePolicy.deriveSourceId(trimmedUrl, existingIds)
+                    } else {
+                        PluginSourcePolicy.validateSourceId(sourceIdInput)
+                    }
+                    onAdd(
+                        CustomPluginSource(
+                            id = resolvedId,
+                            name = name,
+                            catalogUrl = trimmedUrl,
+                            lanAllowed = lanAllowed,
+                            trustedFingerprints = fingerprints,
+                        )
+                    )
+                } catch (error: IllegalArgumentException) {
+                    errorMessage = error.message ?: "输入无效，请检查后重试"
+                }
+            }) { Text("添加") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 internal fun pluginSourceLabel(sourceType: PluginSourceType): String = when (sourceType) {

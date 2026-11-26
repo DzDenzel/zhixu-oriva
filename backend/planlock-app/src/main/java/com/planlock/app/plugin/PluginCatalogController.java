@@ -1,12 +1,16 @@
 package com.planlock.app.plugin;
 
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -41,14 +45,27 @@ public class PluginCatalogController {
         };
         Path sourceRoot = pluginDirectory.resolve(source).normalize();
         Path catalogFile = sourceRoot.resolve("catalog.json");
+        int catalogFormatVersion = 1;
         List<Map<String, Object>> plugins = new ArrayList<>();
         if (Files.isRegularFile(catalogFile)) {
             try {
                 JsonNode document = mapper.readTree(catalogFile.toFile());
-                JsonNode entries = document == null ? null : document.get("plugins");
+                if (document == null || !document.isObject()) {
+                    throw new IllegalArgumentException("Catalog document must be an object");
+                }
+                if (document.has("catalogFormatVersion")) {
+                    JsonNode formatVersion = document.get("catalogFormatVersion");
+                    if (formatVersion == null || !formatVersion.isIntegralNumber() || !formatVersion.canConvertToInt()
+                            || formatVersion.intValue() < 1) {
+                        throw new IllegalArgumentException("Invalid catalogFormatVersion");
+                    }
+                    catalogFormatVersion = formatVersion.intValue();
+                }
+                JsonNode entries = document.get("plugins");
                 if (entries == null || !entries.isArray()) throw new IllegalArgumentException("plugins must be an array");
                 Set<String> ids = new HashSet<>();
                 for (JsonNode entry : entries) {
+                    if (entry == null || !entry.isObject()) throw new IllegalArgumentException("Catalog entry must be an object");
                     String fileName = requiredText(entry, "artifact");
                     if (!fileName.matches("[A-Za-z0-9._-]+") || fileName.equals(".") || fileName.equals("..")) {
                         throw new IllegalArgumentException("Invalid catalog artifact name");
@@ -70,20 +87,37 @@ public class PluginCatalogController {
                     }
                     JsonNode description = entry.get("description");
                     if (description == null || !description.isTextual()) throw new IllegalArgumentException("description must be text");
+                    String author = optionalText(entry, "author", 200);
+                    String homepage = optionalHttpUrl(entry, "homepage");
+                    String repository = optionalHttpUrl(entry, "repository");
+                    String license = optionalText(entry, "license", 200);
                     Path artifact = sourceRoot.resolve(fileName).normalize();
                     if (!artifact.startsWith(sourceRoot) || !Files.isRegularFile(artifact)) continue;
-                    plugins.add(Map.ofEntries(
-                            Map.entry("id", id), Map.entry("name", name), Map.entry("version", version),
-                            Map.entry("contractVersion", contractVersion.intValue()), Map.entry("entryPoint", entryPoint),
-                            Map.entry("requiredCapabilities", requiredCapabilities), Map.entry("description", description.textValue()),
-                            Map.entry("downloadUrl", "/api/v1/plugins/artifacts/" + source + "/" + fileName),
-                            Map.entry("sha256", sha256(artifact))));
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("id", id);
+                    item.put("name", name);
+                    item.put("version", version);
+                    item.put("contractVersion", contractVersion.intValue());
+                    item.put("entryPoint", entryPoint);
+                    item.put("requiredCapabilities", requiredCapabilities);
+                    item.put("description", description.textValue());
+                    item.put("downloadUrl", "/api/v1/plugins/artifacts/" + source + "/" + fileName);
+                    item.put("sha256", sha256(artifact));
+                    if (author != null) item.put("author", author);
+                    if (homepage != null) item.put("homepage", homepage);
+                    if (repository != null) item.put("repository", repository);
+                    if (license != null) item.put("license", license);
+                    plugins.add(Collections.unmodifiableMap(item));
                 }
             } catch (IOException | IllegalArgumentException error) {
                 throw new IllegalStateException("Cannot read plugin catalog for " + source, error);
             }
         }
-        return Map.of("sourceId", source, "sourceType", sourceType, "plugins", plugins);
+        return Map.of(
+                "catalogFormatVersion", catalogFormatVersion,
+                "sourceId", source,
+                "sourceType", sourceType,
+                "plugins", plugins);
     }
 
     private static String requiredText(JsonNode entry, String field) {
@@ -92,6 +126,52 @@ public class PluginCatalogController {
             throw new IllegalArgumentException("Missing catalog field: " + field);
         }
         return value.textValue();
+    }
+
+    private static String optionalText(JsonNode entry, String field, int maxLength) {
+        if (!entry.has(field)) return null;
+        JsonNode value = entry.get(field);
+        if (value == null || value.isNull()) return null;
+        if (!value.isTextual()) throw new IllegalArgumentException("Invalid catalog field type: " + field);
+        String trimmed = value.textValue().trim();
+        if (trimmed.isEmpty()) return null;
+        if (trimmed.length() > maxLength || hasControlChars(trimmed)) {
+            throw new IllegalArgumentException("Invalid catalog field value: " + field);
+        }
+        return trimmed;
+    }
+
+    private static String optionalHttpUrl(JsonNode entry, String field) {
+        String trimmed = optionalText(entry, field, 2048);
+        if (trimmed == null) return null;
+        for (int i = 0; i < trimmed.length(); i++) {
+            if (Character.isWhitespace(trimmed.charAt(i))) {
+                throw new IllegalArgumentException("Unsafe URL whitespace for " + field);
+            }
+        }
+        URI uri;
+        try {
+            uri = URI.create(trimmed);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("Invalid URL for " + field, error);
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null) throw new IllegalArgumentException("Missing URL scheme for " + field);
+        String lowerScheme = scheme.toLowerCase(Locale.ROOT);
+        if (!lowerScheme.equals("http") && !lowerScheme.equals("https")) {
+            throw new IllegalArgumentException("Unsafe URL scheme for " + field);
+        }
+        if (uri.getHost() == null || uri.getHost().isBlank() || uri.getRawUserInfo() != null) {
+            throw new IllegalArgumentException("Invalid URL authority for " + field);
+        }
+        return trimmed;
+    }
+
+    private static boolean hasControlChars(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            if (Character.isISOControl(value.charAt(i))) return true;
+        }
+        return false;
     }
 
     @GetMapping("/artifacts/{source}/{fileName:.+}")

@@ -6,6 +6,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -25,9 +27,16 @@ object PluginTrustAnchors {
 class PluginPlatform private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val stateStore = PluginStateStore(appContext)
+    private val sourceStore = PluginSourceStore(appContext)
     private val currentSnapshot = MutableStateFlow(stateStore.snapshot())
     val snapshots = currentSnapshot.asStateFlow()
-    private val verifier = SignedJarPluginPackageVerifier(PluginTrustAnchors.fingerprintsBySource)
+    private val currentCustomSources = MutableStateFlow(sourceStore.list())
+    val customSources = currentCustomSources.asStateFlow()
+    private val activeThirdPartySourceId = MutableStateFlow<String?>(null)
+    val selectedThirdPartySourceId = activeThirdPartySourceId.asStateFlow()
+    private val verifier = SignedJarPluginPackageVerifier {
+        PluginSourcePolicy.mergeTrustAnchors(PluginTrustAnchors.fingerprintsBySource, sourceStore.list())
+    }
     private val loader = ExternalPluginLoader(appContext, verifier, stateStore)
     private val reloadRequests = Channel<Unit>(Channel.CONFLATED)
     private val revision = java.util.concurrent.atomic.AtomicLong()
@@ -63,6 +72,27 @@ class PluginPlatform private constructor(context: Context) {
 
     fun snapshot(): PluginPlatformSnapshot = stateStore.snapshot()
 
+    fun customSources(): List<CustomPluginSource> = sourceStore.list()
+
+    fun addCustomSource(source: CustomPluginSource): List<CustomPluginSource> = synchronized(reloadLock) {
+        sourceStore.add(source).also { updated ->
+            currentCustomSources.value = updated
+            reload()
+        }
+    }
+
+    fun removeCustomSource(id: String): List<CustomPluginSource> = synchronized(reloadLock) {
+        sourceStore.remove(id).also { updated ->
+            if (activeThirdPartySourceId.value == id) activeThirdPartySourceId.value = null
+            currentCustomSources.value = updated
+            reload()
+        }
+    }
+
+    fun selectThirdPartySource(id: String?) {
+        activeThirdPartySourceId.value = id
+    }
+
     fun setGlobalEnabled(enabled: Boolean) = synchronized(reloadLock) {
         stateStore.setGlobalEnabled(enabled)
         reload()
@@ -73,8 +103,12 @@ class PluginPlatform private constructor(context: Context) {
         reload()
     }
 
-    fun install(entry: PluginCatalogEntry): PluginInstallResult {
-        val result = installer.install(entry)
+    fun install(entry: PluginCatalogEntry, customSource: CustomPluginSource? = null): PluginInstallResult {
+        val result = installer.install(
+            entry,
+            safeMode = stateStore.snapshot().safeMode,
+            customSource = customSource,
+        )
         if (result is PluginInstallResult.Installed) {
             synchronized(reloadLock) {
             stateStore.save(
@@ -123,6 +157,7 @@ data class PluginCatalogDocument(
     val sourceId: String,
     val sourceType: PluginSourceType,
     val plugins: List<PluginCatalogItem>,
+    val catalogFormatVersion: Int = 1,
 )
 
 @Serializable
@@ -137,6 +172,10 @@ data class PluginCatalogItem(
     val downloadUrl: String,
     val sha256: String,
     val type: PluginType = PluginType.DEX,
+    val author: String? = null,
+    val homepage: String? = null,
+    val repository: String? = null,
+    val license: String? = null,
 ) {
     fun toEntry(document: PluginCatalogDocument) = PluginCatalogEntry(
         manifest = PluginManifest(
@@ -150,6 +189,10 @@ data class PluginCatalogItem(
             requiredCapabilities = requiredCapabilities,
             description = description,
             type = type,
+            author = author,
+            homepage = homepage,
+            repository = repository,
+            license = license,
         ),
         downloadUrl = downloadUrl,
         sha256 = sha256,
@@ -158,7 +201,44 @@ data class PluginCatalogItem(
 
 object PluginCatalogCodec {
     private val json = Json { ignoreUnknownKeys = true }
-    fun decode(raw: String): PluginCatalogDocument = json.decodeFromString(raw)
+    fun decode(raw: String): PluginCatalogDocument {
+        val root = Json.parseToJsonElement(raw).jsonObject
+        if ("catalogFormatVersion" in root) {
+            val primitive = root.getValue("catalogFormatVersion") as? JsonPrimitive
+                ?: throw IllegalArgumentException("Invalid catalogFormatVersion")
+            require(!primitive.isString) { "catalogFormatVersion must be a JSON integer, not a string" }
+            val parsed = primitive.content.toIntOrNull()
+            require(parsed != null && parsed >= 1 && primitive.content == parsed.toString()) {
+                "Invalid catalogFormatVersion: ${primitive.content}"
+            }
+        }
+        return json.decodeFromString<PluginCatalogDocument>(raw).let { document ->
+            require(document.catalogFormatVersion >= 1) {
+                "Unsupported catalogFormatVersion: ${document.catalogFormatVersion}"
+            }
+            require(document.sourceId.isNotBlank()) { "Catalog sourceId must not be blank" }
+            val normalizedPlugins = document.plugins.map { item ->
+                require(item.id.isNotBlank() && item.name.isNotBlank() && item.version.isNotBlank() && item.entryPoint.isNotBlank()) {
+                    "Catalog item missing required text field"
+                }
+                require(item.contractVersion >= 1) { "Invalid catalog contractVersion: ${item.contractVersion}" }
+                require(item.downloadUrl.isNotBlank()) { "Catalog item downloadUrl must not be blank" }
+                if (item.downloadUrl.contains(":")) {
+                    val lower = item.downloadUrl.trim().lowercase(java.util.Locale.ROOT)
+                    require(lower.startsWith("http://") || lower.startsWith("https://")) {
+                        "Unsafe catalog downloadUrl scheme"
+                    }
+                }
+                item.copy(
+                    author = PluginMetadataValidator.sanitizeOptionalText(item.author),
+                    homepage = PluginMetadataValidator.requireOptionalHttpUrl(item.homepage, "homepage"),
+                    repository = PluginMetadataValidator.requireOptionalHttpUrl(item.repository, "repository"),
+                    license = PluginMetadataValidator.sanitizeOptionalText(item.license),
+                )
+            }
+            document.copy(plugins = normalizedPlugins)
+        }
+    }
 }
 
 /** Installed by the application; transport is public and must never attach business credentials. */
@@ -167,10 +247,13 @@ object PluginPublicTransport {
 }
 
 class PluginCatalogClient {
-    fun fetch(url: String): PluginCatalogDocument {
+    fun fetch(url: String, lanAllowed: Boolean = false): PluginCatalogDocument {
         PluginPublicTransport.get?.let { get ->
             val document = PluginCatalogCodec.decode(get(url).toString(Charsets.UTF_8))
-            return document.copy(plugins = document.plugins.map { it.copy(downloadUrl = URL(URL(url), it.downloadUrl).toString()) })
+            return document.copy(plugins = document.plugins.map {
+                val resolved = URL(URL(url), it.downloadUrl).toString()
+                it.copy(downloadUrl = PluginSourcePolicy.validateResolvedDownloadUrl(url, resolved, lanAllowed))
+            })
         }
         val connection = URL(url).openConnection() as HttpURLConnection
         return try {
@@ -181,7 +264,8 @@ class PluginCatalogClient {
             require(connection.responseCode in 200..299) { "Catalog request failed: ${connection.responseCode}" }
             val document = PluginCatalogCodec.decode(connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
             document.copy(plugins = document.plugins.map { item ->
-                item.copy(downloadUrl = URL(URL(url), item.downloadUrl).toString())
+                val resolved = URL(URL(url), item.downloadUrl).toString()
+                item.copy(downloadUrl = PluginSourcePolicy.validateResolvedDownloadUrl(url, resolved, lanAllowed))
             })
         } finally {
             connection.disconnect()

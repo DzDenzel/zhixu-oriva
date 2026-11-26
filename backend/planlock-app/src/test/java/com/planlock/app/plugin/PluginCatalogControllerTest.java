@@ -157,7 +157,8 @@ class PluginCatalogControllerTest {
                 "third-party", "71DCCF31C42DEE6804AA18200C5BE1E37B077C599E54925FDEC921F16E4BEF67");
         for (String source : List.of("official", "third-party")) {
             var catalog = controller.catalog(source);
-            assertEquals(Set.of("sourceId", "sourceType", "plugins"), catalog.keySet());
+            assertEquals(Set.of("catalogFormatVersion", "sourceId", "sourceType", "plugins"), catalog.keySet());
+            assertEquals(1, catalog.get("catalogFormatVersion"));
             @SuppressWarnings("unchecked")
             var plugins = (List<Map<String, Object>>) catalog.get("plugins");
             assertEquals(source.equals("official") ? 2 : 1, plugins.size());
@@ -188,6 +189,73 @@ class PluginCatalogControllerTest {
                 assertEquals(mapper.valueToTree(item.get("requiredCapabilities")), manifest.get("requiredCapabilities"));
             }
             }
+        }
+    }
+
+    @Test
+    void catalogFormatVersionDefaultsToOneAndPassesThroughPositiveIntegers() throws Exception {
+        Path official = Files.createDirectories(directory.resolve("official"));
+        Files.writeString(official.resolve("sample.plp"), "fixture");
+        PluginCatalogController controller = new PluginCatalogController(directory.toString());
+
+        assertEquals(1, controller.catalog("official").get("catalogFormatVersion"));
+
+        writeCatalog(official, "sample", "sample.plp");
+        assertEquals(1, controller.catalog("official").get("catalogFormatVersion"));
+
+        Files.writeString(official.resolve("catalog.json"), """
+                {"catalogFormatVersion":2,"plugins":[{"artifact":"sample.plp","id":"sample","name":"Sample",
+                "version":"1.0.0","contractVersion":1,"entryPoint":"example.SamplePlugin","requiredCapabilities":[],"description":"sample"}]}
+                """);
+        assertEquals(2, controller.catalog("official").get("catalogFormatVersion"));
+
+        for (String invalidVersion : List.of("0", "-1", "\"1\"", "1.5", "true", "null")) {
+            Files.writeString(official.resolve("catalog.json"), """
+                    {"catalogFormatVersion":%s,"plugins":[]}
+                    """.formatted(invalidVersion));
+            assertThrows(IllegalStateException.class, () -> controller.catalog("official"), invalidVersion);
+        }
+    }
+
+    @Test
+    void optionalMetadataFieldsArePassedThroughAndDangerousUrlsAreRejected() throws Exception {
+        Path official = Files.createDirectories(directory.resolve("official"));
+        Files.writeString(official.resolve("sample.plp"), "fixture");
+        Files.writeString(official.resolve("catalog.json"), """
+                {"catalogFormatVersion":1,"plugins":[{"artifact":"sample.plp","id":"sample","name":"Sample",
+                "version":"1.0.0","contractVersion":1,"entryPoint":"example.SamplePlugin","requiredCapabilities":[],
+                "description":"sample","author":"ORIVA Community","homepage":"https://oriva.example.org/plugins/sample",
+                "repository":"http://git.example.lan/oriva/sample","license":"MIT"}]}
+                """);
+        PluginCatalogController controller = new PluginCatalogController(directory.toString());
+        @SuppressWarnings("unchecked")
+        var plugins = (List<Map<String, Object>>) controller.catalog("official").get("plugins");
+        assertEquals(1, plugins.size());
+        assertEquals("ORIVA Community", plugins.getFirst().get("author"));
+        assertEquals("https://oriva.example.org/plugins/sample", plugins.getFirst().get("homepage"));
+        assertEquals("http://git.example.lan/oriva/sample", plugins.getFirst().get("repository"));
+        assertEquals("MIT", plugins.getFirst().get("license"));
+
+        for (String dangerousUrl : List.of(
+                "javascript:alert(1)",
+                "JAVASCRIPT:alert(1)",
+                "data:text/html,<script>alert(1)</script>",
+                "file:///etc/passwd",
+                "https://user:pass@example.org/plugin",
+                "relative/path")) {
+            Files.writeString(official.resolve("catalog.json"), """
+                    {"plugins":[{"artifact":"sample.plp","id":"sample","name":"Sample","version":"1.0.0",
+                    "contractVersion":1,"entryPoint":"example.SamplePlugin","requiredCapabilities":[],
+                    "description":"sample","homepage":"%s"}]}
+                    """.formatted(dangerousUrl));
+            assertThrows(IllegalStateException.class, () -> controller.catalog("official"), dangerousUrl);
+
+            Files.writeString(official.resolve("catalog.json"), """
+                    {"plugins":[{"artifact":"sample.plp","id":"sample","name":"Sample","version":"1.0.0",
+                    "contractVersion":1,"entryPoint":"example.SamplePlugin","requiredCapabilities":[],
+                    "description":"sample","repository":"%s"}]}
+                    """.formatted(dangerousUrl));
+            assertThrows(IllegalStateException.class, () -> controller.catalog("official"), dangerousUrl);
         }
     }
 

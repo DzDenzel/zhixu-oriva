@@ -51,12 +51,28 @@ class PluginInstaller(
     private val artifactStore: PluginArtifactStore,
     private val tempFileFactory: () -> File,
 ) {
-    fun install(entry: PluginCatalogEntry): PluginInstallResult {
+    fun install(
+        entry: PluginCatalogEntry,
+        safeMode: Boolean = false,
+        customSource: CustomPluginSource? = null,
+    ): PluginInstallResult {
+        if (!PluginSourcePolicy.canDownloadFromSource(entry.manifest.sourceType, safeMode)) {
+            return PluginInstallResult.Failed("安全模式已开启，已禁止下载第三方来源插件")
+        }
+        if (customSource != null) {
+            runCatching { PluginSourcePolicy.validateInstallForCustomSource(customSource, entry) }
+                .onFailure { return PluginInstallResult.Failed(it.message ?: "自定义来源校验失败") }
+        }
         val temp = tempFileFactory()
         return try {
             val bytes = downloader.download(entry.downloadUrl, temp)
             require(bytes > 0L) { "Empty plugin response" }
             val verified = verifier.verify(temp, entry.manifest.sourceId)
+            if (customSource != null) {
+                require(verified.signerFingerprint in customSource.trustedFingerprints) {
+                    "Plugin signature is not trusted for custom source ${customSource.id}"
+                }
+            }
             require(verified.manifest.id == entry.manifest.id) { "Plugin id mismatch" }
             require(verified.manifest.sourceType == entry.manifest.sourceType) { "Plugin source type mismatch" }
             require(verified.sha256.equals(entry.sha256, ignoreCase = true)) { "Plugin checksum mismatch" }
@@ -78,11 +94,13 @@ class PluginInstaller(
 
 class HttpPluginDownloader : PluginDownloader {
     override fun download(url: String, target: File): Long {
+        val safeUrl = PluginMetadataValidator.requireOptionalHttpUrl(url, "downloadUrl")
+            ?: throw IllegalArgumentException("Missing plugin downloadUrl")
         PluginPublicTransport.get?.let { get ->
-            target.writeBytes(get(url))
+            target.writeBytes(get(safeUrl))
             return target.length()
         }
-        val connection = URL(url).openConnection() as HttpURLConnection
+        val connection = URL(safeUrl).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
         connection.readTimeout = 30_000
         connection.instanceFollowRedirects = false
@@ -99,10 +117,12 @@ class HttpPluginDownloader : PluginDownloader {
 
 /** Verifies signed JAR payload entries and matches the signer against the selected source anchor set. */
 class SignedJarPluginPackageVerifier(
-    private val trustedFingerprintsBySource: Map<String, Set<String>>,
+    private val trustedFingerprintsProvider: () -> Map<String, Set<String>>,
 ) : PluginPackageVerifier {
+    constructor(trustedFingerprintsBySource: Map<String, Set<String>>) : this({ trustedFingerprintsBySource })
+
     override fun verify(file: File, expectedSourceId: String): VerifiedPluginPackage {
-        val trusted = trustedFingerprintsBySource[expectedSourceId]
+        val trusted = trustedFingerprintsProvider()[expectedSourceId]
             ?.map { normalizeFingerprint(it) }
             ?.toSet()
             .orEmpty()
