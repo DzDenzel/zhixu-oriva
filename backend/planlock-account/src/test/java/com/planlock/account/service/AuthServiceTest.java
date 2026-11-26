@@ -5,6 +5,7 @@ import com.planlock.account.dto.BackupPasswordResetRequest;
 import com.planlock.account.dto.BackupPasswordSetRequest;
 import com.planlock.account.dto.DeviceRegisterRequest;
 import com.planlock.account.dto.LoginRequest;
+import com.planlock.account.dto.MeResponse;
 import com.planlock.account.dto.RegisterRequest;
 import com.planlock.account.dto.SendCodeRequest;
 import com.planlock.account.entity.Device;
@@ -13,6 +14,7 @@ import com.planlock.account.mapper.DeviceMapper;
 import com.planlock.account.mapper.MergeMapper;
 import com.planlock.account.mapper.UserMapper;
 import com.planlock.common.BusinessException;
+import com.planlock.common.DeploymentMetadataProvider;
 import com.planlock.common.ErrorCode;
 import com.planlock.common.auth.JwtUtil;
 import com.planlock.common.auth.UserContext;
@@ -396,6 +398,74 @@ class AuthServiceTest {
 
         ReflectionTestUtils.setField(authService, "deploymentEnabled", true);
         assertBusinessError(() -> authService.sendCode(sendReq), ErrorCode.INVALID_PARAM);
+    }
+
+    @Test
+    void getCurrentProfileMasksAccountsHandlesGuestAndIsolatesCrossUserDevice() {
+        User owner = new User();
+        owner.setId(10L);
+        owner.setEmail("owner@example.org");
+        owner.setPasswordHash("secret-bcrypt-hash");
+        owner.setBackupPasswordHash("secret-backup-hash");
+        owner.setSecurityAnswerHash("secret-answer-hash");
+        Device webDevice = device(77L, 10L, "web-browser-1");
+        webDevice.setDeviceName("Edge Desktop");
+        webDevice.setPlatform("web");
+
+        when(userMapper.findById(10L)).thenReturn(owner);
+        when(deviceMapper.findById(77L)).thenReturn(webDevice);
+        DeploymentMetadataProvider provider = () -> new DeploymentMetadataProvider.DeploymentMetadata(
+                "我的知序", true, true, "2.2.0");
+        ReflectionTestUtils.setField(authService, "deploymentMetadataProvider", provider);
+
+        MeResponse ownerProfile = authService.getCurrentProfile(10L, 77L);
+        assertThat(ownerProfile.getUserId()).isEqualTo(10L);
+        assertThat(ownerProfile.getDeviceId()).isEqualTo(77L);
+        assertThat(ownerProfile.getAccountMasked()).isEqualTo("ow***r@example.org");
+        assertThat(ownerProfile.getUserType()).isEqualTo("OWNER");
+        assertThat(ownerProfile.isGuest()).isFalse();
+        assertThat(ownerProfile.getDeviceName()).isEqualTo("Edge Desktop");
+        assertThat(ownerProfile.getDevicePlatform()).isEqualTo("web");
+        assertThat(ownerProfile.getInstanceLabel()).isEqualTo("我的知序");
+        assertThat(ownerProfile.isDeploymentEnabled()).isTrue();
+        assertThat(ownerProfile.getVersion()).isEqualTo("2.2.0");
+
+        // Cross-user device must never leak deviceId/name/platform.
+        Device otherUserDevice = device(88L, 999L, "other-device");
+        otherUserDevice.setDeviceName("Other Phone");
+        otherUserDevice.setPlatform("android");
+        when(deviceMapper.findById(88L)).thenReturn(otherUserDevice);
+        MeResponse isolated = authService.getCurrentProfile(10L, 88L);
+        assertThat(isolated.getDeviceId()).isNull();
+        assertThat(isolated.getDeviceName()).isNull();
+        assertThat(isolated.getDevicePlatform()).isNull();
+
+        // Guest user without metadata provider falls back cleanly.
+        ReflectionTestUtils.setField(authService, "deploymentMetadataProvider", null);
+        ReflectionTestUtils.setField(authService, "deploymentEnabled", false);
+        User guest = new User();
+        guest.setId(20L);
+        when(userMapper.findById(20L)).thenReturn(guest);
+        MeResponse guestProfile = authService.getCurrentProfile(20L, null);
+        assertThat(guestProfile.isGuest()).isTrue();
+        assertThat(guestProfile.getUserType()).isEqualTo("GUEST");
+        assertThat(guestProfile.getAccountMasked()).isNull();
+        assertThat(guestProfile.getInstanceLabel()).isNull();
+        assertThat(guestProfile.isDeploymentEnabled()).isFalse();
+        assertThat(guestProfile.getVersion()).isEqualTo("2.2.0");
+
+        // Masking edge cases for phone & short email.
+        assertThat(AuthService.maskAccount("a@b.co", null)).isEqualTo("*@b.co");
+        assertThat(AuthService.maskAccount("ab@b.co", null)).isEqualTo("a*@b.co");
+        assertThat(AuthService.maskAccount("alex@b.co", null)).isEqualTo("a***@b.co");
+        assertThat(AuthService.maskAccount(null, "13800138000")).isEqualTo("138****8000");
+        assertThat(AuthService.maskAccount(null, "123456")).isEqualTo("1****56");
+        assertThat(AuthService.maskAccount(null, "1234")).isEqualTo("****");
+
+        // Missing user fails closed with UNAUTHORIZED.
+        when(userMapper.findById(404L)).thenReturn(null);
+        assertBusinessError(() -> authService.getCurrentProfile(404L, 1L), ErrorCode.UNAUTHORIZED);
+        assertBusinessError(() -> authService.getCurrentProfile(null, 1L), ErrorCode.UNAUTHORIZED);
     }
 
     private static DeviceRegisterRequest deviceReq(String uid, String name, String platform) {

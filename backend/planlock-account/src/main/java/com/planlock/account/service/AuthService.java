@@ -5,6 +5,7 @@ import com.planlock.account.dto.BackupPasswordResetRequest;
 import com.planlock.account.dto.BackupPasswordSetRequest;
 import com.planlock.account.dto.DeviceRegisterRequest;
 import com.planlock.account.dto.LoginRequest;
+import com.planlock.account.dto.MeResponse;
 import com.planlock.account.dto.RegisterRequest;
 import com.planlock.account.dto.SendCodeRequest;
 import com.planlock.account.entity.Device;
@@ -13,9 +14,11 @@ import com.planlock.account.mapper.DeviceMapper;
 import com.planlock.account.mapper.MergeMapper;
 import com.planlock.account.mapper.UserMapper;
 import com.planlock.common.BusinessException;
+import com.planlock.common.DeploymentMetadataProvider;
 import com.planlock.common.ErrorCode;
 import com.planlock.common.auth.JwtUtil;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,6 +47,97 @@ public class AuthService {
 
     @Value("${planlock.deployment.enabled:false}")
     private boolean deploymentEnabled;
+
+    @Value("${planlock.version:2.2.0}")
+    private String appVersion = "2.2.0";
+
+    @Autowired(required = false)
+    private DeploymentMetadataProvider deploymentMetadataProvider;
+
+    public MeResponse getCurrentProfile(Long userId, Long deviceId) {
+        if (userId == null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
+        }
+        User user = userMapper.findById(userId);
+        if (user == null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
+        }
+        boolean guest = !hasText(user.getPhone()) && !hasText(user.getEmail());
+        Long resolvedDeviceId = deviceId;
+        String deviceName = null;
+        String devicePlatform = null;
+        if (deviceId != null) {
+            Device device = deviceMapper.findById(deviceId);
+            if (device != null) {
+                if (userId.equals(device.getUserId())) {
+                    deviceName = device.getDeviceName();
+                    devicePlatform = device.getPlatform();
+                } else {
+                    // Never expose cross-user device metadata if JWT device claim is stale/mismatched.
+                    resolvedDeviceId = null;
+                }
+            }
+        }
+        String instanceLabel = null;
+        boolean effectiveDeploymentEnabled = this.deploymentEnabled;
+        String version = hasText(this.appVersion) ? this.appVersion : "2.2.0";
+        if (deploymentMetadataProvider != null) {
+            DeploymentMetadataProvider.DeploymentMetadata metadata = deploymentMetadataProvider.getMetadata();
+            if (metadata != null) {
+                instanceLabel = metadata.instanceLabel();
+                effectiveDeploymentEnabled = metadata.deploymentEnabled();
+                if (hasText(metadata.version())) {
+                    version = metadata.version();
+                }
+            }
+        }
+        String userType = guest ? "GUEST" : (effectiveDeploymentEnabled ? "OWNER" : "REGISTERED");
+        return MeResponse.builder()
+                .userId(user.getId())
+                .deviceId(resolvedDeviceId)
+                .accountMasked(maskAccount(user.getEmail(), user.getPhone()))
+                .userType(userType)
+                .guest(guest)
+                .deviceName(deviceName)
+                .devicePlatform(devicePlatform)
+                .instanceLabel(instanceLabel)
+                .deploymentEnabled(effectiveDeploymentEnabled)
+                .version(version)
+                .build();
+    }
+
+    static String maskAccount(String email, String phone) {
+        if (email != null && !email.isBlank()) {
+            String trimmed = email.trim();
+            int at = trimmed.lastIndexOf('@');
+            if (at <= 0 || at == trimmed.length() - 1) {
+                return "***";
+            }
+            String local = trimmed.substring(0, at);
+            String domain = trimmed.substring(at);
+            if (local.length() <= 1) {
+                return "*" + domain;
+            }
+            if (local.length() == 2) {
+                return local.charAt(0) + "*" + domain;
+            }
+            if (local.length() <= 4) {
+                return local.charAt(0) + "***" + domain;
+            }
+            return local.substring(0, 2) + "***" + local.charAt(local.length() - 1) + domain;
+        }
+        if (phone != null && !phone.isBlank()) {
+            String trimmed = phone.trim();
+            if (trimmed.length() <= 4) {
+                return "****";
+            }
+            if (trimmed.length() <= 7) {
+                return trimmed.substring(0, 1) + "****" + trimmed.substring(trimmed.length() - 2);
+            }
+            return trimmed.substring(0, 3) + "****" + trimmed.substring(trimmed.length() - 4);
+        }
+        return null;
+    }
 
     @Transactional
     public AuthResponse deviceRegister(DeviceRegisterRequest req) {

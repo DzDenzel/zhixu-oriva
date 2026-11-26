@@ -16,6 +16,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * 全局异常处理：所有异常统一转换为 {@link ApiResponse}，且严禁将用户正文/请求载荷写入日志。
@@ -51,6 +53,13 @@ public class GlobalExceptionHandler {
         String category = JsonBodyLimitFilter.hasPayloadLimitCause(e) ? "payload_limit" : "bad_payload";
         log.warn("malformed request: category={}, exception={}, path={}", category, e.getClass().getSimpleName(), currentPath());
         return ResponseEntity.ok(ApiResponse.error(ErrorCode.INVALID_PARAM.getCode(), ErrorCode.INVALID_PARAM.getDefaultMessage()));
+    }
+
+    @ExceptionHandler({NoHandlerFoundException.class, NoResourceFoundException.class})
+    public ResponseEntity<ApiResponse<Void>> handleNotFound(Exception e) {
+        log.debug("resource not found: exception={}, path={}", e.getClass().getSimpleName(), currentPath());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiResponse.error(ErrorCode.NOT_FOUND.getCode(), ErrorCode.NOT_FOUND.getDefaultMessage()));
     }
 
     @ExceptionHandler(Exception.class)
