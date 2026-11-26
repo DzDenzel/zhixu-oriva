@@ -16,8 +16,8 @@ android {
         applicationId = providers.gradleProperty("qaApplicationId").getOrElse("com.planlock.app")
         minSdk = 24
         targetSdk = 35
-        versionCode = 6
-        versionName = "2.1.3"
+        versionCode = 7
+        versionName = "2.2.0"
     }
 
     buildTypes {

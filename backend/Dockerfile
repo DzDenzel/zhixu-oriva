@@ -106,7 +106,7 @@ RUN set -eu; \
     javac -d /health /src/docker/Healthcheck.java
 
 FROM eclipse-temurin:21.0.8_9-jre-jammy
-ARG VERSION=2.1.3
+ARG VERSION=2.2.0
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="知序 ORIVA backend" \
       org.opencontainers.image.source="https://github.com/DzDenzel/zhixu-oriva" \
