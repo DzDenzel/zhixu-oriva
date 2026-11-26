@@ -1,5 +1,8 @@
 package com.planlock.sync.dto;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.planlock.common.web.BoundedList;
+import com.planlock.common.web.BoundedListDeserializer;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -14,12 +17,25 @@ import java.util.List;
 @Data
 public class SyncPushRequest {
 
+    @BoundedList(max = 500)
+    @JsonDeserialize(using = BoundedListDeserializer.class)
     private List<PlanItem> plans;
+
+    @BoundedList(max = 500)
+    @JsonDeserialize(using = BoundedListDeserializer.class)
     private List<StrategyItem> strategies;
+
+    @BoundedList(max = 500)
+    @JsonDeserialize(using = BoundedListDeserializer.class)
     private List<ScheduleItem> schedules;
+
+    @BoundedList(max = 500)
+    @JsonDeserialize(using = BoundedListDeserializer.class)
     private List<PlanTypeItem> planTypes;
 
     @Valid
+    @BoundedList(max = 500)
+    @JsonDeserialize(using = BoundedListDeserializer.class)
     @Size(max = 500, message = "单次同步日常记录不能超过 500 条")
     private List<JournalItem> journals;
 

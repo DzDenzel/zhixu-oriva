@@ -247,8 +247,10 @@ fun JournalScreen(
     val authState by TokenStore.state.collectAsState()
     val currentScope = authState.dataScope
     val localRevision by store.localRevision.collectAsState()
-    val confirmations by store.observeConfirmations().collectAsState(initial = emptyList())
-    val journalConfirmations = remember(confirmations) { confirmations.filter { it.kind == "journal" } }
+    val confirmations by remember(store, currentScope) { store.observeConfirmations() }.collectAsState(initial = emptyList())
+    val journalConfirmations = remember(confirmations, currentScope) {
+        filterConfirmationsForScope(confirmations, currentScope, kind = "journal")
+    }
     val scope = rememberCoroutineScope()
 
     var journalState by remember(currentScope) {
@@ -308,7 +310,17 @@ fun JournalScreen(
         (JournalRules.PRESET_MOODS + entries.mapNotNull { it.mood?.trim()?.takeIf { m -> m.isNotEmpty() } }).distinct()
     }
 
-    selectedConfirmation?.let { pendingConfirmation ->
+    LaunchedEffect(journalConfirmations) {
+        selectedConfirmation?.let { selected ->
+            val current = journalConfirmations.firstOrNull { it.key == selected.key }
+            if (current != selected) {
+                selectedConfirmation = null
+                if (current != null) conflictError = "对方又修改了这条记录，请重新打开确认。"
+            }
+        }
+    }
+
+    selectedConfirmation?.takeIf { isConfirmationInScope(it, currentScope, expectedKind = "journal") }?.let { pendingConfirmation ->
         SyncConfirmationDialog(
             confirmation = pendingConfirmation,
             busy = resolvingConflict,
@@ -316,18 +328,29 @@ fun JournalScreen(
             onDismiss = { if (!resolvingConflict) { selectedConfirmation = null; conflictError = null } },
             onResolve = { keepMine ->
                 if (!resolvingConflict) {
-                    resolvingConflict = true
-                    conflictError = null
-                    scope.launch {
-                        try {
-                            sync.resolveConfirmation(pendingConfirmation, keepMine)
-                            selectedConfirmation = null
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
-                            conflictError = "同步确认失败，请重试"
-                        } finally {
-                            resolvingConflict = false
+                    val liveScope = TokenStore.state.value.dataScope
+                    if (!isConfirmationInScope(pendingConfirmation, liveScope, expectedKind = "journal")) {
+                        selectedConfirmation = null
+                        conflictError = null
+                        onNotice("账号已切换，请重新确认")
+                    } else {
+                        resolvingConflict = true
+                        conflictError = null
+                        scope.launch {
+                            try {
+                                val confirmScope = TokenStore.state.value.dataScope
+                                check(isConfirmationInScope(pendingConfirmation, confirmScope, expectedKind = "journal")) {
+                                    "scope_changed"
+                                }
+                                sync.resolveConfirmation(pendingConfirmation, keepMine)
+                                selectedConfirmation = null
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                conflictError = "同步确认失败，请重试"
+                            } finally {
+                                resolvingConflict = false
+                            }
                         }
                     }
                 }
@@ -511,7 +534,12 @@ fun JournalScreen(
                                 SyncConfirmationStatus(
                                     confirmations = journalConfirmations,
                                     bulkDeletion = null,
-                                    onSelect = { selectedConfirmation = it },
+                                    onSelect = { selected ->
+                                        if (isConfirmationInScope(selected, TokenStore.state.value.dataScope, expectedKind = "journal")) {
+                                            conflictError = null
+                                            selectedConfirmation = selected
+                                        }
+                                    },
                                     onBulkSelect = {},
                                 )
                             }

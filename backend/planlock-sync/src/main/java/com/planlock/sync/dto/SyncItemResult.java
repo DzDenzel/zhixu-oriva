@@ -21,4 +21,5 @@ public class SyncItemResult {
     private Long id;
     private Long version;
     private String clientId;
+    private Integer status;
 }

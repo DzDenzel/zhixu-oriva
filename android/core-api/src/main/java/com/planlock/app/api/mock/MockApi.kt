@@ -23,6 +23,8 @@ import com.planlock.app.api.dto.SendCodeRequest
 import com.planlock.app.api.dto.StatsResponse
 import com.planlock.app.api.dto.StrategyDto
 import com.planlock.app.api.dto.StrategyUpsertRequest
+import com.planlock.app.api.dto.SyncItemResult
+import com.planlock.app.api.dto.SyncJournalView
 import com.planlock.app.api.dto.SyncPullResponse
 import com.planlock.app.api.dto.SyncPushRequest
 import com.planlock.app.api.dto.SyncPushResponse
@@ -129,10 +131,95 @@ class MockApi : PlanLockApi {
         ApiResponse(0, "ok", Unit)
 
     override suspend fun syncPull(): ApiResponse<SyncPullResponse> =
-        ApiResponse(0, "ok", SyncPullResponse())
+        ApiResponse(
+            0,
+            "ok",
+            SyncPullResponse(
+                plans = emptyList(),
+                schedules = emptyList(),
+                strategies = emptyList(),
+                journals = journalItems.map {
+                    SyncJournalView(
+                        id = it.id,
+                        userId = it.userId,
+                        clientId = it.clientId,
+                        entryDate = it.entryDate,
+                        mood = it.mood,
+                        tags = it.tags,
+                        content = it.content,
+                        status = it.status,
+                        version = it.version,
+                        createdAt = it.createdAt,
+                        updatedAt = it.updatedAt,
+                    )
+                },
+            ),
+        )
 
-    override suspend fun syncPush(req: SyncPushRequest): ApiResponse<SyncPushResponse> =
-        ApiResponse(0, "ok", SyncPushResponse(emptyList()))
+    override suspend fun syncPush(req: SyncPushRequest): ApiResponse<SyncPushResponse> {
+        val results = mutableListOf<SyncItemResult>()
+        req.journals?.forEach { item ->
+            val key = "journal:${item.id}"
+            if (item.id == null) {
+                val existing = item.clientId?.let { cid -> journalItems.firstOrNull { it.userId == 1L && it.clientId == cid } }
+                val target = if (existing != null) {
+                    // Preserve original status on clientId duplicate-key idempotency and echo authoritative status.
+                    existing
+                } else {
+                    JournalDto(
+                        id = ++nextJournalId,
+                        userId = 1L,
+                        clientId = item.clientId,
+                        entryDate = item.entryDate,
+                        mood = JournalRules.normalizeMood(item.mood),
+                        tags = JournalRules.normalizeTags(item.tags),
+                        content = JournalRules.normalizeContent(item.content),
+                        status = item.status,
+                        version = 0L,
+                    ).also { journalItems += it }
+                }
+                results += SyncItemResult(
+                    key = key,
+                    ok = true,
+                    code = 0,
+                    message = "ok",
+                    id = target.id,
+                    version = target.version,
+                    clientId = target.clientId,
+                    status = target.status,
+                )
+            } else {
+                val old = journalItems.firstOrNull { it.id == item.id && it.userId == 1L }
+                when {
+                    old == null -> results += SyncItemResult(key = key, ok = false, code = 1003, message = "日常记录不存在", clientId = item.clientId)
+                    old.version != item.baseVersion -> results += SyncItemResult(key = key, ok = false, code = 1409, message = "版本冲突", clientId = item.clientId)
+                    else -> {
+                        val updated = old.copy(
+                            entryDate = item.entryDate,
+                            mood = JournalRules.normalizeMood(item.mood),
+                            tags = JournalRules.normalizeTags(item.tags),
+                            content = JournalRules.normalizeContent(item.content),
+                            status = item.status,
+                            version = old.version + 1L,
+                        )
+                        journalItems.removeAll { it.id == item.id }
+                        journalItems += updated
+                        results += SyncItemResult(
+                            key = key,
+                            ok = true,
+                            code = 0,
+                            message = "ok",
+                            id = updated.id,
+                            version = updated.version,
+                            clientId = updated.clientId,
+                            status = updated.status,
+                        )
+                    }
+                }
+            }
+        }
+        return ApiResponse(0, "ok", SyncPushResponse(results))
+    }
 
     override suspend fun journals(from: String?, to: String?, mood: String?): ApiResponse<List<JournalDto>> =
         ApiResponse(

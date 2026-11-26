@@ -15,6 +15,25 @@ internal data class ConfirmationPresentation(
 
 internal fun SyncConfirmation.affectedPlanId(): Long? = if (kind == "plan") id else null
 
+internal fun filterConfirmationsForScope(
+    confirmations: List<SyncConfirmation>,
+    currentScope: String,
+    kind: String? = null,
+): List<SyncConfirmation> = confirmations.filter { item ->
+    currentScope.isNotEmpty() &&
+        item.scope == currentScope &&
+        (kind == null || item.kind == kind)
+}
+
+internal fun isConfirmationInScope(
+    confirmation: SyncConfirmation?,
+    currentScope: String,
+    expectedKind: String? = null,
+): Boolean = confirmation != null &&
+    currentScope.isNotEmpty() &&
+    confirmation.scope == currentScope &&
+    (expectedKind == null || confirmation.kind == expectedKind)
+
 /** UI-only projection: neither side is mutated or silently preferred while the user compares it. */
 internal fun SyncConfirmation.presentation(): ConfirmationPresentation {
     if (kind == "journal") {

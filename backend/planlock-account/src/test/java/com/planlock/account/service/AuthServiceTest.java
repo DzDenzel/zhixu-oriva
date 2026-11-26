@@ -343,6 +343,7 @@ class AuthServiceTest {
         when(mergeMapper.transferPlans(5L, 10L)).thenReturn(3);
         when(mergeMapper.transferPlanTypes(5L, 10L)).thenReturn(2);
         when(mergeMapper.transferSchedules(5L, 10L)).thenReturn(4);
+        when(mergeMapper.rekeyConflictingGuestJournals(5L, 10L)).thenReturn(1);
         when(mergeMapper.transferJournals(5L, 10L)).thenReturn(5);
 
         Map<String, Long> merged = authService.merge(10L, 5L, validGuestToken);
@@ -351,8 +352,10 @@ class AuthServiceTest {
                 .containsEntry("mergedPlans", 3L)
                 .containsEntry("mergedPlanTypes", 2L)
                 .containsEntry("mergedSchedules", 4L)
-                .containsEntry("mergedJournals", 5L);
+                .containsEntry("mergedJournals", 5L)
+                .containsEntry("rekeyedJournals", 1L);
         verify(mergeMapper).clearGuestPlanTypes(5L);
+        verify(mergeMapper).rekeyConflictingGuestJournals(5L, 10L);
         verify(mergeMapper).clearDuplicateGuestJournals(5L, 10L);
         verify(mergeMapper).reassignDeletedPlanTypes(10L);
     }

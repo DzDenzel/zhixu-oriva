@@ -1,5 +1,8 @@
 package com.planlock.common;
 
+import com.planlock.common.web.JsonBodyLimitFilter;
+import com.planlock.common.web.JsonCollectionTooLargeException;
+import com.planlock.common.web.JsonPayloadTooLargeException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -40,10 +43,13 @@ public class GlobalExceptionHandler {
     @ExceptionHandler({
             HttpMessageNotReadableException.class,
             MethodArgumentTypeMismatchException.class,
-            MissingServletRequestParameterException.class
+            MissingServletRequestParameterException.class,
+            JsonPayloadTooLargeException.class,
+            JsonCollectionTooLargeException.class
     })
     public ResponseEntity<ApiResponse<Void>> handleBadPayload(Exception e) {
-        log.warn("malformed request: category=bad_payload, exception={}, path={}", e.getClass().getSimpleName(), currentPath());
+        String category = JsonBodyLimitFilter.hasPayloadLimitCause(e) ? "payload_limit" : "bad_payload";
+        log.warn("malformed request: category={}, exception={}, path={}", category, e.getClass().getSimpleName(), currentPath());
         return ResponseEntity.ok(ApiResponse.error(ErrorCode.INVALID_PARAM.getCode(), ErrorCode.INVALID_PARAM.getDefaultMessage()));
     }
 

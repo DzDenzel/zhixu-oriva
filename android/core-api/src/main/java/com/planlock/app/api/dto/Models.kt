@@ -474,7 +474,8 @@ data class SyncItemResult(
     val message: String = "",
     val id: Long? = null,
     val version: Long? = null,
-    val clientId: String? = null
+    val clientId: String? = null,
+    val status: Int? = null,
 )
 
 @Serializable

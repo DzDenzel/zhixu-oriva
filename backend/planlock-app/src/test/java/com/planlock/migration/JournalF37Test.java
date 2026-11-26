@@ -111,19 +111,54 @@ class JournalF37Test {
         assertThat(json.readTree(deleteForeign.body()).path("code").asInt()).isEqualTo(ErrorCode.NOT_FOUND.getCode());
         assertThat(json.readTree(deleteMissing.body()).path("code").asInt()).isEqualTo(ErrorCode.NOT_FOUND.getCode());
 
-        // Guest merge transfers non-colliding journals and cleans up clientId duplicates safely
+        // Scenario B: exact equivalent clientId collides -> guest duplicate cleaned cleanly
         var dup = new JournalUpsertRequest();
         dup.setClientId("shared-cid");
         dup.setEntryDate(LocalDate.of(2026, 11, 26));
+        dup.setMood("平静");
+        dup.setTags(List.of("测试"));
         dup.setContent("游客重复条目");
         journals.create(501L, dup);
         journals.create(503L, dup);
 
+        // Scenario A1: same clientId, divergent content -> lossless rekey + transfer
+        var guestDivergent = new JournalUpsertRequest();
+        guestDivergent.setClientId("conflict-content-cid");
+        guestDivergent.setEntryDate(LocalDate.of(2026, 11, 26));
+        guestDivergent.setContent("游客版本正文");
+        journals.create(501L, guestDivergent);
+        var ownerDivergent = new JournalUpsertRequest();
+        ownerDivergent.setClientId("conflict-content-cid");
+        ownerDivergent.setEntryDate(LocalDate.of(2026, 11, 26));
+        ownerDivergent.setContent("账号版本正文");
+        journals.create(503L, ownerDivergent);
+
+        // Scenario A2: same clientId, target soft-deleted (status=0) vs guest active (status=1) -> lossless rekey + preserve active guest row
+        var guestActive = new JournalUpsertRequest();
+        guestActive.setClientId("conflict-status-cid");
+        guestActive.setEntryDate(LocalDate.of(2026, 11, 26));
+        guestActive.setContent("同一clientId内容");
+        journals.create(501L, guestActive);
+        var targetToDelete = new JournalUpsertRequest();
+        targetToDelete.setClientId("conflict-status-cid");
+        targetToDelete.setEntryDate(LocalDate.of(2026, 11, 26));
+        targetToDelete.setContent("同一clientId内容");
+        var targetCreated = journals.create(503L, targetToDelete);
+        journals.delete(503L, targetCreated.getId(), targetCreated.getVersion());
+
+        int rekeyed = mergeMapper.rekeyConflictingGuestJournals(501L, 503L);
         int transferred = mergeMapper.transferJournals(501L, 503L);
         mergeMapper.clearDuplicateGuestJournals(501L, 503L);
-        assertThat(transferred).isEqualTo(1);
+        assertThat(rekeyed).isEqualTo(2);
+        assertThat(transferred).isEqualTo(3);
         assertThat(journals.list(501L, null, null, null)).isEmpty();
-        assertThat(journals.list(503L, null, null, null)).hasSize(2);
+        var ownerJournals = journals.list(503L, null, null, null);
+        assertThat(ownerJournals).extracting("content")
+                .contains("F37 第一条日记", "游客重复条目", "游客版本正文", "账号版本正文", "同一clientId内容");
+
+        // Idempotent repeat merge returns 0
+        assertThat(mergeMapper.rekeyConflictingGuestJournals(501L, 503L)).isZero();
+        assertThat(mergeMapper.transferJournals(501L, 503L)).isZero();
     }
 
     @Test

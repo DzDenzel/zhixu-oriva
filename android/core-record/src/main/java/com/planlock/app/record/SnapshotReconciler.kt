@@ -20,13 +20,26 @@ internal class SnapshotReconciler(
     private val schedules get() = store.scheduleDao
     private val journals get() = store.journalDao
 
-    fun observeConfirmations() = pending.observeConfirmations().map { rows ->
-        rows.filter { it.type == CONFLICT }.map { Json.decodeFromString<SyncConfirmation>(it.payload.orEmpty()) }
+    private fun decodeConfirmation(row: PendingRecordEntity): SyncConfirmation {
+        val parsed = Json.decodeFromString<SyncConfirmation>(row.payload.orEmpty())
+        return if (parsed.scope == row.scope) parsed else parsed.copy(scope = row.scope)
+    }
+
+    fun observeConfirmations(expectedScope: String = store.dataScope()) = pending.observeConfirmations().map { rows ->
+        rows.filter { it.type == CONFLICT && it.scope == expectedScope }
+            .map { decodeConfirmation(it) }
+            .filter { it.scope == expectedScope }
     }
     fun observeBulkDeletion() = pending.observeConfirmations().map { rows ->
         rows.firstOrNull { it.type == BULK }?.let { Json.decodeFromString<BulkDeletion>(it.payload.orEmpty()) }
     }
-    suspend fun confirmations() = pending.all().filter { it.type == CONFLICT }.map { Json.decodeFromString<SyncConfirmation>(it.payload.orEmpty()) }
+    suspend fun confirmations(): List<SyncConfirmation> {
+        val expectedScope = store.dataScope()
+        return pending.all()
+            .filter { it.type == CONFLICT && it.scope == expectedScope }
+            .map { decodeConfirmation(it) }
+            .filter { it.scope == expectedScope }
+    }
     suspend fun bulkDeletion() = pending.byClientId(BULK)?.let { Json.decodeFromString<BulkDeletion>(it.payload.orEmpty()) }
 
     private suspend fun metadata(type: String, key: String, payload: String) {
@@ -36,6 +49,7 @@ internal class SnapshotReconciler(
     }
 
     private suspend fun capture(kind: String, id: Long, remote: SyncPullResponse): SyncConfirmation {
+        val rowScope = store.dataScope()
         val intents = pending.all().filter { it.syncEntityKey() == "$kind:$id" }
         val last = intents.lastOrNull()
         if (kind == "journal") {
@@ -48,6 +62,7 @@ internal class SnapshotReconciler(
                 localJournal = journals.byId(id) ?: archived?.let { null },
                 remoteJournal = remote.journals?.firstOrNull { it.id == id },
                 intentIds = intents.map { it.id },
+                scope = rowScope,
             )
         }
         val deleting = last?.type in setOf("plan_delete", "schedule_delete")
@@ -57,7 +72,8 @@ internal class SnapshotReconciler(
             schedules.byId(id) ?: archive?.schedule,
             remote.plans?.firstOrNull { it.id == id }, remote.strategies?.firstOrNull { it.planId == id },
             remote.schedules?.firstOrNull { it.id == id }, intents.map { it.id },
-            intents.any { it.type == "strategy_upsert" } || deleting && archive?.strategy != null)
+            intents.any { it.type == "strategy_upsert" } || deleting && archive?.strategy != null,
+            scope = rowScope)
     }
 
     suspend fun markConflict(row: PendingRecordEntity, remote: SyncPullResponse) = store.scopedTransaction {
@@ -72,12 +88,11 @@ internal class SnapshotReconciler(
         remotePlans: List<SyncPlanView>,
         remoteStrategies: List<SyncStrategyView>,
         remoteSchedules: List<SyncScheduleView>,
-        remoteJournals: List<SyncJournalView> = emptyList(),
+        remoteJournals: List<SyncJournalView>? = emptyList(),
     ) = store.scopedTransaction {
         val remote = SyncPullResponse(remotePlans, remoteSchedules, remoteStrategies, journals = remoteJournals)
         val planIds = remotePlans.map { it.id }.toSet()
         val scheduleIds = remoteSchedules.map { it.id }.toSet()
-        val activeJournalIds = remoteJournals.filter { it.status == 1 }.map { it.id }.toSet()
         // A complete pull is also the acknowledgement for a deletion whose response was lost.
         pending.all().filter { it.type in setOf("plan_delete", "schedule_delete") }.forEach { row ->
             val key = requireNotNull(row.syncEntityKey())
@@ -93,21 +108,77 @@ internal class SnapshotReconciler(
             val id = key.substringAfter(':').toLong()
             if (id > 0 && id !in (if (key.startsWith("plan:")) planIds else scheduleIds)) markConflict(row, remote)
         }
-        pending.all().filter { it.type == "journal_upsert" }.forEach { row ->
-            val queued = Json.decodeFromString<JournalPendingUpsert>(row.payload.orEmpty())
-            if (queued.localId > 0) {
-                if (queued.item.status == 0 && queued.localId !in activeJournalIds) {
-                    val key = requireNotNull(row.syncEntityKey())
-                    pending.delete(pending.all().filter { it.syncEntityKey() == key && it.id <= row.id }.map { it.id })
-                    pending.deleteByClientId("conflict:$key")
-                } else if (queued.item.status == 1 && queued.localId !in activeJournalIds) {
-                    markConflict(row, remote)
+        if (remoteJournals != null) {
+            val remoteJournalIds = remoteJournals.map { it.id }.toSet()
+            val activeJournalIds = remoteJournals.filter { it.status == 1 }.map { it.id }.toSet()
+            val remoteJournalByClientId = remoteJournals
+                .mapNotNull { entry -> entry.clientId?.takeIf { it.isNotBlank() }?.let { it to entry } }
+                .toMap()
+            pending.all().filter { it.type == "journal_upsert" }.forEach { row ->
+                val queued = Json.decodeFromString<JournalPendingUpsert>(row.payload.orEmpty())
+                if (queued.localId > 0) {
+                    if (queued.localId !in remoteJournalIds) {
+                        val targetRemote = queued.item.clientId?.let { remoteJournalByClientId[it] }
+                        if (targetRemote != null) {
+                            if (queued.item.status == 0 && targetRemote.status == 0) {
+                                val key = requireNotNull(row.syncEntityKey())
+                                pending.delete(pending.all().filter { it.syncEntityKey() == key && it.id <= row.id }.map { it.id })
+                                pending.deleteByClientId("conflict:$key")
+                                journals.delete(queued.localId)
+                            } else {
+                                val oldKey = requireNotNull(row.syncEntityKey())
+                                val localSnapshot = journals.byId(queued.localId)
+                                journals.delete(queued.localId)
+                                val baselineMatches = queued.baseVersion == targetRemote.version
+                                val sameState = sameJournalContent(queued.item, targetRemote)
+                                if (localSnapshot != null) {
+                                    journals.upsertAll(
+                                        listOf(
+                                            localSnapshot.copy(
+                                                id = targetRemote.id,
+                                                version = if (sameState) targetRemote.version else localSnapshot.version,
+                                            )
+                                        )
+                                    )
+                                }
+                                pending.deleteByClientId("conflict:$oldKey")
+                                if (!baselineMatches && sameState) {
+                                    pending.delete(listOf(row.id))
+                                } else {
+                                    val reboundQueued = queued.copy(
+                                        localId = targetRemote.id,
+                                        baseVersion = targetRemote.version,
+                                        item = queued.item.copy(id = targetRemote.id, baseVersion = targetRemote.version),
+                                    )
+                                    val reboundRow = row.copy(payload = Json.encodeToString(reboundQueued))
+                                    pending.update(reboundRow)
+                                    if (!baselineMatches) {
+                                        markConflict(reboundRow, remote)
+                                    }
+                                }
+                            }
+                        } else if (queued.item.status == 0) {
+                            val key = requireNotNull(row.syncEntityKey())
+                            pending.delete(pending.all().filter { it.syncEntityKey() == key && it.id <= row.id }.map { it.id })
+                            pending.deleteByClientId("conflict:$key")
+                        } else {
+                            markConflict(row, remote)
+                        }
+                    } else if (queued.item.status == 0 && queued.localId !in activeJournalIds) {
+                        val key = requireNotNull(row.syncEntityKey())
+                        pending.delete(pending.all().filter { it.syncEntityKey() == key && it.id <= row.id }.map { it.id })
+                        pending.deleteByClientId("conflict:$key")
+                    } else if (queued.item.status == 1 && queued.localId !in activeJournalIds) {
+                        markConflict(row, remote)
+                    }
                 }
             }
         }
         // Refresh the comparison atomically, including edits made while a dialog was open.
         confirmations().forEach { old ->
-            metadata(CONFLICT, "conflict:${old.key}", Json.encodeToString(capture(old.kind, old.id, remote)))
+            if (old.kind != "journal" || remoteJournals != null) {
+                metadata(CONFLICT, "conflict:${old.key}", Json.encodeToString(capture(old.kind, old.id, remote)))
+            }
         }
         val rows = pending.all()
         val protection = SnapshotProtection.from(rows)
@@ -136,12 +207,18 @@ internal class SnapshotReconciler(
         strategies.all().filter { it.planId > 0 && it.planId !in protection.plans && it.planId !in protectedRemotePlans && it.planId !in deferredPlans && it.planId !in remoteStrategyPlans }.forEach { strategies.deleteByPlanId(it.planId) }
         strategies.upsertRemote(remoteStrategies.filterNot { it.planId in protection.plans || it.planId in protectedRemotePlans }.map { it.toSnapshot() })
         schedules.upsertAll(remoteSchedules.filterNot { it.id in protection.schedules || it.clientId != null && it.clientId in scheduleKeys }.map { it.toSnapshot() })
-        val journalKeys = rows.filter { it.type == "journal_upsert" }
-            .mapNotNull { Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).item.clientId }
-            .toSet()
-        journals.upsertAll(remoteJournals.filterNot {
-            it.id in protection.journals || (it.clientId != null && it.clientId in journalKeys)
-        }.map { it.toSnapshot() })
+        if (remoteJournals != null) {
+            val remoteJournalIds = remoteJournals.map { it.id }.toSet()
+            journals.all()
+                .filter { it.id > 0 && it.id !in remoteJournalIds && it.id !in protection.journals }
+                .forEach { journals.delete(it.id) }
+            val journalKeys = rows.filter { it.type == "journal_upsert" }
+                .mapNotNull { Json.decodeFromString<JournalPendingUpsert>(it.payload.orEmpty()).item.clientId }
+                .toSet()
+            journals.upsertAll(remoteJournals.filterNot {
+                it.id in protection.journals || (it.clientId != null && it.clientId in journalKeys)
+            }.map { it.toSnapshot() })
+        }
     }
 
     private suspend fun removePlan(id: Long) {
@@ -166,8 +243,13 @@ internal class SnapshotReconciler(
 
     suspend fun resolve(expected: SyncConfirmation, keepMine: Boolean) {
         val resolved = store.scopedTransaction {
+            val activeScope = store.dataScope()
+            check(expected.scope.isNotEmpty() && expected.scope == activeScope) {
+                "账号已变化，请重新查看冲突记录"
+            }
             val row = pending.byClientId("conflict:${expected.key}") ?: return@scopedTransaction false
-            val old = Json.decodeFromString<SyncConfirmation>(row.payload.orEmpty())
+            if (row.scope != activeScope) return@scopedTransaction false
+            val old = decodeConfirmation(row)
             val remote = SyncPullResponse(
                 listOfNotNull(old.remotePlan),
                 listOfNotNull(old.remoteSchedule),
@@ -175,7 +257,7 @@ internal class SnapshotReconciler(
                 journals = listOfNotNull(old.remoteJournal),
             )
             val current = capture(old.kind, old.id, remote)
-            if (old != expected || current != old) {
+            if (old.scope != activeScope || old != expected || current != old) {
                 metadata(CONFLICT, row.clientId, Json.encodeToString(current))
                 return@scopedTransaction false
             }
@@ -286,4 +368,11 @@ internal fun SyncJournalView.toSnapshot() = JournalSnapshotEntity(
     createdAt = createdAt,
     updatedAt = updatedAt,
 )
+private fun sameJournalContent(item: SyncJournalItem, remote: SyncJournalView): Boolean =
+    item.entryDate == remote.entryDate &&
+        item.mood == remote.mood &&
+        item.tags == remote.tags &&
+        item.content == remote.content &&
+        item.status == remote.status
+
 internal fun ScheduleSnapshotEntity.toRequest() = ScheduleUpsertRequest(title,startDate,startTime,endDate,endTime,allDay,location,note,remindAdvanceMin,repeatRule,linkedPlanId,tzId,locationLat=locationLat,locationLon=locationLon)

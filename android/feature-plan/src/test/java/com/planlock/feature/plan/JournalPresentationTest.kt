@@ -123,4 +123,30 @@ class JournalPresentationTest {
         val ok = reader.read(1L, "2026-11-26", "instance\n1")
         assertEquals(listOf(10L), ok.data?.journals?.map { it.id })
     }
+
+    @Test
+    fun `confirmation scope helpers reject delayed emissions across accounts guests and instances`() {
+        val scopeA = "instanceA\n1"
+        val scopeB = "instanceB\n1"
+        val guest = "local\nlocal"
+        val sameIdA = SyncConfirmation(kind = "journal", id = 42L, scope = scopeA)
+        val sameIdB = SyncConfirmation(kind = "journal", id = 42L, scope = scopeB)
+        val planA = SyncConfirmation(kind = "plan", id = 42L, scope = scopeA)
+        val guestJournal = SyncConfirmation(kind = "journal", id = 99L, scope = guest)
+
+        val emittedFromStaleAndLive = listOf(sameIdA, planA, sameIdB, guestJournal)
+
+        // Switching to instanceB must hide instanceA and guest confirmations even with identical numeric ID 42.
+        assertEquals(listOf(sameIdB), filterConfirmationsForScope(emittedFromStaleAndLive, scopeB, kind = "journal"))
+        assertEquals(listOf(sameIdA), filterConfirmationsForScope(emittedFromStaleAndLive, scopeA, kind = "journal"))
+        assertEquals(listOf(sameIdA, planA), filterConfirmationsForScope(emittedFromStaleAndLive, scopeA))
+        assertEquals(listOf(guestJournal), filterConfirmationsForScope(emittedFromStaleAndLive, guest, kind = "journal"))
+
+        // Resolution check rejects cross-scope or empty-scope confirmations.
+        assertTrue(isConfirmationInScope(sameIdA, scopeA, expectedKind = "journal"))
+        assertFalse(isConfirmationInScope(sameIdA, scopeB, expectedKind = "journal"))
+        assertFalse(isConfirmationInScope(sameIdA, guest, expectedKind = "journal"))
+        assertFalse(isConfirmationInScope(sameIdA.copy(scope = ""), scopeA, expectedKind = "journal"))
+        assertFalse(isConfirmationInScope(planA, scopeA, expectedKind = "journal"))
+    }
 }

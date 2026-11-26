@@ -2,6 +2,7 @@ package com.planlock.app.api
 
 import com.planlock.app.api.dto.JournalDto
 import com.planlock.app.api.dto.JournalUpsertRequest
+import com.planlock.app.api.dto.SyncItemResult
 import com.planlock.app.api.dto.SyncJournalItem
 import com.planlock.app.api.dto.SyncJournalView
 import com.planlock.app.api.dto.SyncPullResponse
@@ -142,5 +143,39 @@ class JournalRulesAndContractTest {
         val exported = api.exportJournals().string()
         assertTrue(exported.contains("第二篇改"))
         assertFalse(exported.contains("第一篇"))
+
+        // Sync create idempotency retains existing status and echoes SyncItemResult.status
+        val createPush = SyncPushRequest(
+            journals = listOf(
+                SyncJournalItem(
+                    id = null,
+                    clientId = "sync-dup-cid",
+                    entryDate = "2026-11-26",
+                    content = "首创落库",
+                    status = 1,
+                )
+            )
+        )
+        val firstPush = api.syncPush(createPush).data!!.results!!.single()
+        assertTrue(firstPush.ok)
+        assertEquals(1, firstPush.status)
+
+        val retryAsDeletePush = SyncPushRequest(
+            journals = listOf(
+                SyncJournalItem(
+                    id = null,
+                    clientId = "sync-dup-cid",
+                    entryDate = "2026-11-26",
+                    content = "首创落库",
+                    status = 0,
+                )
+            )
+        )
+        val secondPush = api.syncPush(retryAsDeletePush).data!!.results!!.single()
+        assertEquals(firstPush.id, secondPush.id)
+        assertEquals(1, secondPush.status)
+
+        val legacyResult = json.decodeFromString<SyncItemResult>("""{"key":"journal:1","ok":true,"id":1,"version":0}""")
+        assertNull(legacyResult.status)
     }
 }

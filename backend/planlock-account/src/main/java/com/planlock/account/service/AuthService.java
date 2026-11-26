@@ -150,6 +150,7 @@ public class AuthService {
             result.put("mergedPlans", 0L);
             result.put("mergedSchedules", 0L);
             result.put("mergedJournals", 0L);
+            result.put("rekeyedJournals", 0L);
             return result;
         }
         User source = userMapper.findById(guestUserId);
@@ -167,8 +168,11 @@ public class AuthService {
         mergeMapper.clearGuestPlanTypes(guestUserId);
         result.put("mergedPlans", (long) plans);
         result.put("mergedSchedules", (long) mergeMapper.transferSchedules(guestUserId, currentUserId));
-        result.put("mergedJournals", (long) mergeMapper.transferJournals(guestUserId, currentUserId));
+        int rekeyedJournals = mergeMapper.rekeyConflictingGuestJournals(guestUserId, currentUserId);
+        int transferredJournals = mergeMapper.transferJournals(guestUserId, currentUserId);
         mergeMapper.clearDuplicateGuestJournals(guestUserId, currentUserId);
+        result.put("rekeyedJournals", (long) rekeyedJournals);
+        result.put("mergedJournals", (long) transferredJournals);
         mergeMapper.reassignDeletedPlanTypes(currentUserId);
         return result;
     }

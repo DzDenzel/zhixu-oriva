@@ -137,6 +137,6 @@ public interface SyncMapper {
             + "WHERE id = #{j.id} AND user_id = #{userId} AND version = #{j.baseVersion}")
     int updateJournal(@Param("userId") Long userId, @Param("j") SyncPushRequest.JournalItem j, @Param("tagsJson") String tagsJson);
 
-    @Select("SELECT id, version, client_id FROM journal_entries WHERE id = #{id} AND user_id = #{userId} FOR UPDATE")
+    @Select("SELECT id, version, client_id, status FROM journal_entries WHERE id = #{id} AND user_id = #{userId} FOR UPDATE")
     SyncItemResult journalIdentity(@Param("userId") Long userId, @Param("id") Long id);
 }

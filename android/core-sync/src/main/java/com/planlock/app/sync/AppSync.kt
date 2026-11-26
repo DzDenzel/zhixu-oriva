@@ -142,6 +142,7 @@ class AppSync private constructor(context: Context) {
         afterGuestMerge(offer.sourceScopes, records.currentScope())
         val reminders = com.planlock.app.record.ScheduleReminderScheduler(app)
         records.schedules().forEach { reminders.schedule(it) }
+        try { client.pull() } catch (c: CancellationException) { throw c } catch (_: Exception) {}
         mergeJournal.clear(offer.accountScope)
         mergeOffer.value = null
         return offer.count.toLong()
@@ -234,6 +235,9 @@ class AppSync private constructor(context: Context) {
     suspend fun resolveConfirmation(expected: com.planlock.app.record.SyncConfirmation, keepMine: Boolean) {
         sessionLock.withLock {
             ensureSession()
+            check(expected.scope.isNotEmpty() && expected.scope == records.currentScope()) {
+                "账号已变化，请重新查看冲突记录"
+            }
             client.pull() // Re-read before applying the precise versions displayed in the dialog.
             records.resolveConfirmation(expected, keepMine)
         }

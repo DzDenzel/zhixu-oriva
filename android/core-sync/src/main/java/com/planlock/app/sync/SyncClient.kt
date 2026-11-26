@@ -22,7 +22,7 @@ class SyncClient(private val api: PlanLockApi, private val recordStore: RecordSt
             requireNotNull(data.strategies),
             requireNotNull(data.schedules),
             data.planTypes.orEmpty(),
-            data.journals.orEmpty(),
+            data.journals,
         )
         data
     }
@@ -144,7 +144,8 @@ class SyncClient(private val api: PlanLockApi, private val recordStore: RecordSt
             }
         } ?: false
         "journal_upsert" -> {
-            val queued = Json.decodeFromString<JournalPendingUpsert>(p.payload.orEmpty())
+            val live = recordStore.prepareJournalSend(p.id) ?: return true
+            val queued = Json.decodeFromString<JournalPendingUpsert>(live.payload.orEmpty())
             val response = api.syncPush(SyncPushRequest(journals = listOf(queued.item)))
             val result = response.data?.results?.singleOrNull()
             val expectedKey = "journal:${queued.item.id}"
@@ -152,14 +153,14 @@ class SyncClient(private val api: PlanLockApi, private val recordStore: RecordSt
                 result.id != null && requireNotNull(result.id) > 0 && result.version != null && requireNotNull(result.version) >= 0 &&
                 (queued.item.id == null && result.clientId == queued.item.clientId || queued.item.id != null && result.id == queued.item.id)
             if (valid) {
-                recordStore.acknowledgeJournal(p, requireNotNull(result?.id), requireNotNull(result?.version))
+                recordStore.acknowledgeJournal(live, requireNotNull(result?.id), requireNotNull(result?.version), result?.status)
                 true
             } else if (queued.item.id != null) {
                 val remote = remoteSnapshot()?.journals?.firstOrNull { it.id == queued.item.id }
                 if (remote != null && sameJournal(queued.item, remote) && remote.version >= 0) {
-                    recordStore.acknowledgeJournal(p, remote.id, remote.version)
+                    recordStore.acknowledgeJournal(live, remote.id, remote.version, remote.status)
                     true
-                } else confirmConflict(p, result?.code ?: response.code)
+                } else confirmConflict(live, result?.code ?: response.code)
             } else false
         }
         else -> if (p.planId?.let { it <= 0 } == true) false else when (val upload = p.toPendingUpload()) {

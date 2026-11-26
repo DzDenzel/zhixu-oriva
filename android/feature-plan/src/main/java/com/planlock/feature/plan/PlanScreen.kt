@@ -123,11 +123,14 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
     val syncClient = remember { AppSync.get(context) }
     val syncState by syncClient.coordinator.state.collectAsState()
     val authState by TokenStore.state.collectAsState()
+    val currentScope = authState.dataScope
     val connectionState by ConnectionStore.state.collectAsState()
-    val storedConfirmations by remember(store) { store.observeConfirmations() }.collectAsState(initial = emptyList())
-    val storedBulkDeletion by remember(store) { store.observeBulkDeletion() }.collectAsState(initial = null)
+    val storedConfirmations by remember(store, currentScope) { store.observeConfirmations() }.collectAsState(initial = emptyList())
+    val storedBulkDeletion by remember(store, currentScope) { store.observeBulkDeletion() }.collectAsState(initial = null)
     val canShowConfirmations = authState.localDataUserId != null && !authState.ownershipMismatch && !authState.signedOut
-    val confirmations = if (canShowConfirmations) storedConfirmations else emptyList()
+    val confirmations = remember(storedConfirmations, canShowConfirmations, currentScope) {
+        if (canShowConfirmations) filterConfirmationsForScope(storedConfirmations, currentScope) else emptyList()
+    }
     val bulkDeletion = storedBulkDeletion.takeIf { canShowConfirmations }
     val actionGate = remember { PlanActionGate(store, api, BackupPasswordStore(context.planLockPreferences), context.planLockPreferences, sync = syncClient) }
     val scope = rememberCoroutineScope()
@@ -145,10 +148,10 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
     var editingSchedule by remember { mutableStateOf<ScheduleSnapshotEntity?>(null) }
     var showScheduleEditor by remember { mutableStateOf(false) }
     var savingSchedule by remember { mutableStateOf(false) }
-    var selectedConfirmation by remember { mutableStateOf<SyncConfirmation?>(null) }
-    var selectedBulkDeletion by remember { mutableStateOf<BulkDeletion?>(null) }
-    var confirmationBusy by remember { mutableStateOf(false) }
-    var confirmationError by remember { mutableStateOf<String?>(null) }
+    var selectedConfirmation by remember(currentScope) { mutableStateOf<SyncConfirmation?>(null) }
+    var selectedBulkDeletion by remember(currentScope) { mutableStateOf<BulkDeletion?>(null) }
+    var confirmationBusy by remember(currentScope) { mutableStateOf(false) }
+    var confirmationError by remember(currentScope) { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     val allListState = rememberLazyListState()
     val scheduleListState = rememberLazyListState()
@@ -156,6 +159,7 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
     PlanActionDialogHost(actionGate, pendingAction) { pendingAction = null }
 
     fun openConfirmation(value: SyncConfirmation) {
+        if (!isConfirmationInScope(value, TokenStore.state.value.dataScope)) return
         confirmationError = null
         selectedBulkDeletion = null
         selectedConfirmation = value
@@ -227,24 +231,33 @@ fun PlanScreen(onCreate: (Boolean) -> Unit = {}, onOpenDetail: (Long) -> Unit = 
         refresh()
     }
 
-    selectedConfirmation?.let { selected ->
+    selectedConfirmation?.takeIf { isConfirmationInScope(it, currentScope) }?.let { selected ->
         SyncConfirmationDialog(selected, confirmationBusy, confirmationError,
             onDismiss = { selectedConfirmation = null; confirmationError = null },
             onResolve = { keepMine ->
                 if (!confirmationBusy) {
-                    confirmationBusy = true
-                    confirmationError = null
-                    scope.launch {
-                        try {
-                            checkConfirmationSession()
-                            syncClient.resolveConfirmation(selected, keepMine)
-                            selectedConfirmation = null
-                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
-                            confirmationError = "处理未完成，请刷新后重试。"
-                        } finally {
-                            confirmationBusy = false
+                    val liveScope = TokenStore.state.value.dataScope
+                    if (!isConfirmationInScope(selected, liveScope)) {
+                        selectedConfirmation = null
+                        confirmationError = "账号或连接已改变"
+                    } else {
+                        confirmationBusy = true
+                        confirmationError = null
+                        scope.launch {
+                            try {
+                                checkConfirmationSession()
+                                check(isConfirmationInScope(selected, TokenStore.state.value.dataScope)) {
+                                    "账号已变化"
+                                }
+                                syncClient.resolveConfirmation(selected, keepMine)
+                                selectedConfirmation = null
+                            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                confirmationError = "处理未完成，请刷新后重试。"
+                            } finally {
+                                confirmationBusy = false
+                            }
                         }
                     }
                 }

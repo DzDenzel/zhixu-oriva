@@ -3,12 +3,19 @@ package com.planlock.sync;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.planlock.common.BusinessException;
 import com.planlock.common.ErrorCode;
+import com.planlock.common.GlobalExceptionHandler;
+import com.planlock.common.auth.UserContext;
+import com.planlock.common.web.JsonCollectionTooLargeException;
 import com.planlock.record.journal.entity.JournalEntry;
+import com.planlock.sync.controller.SyncController;
 import com.planlock.sync.dto.SyncItemResult;
 import com.planlock.sync.dto.SyncPushRequest;
 import com.planlock.sync.mapper.SyncMapper;
 import com.planlock.sync.service.SyncService;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -21,8 +28,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class SyncJournalTest {
 
@@ -75,6 +86,7 @@ class SyncJournalTest {
         createdIdentity.setId(101L);
         createdIdentity.setVersion(0L);
         createdIdentity.setClientId("client-create-1");
+        createdIdentity.setStatus(1);
         when(mapper.journalIdentity(1L, 101L)).thenReturn(createdIdentity);
 
         var conflict = new SyncPushRequest.JournalItem();
@@ -103,6 +115,7 @@ class SyncJournalTest {
         SyncItemResult deletedIdentity = new SyncItemResult();
         deletedIdentity.setId(404L);
         deletedIdentity.setVersion(2L);
+        deletedIdentity.setStatus(0);
         when(mapper.journalIdentity(1L, 404L)).thenReturn(deletedIdentity);
 
         var req = new SyncPushRequest();
@@ -112,12 +125,14 @@ class SyncJournalTest {
         assertThat(results).hasSize(4);
         assertThat(results.get(0).isOk()).isTrue();
         assertThat(results.get(0).getId()).isEqualTo(101L);
+        assertThat(results.get(0).getStatus()).isEqualTo(1);
         assertThat(results.get(1).isOk()).isFalse();
         assertThat(results.get(1).getCode()).isEqualTo(ErrorCode.VERSION_CONFLICT.getCode());
         assertThat(results.get(2).isOk()).isFalse();
         assertThat(results.get(2).getCode()).isEqualTo(ErrorCode.NOT_FOUND.getCode());
         assertThat(results.get(3).isOk()).isTrue();
         assertThat(results.get(3).getVersion()).isEqualTo(2L);
+        assertThat(results.get(3).getStatus()).isEqualTo(0);
         verify(mapper).insertJournal(eq(1L), eq(create), eq("[\"测试\"]"));
     }
 
@@ -159,5 +174,38 @@ class SyncJournalTest {
         assertThatThrownBy(() -> service.push(1L, tooMany))
                 .isInstanceOf(BusinessException.class)
                 .extracting("code").isEqualTo(ErrorCode.INVALID_PARAM.getCode());
+    }
+
+    @Test
+    void jacksonStreamingDeserializerAbortsAt501stJournalBeforeParsingItemBody() throws Exception {
+        StringBuilder sb = new StringBuilder("{\"journals\":[");
+        for (int i = 0; i < 500; i++) {
+            if (i > 0) sb.append(',');
+            sb.append("{\"clientId\":\"c").append(i).append("\",\"entryDate\":\"2026-11-26\",\"content\":\"ok\"}");
+        }
+        // 501st START_OBJECT has invalid token inside body, proving deserializer aborts before reading element fields.
+        sb.append(",{\"entryDate\":");
+        String payload = sb.toString();
+
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        assertThatThrownBy(() -> objectMapper.readValue(payload, SyncPushRequest.class))
+                .isInstanceOf(JsonCollectionTooLargeException.class);
+
+        SyncService mockService = mock(SyncService.class);
+        MockMvc mvc = MockMvcBuilders.standaloneSetup(new SyncController(mockService))
+                .setControllerAdvice(new GlobalExceptionHandler())
+                .setMessageConverters(new org.springframework.http.converter.json.MappingJackson2HttpMessageConverter(objectMapper))
+                .build();
+        UserContext.set(1L, 1L);
+        try {
+            mvc.perform(post("/api/v1/sync/push")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(payload))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(ErrorCode.INVALID_PARAM.getCode()));
+            verifyNoInteractions(mockService);
+        } finally {
+            UserContext.clear();
+        }
     }
 }

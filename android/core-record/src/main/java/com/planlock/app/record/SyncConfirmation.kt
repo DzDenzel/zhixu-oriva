@@ -20,6 +20,7 @@ data class SyncConfirmation(
     val strategyChanged: Boolean = false,
     val localJournal: JournalSnapshotEntity? = null,
     val remoteJournal: SyncJournalView? = null,
+    val scope: String = "",
 ) {
     val key get() = "$kind:$id"
     val remoteDeleted get() = when (kind) {
