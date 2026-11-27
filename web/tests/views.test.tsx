@@ -1,12 +1,13 @@
 import { render } from 'preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { App } from '../src/App';
 import { ApiError, type ApiClient } from '../src/api/client';
 import { JournalPage } from '../src/pages/JournalPage';
 import { LoginPage } from '../src/pages/LoginPage';
 import { PlansPage } from '../src/pages/PlansPage';
 import { PluginsPage } from '../src/pages/PluginsPage';
 import { SchedulesPage } from '../src/pages/SchedulesPage';
-import type { JournalItem, PlanItem, ScheduleItem, StrategyItem } from '../src/types';
+import type { JournalItem, PlanItem, PluginCatalogDocument, ScheduleItem, StrategyItem } from '../src/types';
 import {
   buildPlanUpsertPayload,
   buildScheduleUpsertPayload,
@@ -16,6 +17,7 @@ import {
   withPlanField,
   withScheduleField,
 } from '../src/utils/payloads';
+import { resetSessionGuardForTest, writeSessionToken } from '../src/utils/session';
 
 async function flushUi(): Promise<void> {
   await Promise.resolve();
@@ -144,6 +146,89 @@ describe('B6 & B7 payload fidelity: custom dates, multi-weekday, strategy 1409 &
     const mergedCleared = buildScheduleUpsertPayload(clearedForm, serverLatest);
     expect(mergedCleared.locationLat).toBeNull();
     expect(mergedCleared.locationLon).toBeNull();
+  });
+
+  it('preserves HH:mm:ss seconds, remindAdvanceMin=null, tzId=null on ordinary edit, and clears repeatRule dirty bit when reverted to preserve (R4)', () => {
+    const planWithSecondsAndNullRemind: PlanItem = {
+      id: 31,
+      userId: 1,
+      name: '晨间冥想',
+      type: '习惯',
+      startTime: '06:45:30',
+      endTime: '07:15:45',
+      repeatRule: { type: 'custom', dates: ['2026-12-01', '2026-12-03'] },
+      remindAdvanceMin: null,
+      status: 1,
+      version: 2,
+    };
+
+    // Rename only -> must preserve exact seconds and remindAdvanceMin=null (not coerce to 15!)
+    let planForm = withPlanField(planFormFromItem(planWithSecondsAndNullRemind), 'name', '晨间正念', 'name');
+    const ordinaryPlanPayload = buildPlanUpsertPayload(planForm);
+    expect(ordinaryPlanPayload.startTime).toBe('06:45:30');
+    expect(ordinaryPlanPayload.endTime).toBe('07:15:45');
+    expect(ordinaryPlanPayload.remindAdvanceMin).toBeNull();
+
+    // Switch custom -> daily -> back to preserve-custom MUST clear 'repeatRule' dirty bit
+    planForm = withPlanField(planForm, 'repeatType', 'daily', 'repeatRule');
+    expect(planForm.dirtyFields.has('repeatRule')).toBe(true);
+    planForm = withPlanField(planForm, 'repeatType', 'preserve-custom', 'repeatRule');
+    expect(planForm.dirtyFields.has('repeatRule')).toBe(false);
+
+    // On 1409 overwrite, serverLatest custom dates & remindAdvanceMin=null MUST be preserved
+    const serverPlanLatest: PlanItem = {
+      ...planWithSecondsAndNullRemind,
+      repeatRule: { type: 'custom', dates: ['2026-12-01', '2026-12-03', '2026-12-09'] },
+      remindAdvanceMin: null,
+      version: 3,
+    };
+    const mergedPlan = buildPlanUpsertPayload(planForm, serverPlanLatest);
+    expect(mergedPlan.repeatRule).toEqual({
+      type: 'custom',
+      dates: ['2026-12-01', '2026-12-03', '2026-12-09'],
+    });
+    expect(mergedPlan.remindAdvanceMin).toBeNull();
+    expect(mergedPlan.startTime).toBe('06:45:30');
+
+    // Schedule with seconds & tzId: null
+    const schedWithSecondsAndNullTz: ScheduleItem = {
+      id: 41,
+      userId: 1,
+      title: '团队周会',
+      startDate: '2026-12-01',
+      endDate: '2026-12-01',
+      startTime: '14:05:30',
+      endTime: '15:10:45',
+      allDay: false,
+      repeatRule: '{"type":"weekly","weekdays":[1,3,5]}',
+      tzId: null,
+      status: 1,
+      version: 1,
+    };
+
+    let schedForm = withScheduleField(scheduleFormFromItem(schedWithSecondsAndNullTz), 'title', '产品周会', 'title');
+    const ordinarySchedPayload = buildScheduleUpsertPayload(schedForm);
+    expect(ordinarySchedPayload.startTime).toBe('14:05:30');
+    expect(ordinarySchedPayload.endTime).toBe('15:10:45');
+    expect(ordinarySchedPayload.tzId).toBeNull();
+
+    // Switch preserve -> daily -> back to preserve MUST clear 'repeatRule' dirty bit
+    schedForm = withScheduleField(schedForm, 'repeatMode', 'daily', 'repeatRule');
+    expect(schedForm.dirtyFields.has('repeatRule')).toBe(true);
+    schedForm = withScheduleField(schedForm, 'repeatMode', 'preserve', 'repeatRule');
+    expect(schedForm.dirtyFields.has('repeatRule')).toBe(false);
+
+    const serverSchedLatest: ScheduleItem = {
+      ...schedWithSecondsAndNullTz,
+      repeatRule: '{"type":"weekly","weekdays":[1,3,5,6]}',
+      tzId: null,
+      version: 2,
+    };
+    const mergedSched = buildScheduleUpsertPayload(schedForm, serverSchedLatest);
+    expect(mergedSched.repeatRule).toBe('{"type":"weekly","weekdays":[1,3,5,6]}');
+    expect(mergedSched.tzId).toBeNull();
+    expect(mergedSched.startTime).toBe('14:05:30');
+    expect(mergedSched.endTime).toBe('15:10:45');
   });
 });
 
@@ -404,5 +489,224 @@ describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 tru
     expect(container.textContent).toContain('未验签插件包字节');
     expect(container.textContent).toContain('独立可信渠道核对');
     expect(container.textContent).toContain('92:70:60:2B');
+  });
+
+  it('exits bootstrapping to LoginPage when cold-start token receives 1001/401 on App mount (R1)', async () => {
+    resetSessionGuardForTest();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    writeSessionToken('expired-cold-start-jwt');
+    window.history.replaceState(null, '', '/today');
+
+    const fetchSpy = vi.spyOn(window, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ code: 1001, message: '登录会话已失效', data: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    render(<App />, container);
+    await flushUi();
+
+    expect(container.textContent).not.toContain('正在连接个人数字站…');
+    expect(container.querySelector('input[name="account"]')).not.toBeNull();
+    expect(container.textContent).toContain('登录会话已失效');
+
+    fetchSpy.mockRestore();
+    resetSessionGuardForTest();
+    window.sessionStorage.clear();
+  });
+
+  it('prevents delayed official catalog response from overwriting third-party tab on PluginsPage (R2)', async () => {
+    let resolveOfficial!: (doc: PluginCatalogDocument) => void;
+    let resolveThirdParty!: (doc: PluginCatalogDocument) => void;
+
+    const getPluginCatalog = vi.fn((source: 'official' | 'third-party') => {
+      return new Promise<PluginCatalogDocument>((resolve) => {
+        if (source === 'official') resolveOfficial = resolve;
+        else resolveThirdParty = resolve;
+      });
+    });
+
+    const api = baseClientStub({ getPluginCatalog });
+    render(<PluginsPage api={api} onNotify={() => {}} />, container);
+    await flushUi();
+
+    const thirdPartyTab = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('third-party'),
+    );
+    expect(thirdPartyTab).toBeDefined();
+    thirdPartyTab?.click();
+    await flushUi();
+
+    // Third-party resolves first
+    resolveThirdParty({
+      catalogFormatVersion: 1,
+      sourceId: 'third-party',
+      sourceType: 'THIRD_PARTY',
+      plugins: [
+        {
+          id: 'tp-only',
+          name: '第三方专属插件',
+          version: '1.0.0',
+          contractVersion: 2,
+          entryPoint: 'main',
+          downloadUrl: '/api/v1/plugins/artifacts/third-party/tp-only.pljs',
+          sha256: 'a'.repeat(64),
+          requiredCapabilities: [],
+          description: 'tp desc',
+        },
+      ],
+    });
+    await flushUi();
+    expect(container.textContent).toContain('第三方专属插件');
+
+    // Now delayed official response arrives -> MUST be ignored!
+    resolveOfficial({
+      catalogFormatVersion: 1,
+      sourceId: 'official',
+      sourceType: 'OFFICIAL',
+      plugins: [
+        {
+          id: 'official-stale',
+          name: '延迟官方插件',
+          version: '1.0.0',
+          contractVersion: 2,
+          entryPoint: 'main',
+          downloadUrl: '/api/v1/plugins/artifacts/official/official-stale.pljs',
+          sha256: 'b'.repeat(64),
+          requiredCapabilities: [],
+          description: 'official desc',
+        },
+      ],
+    });
+    await flushUi();
+
+    expect(container.textContent).toContain('第三方专属插件');
+    expect(container.textContent).not.toContain('延迟官方插件');
+  });
+
+  it('isolates strategy modal per planId+requestSeq so delayed Plan A GET/1409 cannot pollute Plan B (R3)', async () => {
+    const planA: PlanItem = {
+      id: 10,
+      userId: 1,
+      name: '计划A',
+      type: '学习',
+      startTime: '08:00:00',
+      endTime: '09:00:00',
+      repeatRule: { type: 'custom', dates: ['2026-12-01'] },
+      remindAdvanceMin: null,
+      status: 1,
+      version: 1,
+    };
+    const planB: PlanItem = {
+      id: 20,
+      userId: 1,
+      name: '计划B',
+      type: '工作',
+      startTime: '10:00:00',
+      endTime: '11:00:00',
+      status: 1,
+      version: 1,
+    };
+
+    const strategyA: StrategyItem = {
+      id: 101,
+      planId: 10,
+      blacklistApps: [
+        { packageName: 'com.planA.one', appName: 'A1' },
+        { packageName: 'com.planA.two', appName: 'A2' },
+      ],
+      whitelistApps: [{ packageName: 'com.planA.white', appName: 'AW' }],
+      autoDnd: true,
+      notifySilence: true,
+      version: 3,
+    };
+    const strategyB: StrategyItem = {
+      id: 202,
+      planId: 20,
+      blacklistApps: [{ packageName: 'com.planB.only', appName: 'B1' }],
+      whitelistApps: [],
+      autoDnd: false,
+      notifySilence: false,
+      version: 3,
+    };
+
+    let resolveStrategyA!: (s: StrategyItem) => void;
+    const getPlanStrategy = vi.fn((planId: number) => {
+      if (planId === 10) {
+        return new Promise<StrategyItem>((resolve) => {
+          resolveStrategyA = resolve;
+        });
+      }
+      return Promise.resolve(strategyB);
+    });
+    const upsertPlanStrategy = vi.fn(async () => ({ ...strategyB, autoDnd: true, version: 4 }));
+
+    const api = baseClientStub({
+      listPlans: vi.fn(async () => [planA, planB]),
+      pullSyncMetadata: vi.fn(async () => ({ planTypes: [] })),
+      getPlanStrategy,
+      upsertPlanStrategy,
+    });
+
+    render(<PlansPage api={api} onNotify={() => {}} />, container);
+    await flushUi();
+
+    // Open Plan A's strategy modal (GET A pending)
+    const strategyBtns = Array.from(container.querySelectorAll('button')).filter(
+      (b) => b.textContent === '策略',
+    );
+    strategyBtns[0]?.click();
+    await flushUi();
+
+    // Close Plan A's modal and immediately open Plan B's strategy modal
+    const closeBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '关闭');
+    closeBtn?.click();
+    await flushUi();
+    strategyBtns[1]?.click();
+    await flushUi();
+
+    // Now delayed Plan A response arrives while Plan B modal is open
+    resolveStrategyA(strategyA);
+    await flushUi();
+
+    expect(container.textContent).toContain('执行策略 · 计划B');
+    expect(container.textContent).toContain('黑名单应用：1 项');
+
+    // Toggle autoDnd and save Plan B -> MUST submit Plan B's blacklistApps, NEVER Plan A's!
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    (checkboxes[0] as HTMLInputElement).checked = true;
+    checkboxes[0]?.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushUi();
+
+    const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '保存策略');
+    saveBtn?.click();
+    await flushUi();
+
+    expect(upsertPlanStrategy).toHaveBeenCalledWith(
+      20,
+      {
+        blacklistApps: strategyB.blacklistApps,
+        whitelistApps: strategyB.whitelistApps,
+        autoDnd: true,
+        notifySilence: false,
+      },
+      3,
+    );
+
+    // Also verify R4 in PlansPage UI: custom repeat option stays selectable after switching to daily
+    const editBtns = Array.from(container.querySelectorAll('button')).filter(
+      (b) => b.textContent === '编辑',
+    );
+    editBtns[0]?.click();
+    await flushUi();
+    const selectEl = container.querySelector('select') as HTMLSelectElement;
+    expect(selectEl.value).toBe('preserve-custom');
+    selectEl.value = 'daily';
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushUi();
+    const optionValues = Array.from(selectEl.options).map((o) => o.value);
+    expect(optionValues).toContain('preserve-custom');
   });
 });

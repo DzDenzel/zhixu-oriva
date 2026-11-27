@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
 import { ApiError, StaleSessionError } from '../api/client';
 import { ConflictModal, type ConflictFieldRow } from '../components/ConflictModal';
@@ -51,7 +51,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
   // 1409 乐观锁冲突状态
   const [conflictServer, setConflictServer] = useState<PlanItem | null>(null);
 
-  // 执行策略弹窗
+  // 执行策略弹窗（Astra B6 / R3：严格绑定 planId + requestSeq，防止跨计划乱序回填）
   const [strategyPlan, setStrategyPlan] = useState<PlanItem | null>(null);
   const [strategyData, setStrategyData] = useState<StrategyItem | null>(null);
   const [autoDnd, setAutoDnd] = useState(false);
@@ -59,6 +59,8 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
   const [strategyLoading, setStrategyLoading] = useState(false);
   const [strategySaving, setStrategySaving] = useState(false);
   const [strategyConflict, setStrategyConflict] = useState<StrategyItem | null>(null);
+  const strategyReqSeq = useRef(0);
+  const activeStrategyPlanId = useRef<number | null>(null);
 
   async function loadPlans() {
     const gen = api.getSessionGeneration();
@@ -88,6 +90,10 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
 
   useEffect(() => {
     void loadPlans();
+    return () => {
+      strategyReqSeq.current += 1;
+      activeStrategyPlanId.current = null;
+    };
   }, []);
 
   async function handleSavePlan(evt?: Event, mergeServerSnapshot?: PlanItem) {
@@ -189,72 +195,106 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
     }
   }
 
+  function isStrategyRequestCurrent(gen: number, reqSeq: number, planId: number): boolean {
+    return (
+      api.isGenerationCurrent(gen) &&
+      strategyReqSeq.current === reqSeq &&
+      activeStrategyPlanId.current === planId
+    );
+  }
+
+  function closeStrategyModal() {
+    strategyReqSeq.current += 1;
+    activeStrategyPlanId.current = null;
+    setStrategyPlan(null);
+    setStrategyData(null);
+    setStrategyConflict(null);
+    setStrategyLoading(false);
+    setStrategySaving(false);
+  }
+
   async function openStrategyModal(plan: PlanItem) {
     const gen = api.getSessionGeneration();
+    const reqSeq = (strategyReqSeq.current += 1);
+    activeStrategyPlanId.current = plan.id;
     setStrategyPlan(plan);
     setStrategyData(null);
     setStrategyConflict(null);
+    setAutoDnd(false);
+    setNotifySilence(false);
     setStrategyLoading(true);
+    setStrategySaving(false);
     try {
       const st = await api.getPlanStrategy(plan.id);
-      if (!api.isGenerationCurrent(gen)) return;
+      if (!isStrategyRequestCurrent(gen, reqSeq, plan.id)) return;
+      if (st.planId !== plan.id) return;
       setStrategyData(st);
       setAutoDnd(Boolean(st.autoDnd));
       setNotifySilence(Boolean(st.notifySilence));
     } catch (err) {
       if (err instanceof StaleSessionError) return;
+      if (!isStrategyRequestCurrent(gen, reqSeq, plan.id)) return;
       if (err instanceof ApiError && err.isNotFound) {
         setStrategyData(null);
         setAutoDnd(false);
         setNotifySilence(false);
       } else if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
-        setStrategyPlan(null);
+        closeStrategyModal();
       }
     } finally {
-      if (api.isGenerationCurrent(gen)) {
+      if (isStrategyRequestCurrent(gen, reqSeq, plan.id)) {
         setStrategyLoading(false);
       }
     }
   }
 
   /**
-   * 保存策略（Astra B6）：
-   * 1409 冲突重试时强制传入 strategyConflict 最新快照，同时从该最新快照取 version、
-   * blacklistApps 与 whitelistApps，仅合并两个布尔开关，绝不写回旧黑白名单。
+   * 保存策略（Astra B6 / R3）：
+   * - 1409 冲突重试时强制传入 strategyConflict 最新快照，从同一快照取 version 与黑白名单；
+   * - 任何 PUT 前均强制断言 baseSnapshot.planId === targetPlan.id，且全部异步分支校验
+   *   { sessionGeneration, requestSeq, activeStrategyPlanId }，防止跨计划乱序污染。
    */
   async function saveStrategy(latestSnapshotOverride?: StrategyItem) {
-    if (!strategyPlan) return;
-    const gen = api.getSessionGeneration();
+    const targetPlan = strategyPlan;
+    if (!targetPlan || strategyLoading) return;
     const baseSnapshot = latestSnapshotOverride ?? strategyData;
+    if (baseSnapshot && baseSnapshot.planId !== targetPlan.id) {
+      onNotify('策略快照与当前计划不匹配，请重新打开策略弹窗', 'error');
+      return;
+    }
+    const gen = api.getSessionGeneration();
+    const reqSeq = (strategyReqSeq.current += 1);
+    activeStrategyPlanId.current = targetPlan.id;
     const { payload, baseVersion } = buildStrategyUpsertPayload(baseSnapshot, {
       autoDnd,
       notifySilence,
     });
     setStrategySaving(true);
     try {
-      const saved = await api.upsertPlanStrategy(strategyPlan.id, payload, baseVersion);
-      if (!api.isGenerationCurrent(gen)) return;
-      setStrategyData(saved);
-      setStrategyConflict(null);
-      setStrategyPlan(null);
-      onNotify(`已更新「${strategyPlan.name}」执行策略`);
+      await api.upsertPlanStrategy(targetPlan.id, payload, baseVersion);
+      if (!isStrategyRequestCurrent(gen, reqSeq, targetPlan.id)) return;
+      closeStrategyModal();
+      onNotify(`已更新「${targetPlan.name}」执行策略`);
     } catch (err) {
       if (err instanceof StaleSessionError) return;
+      if (!isStrategyRequestCurrent(gen, reqSeq, targetPlan.id)) return;
       if (err instanceof ApiError && err.isConflict) {
         try {
-          const latest = await api.getPlanStrategy(strategyPlan.id);
-          if (!api.isGenerationCurrent(gen)) return;
+          const latest = await api.getPlanStrategy(targetPlan.id);
+          if (!isStrategyRequestCurrent(gen, reqSeq, targetPlan.id)) return;
+          if (latest.planId !== targetPlan.id) return;
           setStrategyConflict(latest);
         } catch (reloadErr) {
           if (reloadErr instanceof StaleSessionError) return;
+          if (!isStrategyRequestCurrent(gen, reqSeq, targetPlan.id)) return;
           onNotify('策略版本冲突（1409），请重新打开', 'warn');
         }
       } else if (err instanceof ApiError && !err.isUnauthorized) {
         onNotify(err.message, 'error');
       }
     } finally {
-      if (api.isGenerationCurrent(gen)) {
+      if (isStrategyRequestCurrent(gen, reqSeq, targetPlan.id)) {
         setStrategySaving(false);
       }
     }
@@ -389,7 +429,11 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                     {isPaused && <span class="tag tag-stone">已暂停</span>}
                   </div>
                   <div class="ledger-meta">
-                    {formatRepeatRule(plan.repeatRule)} · 提前 {plan.remindAdvanceMin ?? 15} 分钟提醒 · 版本 v{plan.version}
+                    {formatRepeatRule(plan.repeatRule)} ·{' '}
+                    {plan.remindAdvanceMin !== null && plan.remindAdvanceMin !== undefined
+                      ? `提前 ${plan.remindAdvanceMin} 分钟提醒`
+                      : '未设提前提醒'}{' '}
+                    · 版本 v{plan.version}
                   </div>
                 </div>
                 <div class="row-wrap">
@@ -539,7 +583,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                       )
                     }
                   >
-                    {editing.originalRepeatRule && editing.repeatType === 'preserve-custom' && (
+                    {editing.hasCustomOriginalRepeat && editing.originalRepeatRule && (
                       <option value="preserve-custom">
                         保留原有规则（{formatRepeatRule(editing.originalRepeatRule)}）
                       </option>
@@ -550,7 +594,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                   </select>
                 </label>
                 <label class="field">
-                  <span class="field-label">提前提醒（分钟）</span>
+                  <span class="field-label">提前提醒（分钟，可留空）</span>
                   <input
                     type="number"
                     class="input"
@@ -562,7 +606,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                         withPlanField(
                           editing,
                           'remindAdvanceMin',
-                          Number((evt.currentTarget as HTMLInputElement).value) || 0,
+                          (evt.currentTarget as HTMLInputElement).value,
                           'remindAdvanceMin',
                         ),
                       )
@@ -650,7 +694,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
               <button
                 type="button"
                 class="btn btn-sm btn-ghost"
-                onClick={() => setStrategyPlan(null)}
+                onClick={() => closeStrategyModal()}
               >
                 关闭
               </button>
@@ -739,7 +783,7 @@ export function PlansPage({ api, onNotify }: PlansPageProps) {
                   <button
                     type="button"
                     class="btn btn-ghost"
-                    onClick={() => setStrategyPlan(null)}
+                    onClick={() => closeStrategyModal()}
                   >
                     取消
                   </button>

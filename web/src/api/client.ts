@@ -438,10 +438,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     /**
-     * 同源公开插件目录（WebConfig PUBLIC_API_PATTERNS 明确放行 /api/v1/plugins/**）：
+     * 同源公开插件目录（WebConfig PUBLIC_API_PATTERNS 明确放行官方/第三方目录端点）：
      * - 不携带 Bearer JWT（遵循最小权限原则，Astra B3）；
-     * - 校验会话代际防止过时响应回写页面；
-     * - 施加 2 MiB 体积上限与完整有界 schema 校验（Astra B5）。
+     * - 通过 ReadableStream 逐块按解码后字节限读（<= 2 MiB），超限立即 reader.cancel()（Astra R2）；
+     * - 校验会话代际防止过时响应回写页面，并对正文执行有界 schema 校验（Astra B5）。
      */
     async getPluginCatalog(source: 'official' | 'third-party'): Promise<PluginCatalogDocument> {
       const requestGen = sessionGeneration;
@@ -460,20 +460,22 @@ export function createApiClient(options: ApiClientOptions = {}) {
       assertGeneration(requestGen);
 
       if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
         throw new ApiError(2001, `插件目录加载失败（HTTP ${response.status}）`, response.status);
       }
 
       const contentLength = Number(response.headers.get('content-length') || '0');
       if (Number.isFinite(contentLength) && contentLength > MAX_CATALOG_BYTES) {
+        await response.body?.cancel().catch(() => {});
         throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
       }
 
-      const rawText = await response.text();
+      const rawText = await readResponseTextBounded(
+        response,
+        MAX_CATALOG_BYTES,
+        () => assertGeneration(requestGen),
+      );
       assertGeneration(requestGen);
-
-      if (utf8ByteLength(rawText) > MAX_CATALOG_BYTES) {
-        throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
-      }
 
       const validated = validateSameOriginCatalog(rawText, source);
       if (!validated.valid || !validated.catalog) {
@@ -486,6 +488,54 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return validated.catalog;
     },
   };
+}
+
+async function readResponseTextBounded(
+  response: Response,
+  maxBytes: number,
+  assertStillValid: () => void,
+): Promise<string> {
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        try {
+          assertStillValid();
+        } catch (err) {
+          await reader.cancel().catch(() => {});
+          throw err;
+        }
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const merged = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder('utf-8').decode(merged);
+  }
+
+  // Fallback for synthetic test Response objects without ReadableStream body
+  const rawText = await response.text();
+  assertStillValid();
+  if (utf8ByteLength(rawText) > maxBytes) {
+    throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
+  }
+  return rawText;
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;

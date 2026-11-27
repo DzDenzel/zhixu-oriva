@@ -48,6 +48,7 @@ export function App({ apiClient, initialPath }: AppProps) {
 
   const handleUnauthorized = useCallback((reason: string) => {
     setMe(null);
+    setBootstrapping(false);
     setLoginNotice(reason || '登录会话已过期，请重新登录');
     navigateTo('/login', true);
   }, []);
@@ -70,25 +71,26 @@ export function App({ apiClient, initialPath }: AppProps) {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  const hydrateSession = useCallback(async () => {
+  const hydrateSession = useCallback(async (): Promise<boolean> => {
     const gen = api.getSessionGeneration();
     if (!api.getToken()) {
       setMe(null);
       setBootstrapping(false);
-      return;
+      return false;
     }
     try {
       const profile = await api.getMe();
-      if (!api.isGenerationCurrent(gen)) return;
+      if (!api.isGenerationCurrent(gen)) return false;
       setMe(profile);
       setLoginNotice(null);
+      setBootstrapping(false);
+      return true;
     } catch {
-      if (!api.isGenerationCurrent(gen)) return;
-      setMe(null);
-    } finally {
       if (api.isGenerationCurrent(gen)) {
+        setMe(null);
         setBootstrapping(false);
       }
+      return false;
     }
   }, [api]);
 
@@ -164,8 +166,11 @@ export function App({ apiClient, initialPath }: AppProps) {
         noticeMessage={loginNotice}
         onToggleTheme={handleToggleTheme}
         onLoginSuccess={async () => {
-          await hydrateSession();
-          navigateTo('/today', true);
+          const loginGen = api.getSessionGeneration();
+          const hydrated = await hydrateSession();
+          if (hydrated && api.isGenerationCurrent(loginGen)) {
+            navigateTo('/today', true);
+          }
         }}
       />
     );

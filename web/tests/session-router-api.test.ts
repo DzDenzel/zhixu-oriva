@@ -7,6 +7,8 @@ import {
   getOrCreateDeviceUid,
   readSessionToken,
   resetSessionGuardForTest,
+  REVOKED_DIGEST_KEY,
+  REVOKED_TOKEN_SENTINEL,
   TOKEN_SESSION_KEY,
   writeSessionToken,
 } from '../src/utils/session';
@@ -37,19 +39,72 @@ describe('session & deviceUid lifecycle (B3)', () => {
     expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe('jwt-token-xyz');
     expect(window.localStorage.getItem(TOKEN_SESSION_KEY)).toBeNull();
 
-    // Simulate Storage.removeItem throwing while leaving old token in sessionStorage
+    // Simulate Storage.removeItem throwing while setItem still works -> sentinel fallback clears token
     const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
       throw new Error('storage locked');
     });
     const result = clearSessionToken();
-    expect(result.storageCleared).toBe(false);
-    // In-memory invalidation fence MUST refuse to read back the lingering stale token
+    expect(result.storageCleared).toBe(true);
+    expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe(REVOKED_TOKEN_SENTINEL);
     expect(readSessionToken()).toBeNull();
     removeSpy.mockRestore();
 
     // Writing a brand new token lifts the fence
-    writeSessionToken('jwt-new-session');
+    expect(writeSessionToken('jwt-new-session')).toBe(true);
     expect(readSessionToken()).toBe('jwt-new-session');
+  });
+
+  it('rejects lingering stale token across page reload and failed writeSessionToken when both removeItem and setItem throw (R1)', () => {
+    const staleJwt = 'stale-session-token-r1-xyz';
+    expect(writeSessionToken(staleJwt)).toBe(true);
+
+    // Simulate sessionStorage removeItem & setItem BOTH throwing while localStorage remains writable
+    const origRemove = Storage.prototype.removeItem;
+    const origSet = Storage.prototype.setItem;
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (this === window.sessionStorage) throw new Error('sessionStorage remove blocked');
+      return origRemove.call(this, key);
+    });
+    const setSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      val: string,
+    ) {
+      if (this === window.sessionStorage) throw new Error('sessionStorage set blocked');
+      return origSet.call(this, key, val);
+    });
+
+    const cleared = clearSessionToken();
+    expect(cleared.storageCleared).toBe(false);
+    // Raw JWT still lingers in sessionStorage, yet readSessionToken MUST return null
+    expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe(staleJwt);
+    expect(readSessionToken()).toBeNull();
+
+    // localStorage stores only a non-secret 16-hex digest (NEVER the raw JWT)
+    const savedDigest = window.localStorage.getItem(REVOKED_DIGEST_KEY);
+    expect(savedDigest).toMatch(/^[0-9a-f]{16}$/);
+    expect(savedDigest).not.toContain(staleJwt);
+
+    // Attempting to write a new token while sessionStorage.setItem fails MUST NOT lift the fence
+    expect(writeSessionToken('replacement-token')).toBe(false);
+    expect(readSessionToken()).toBeNull();
+
+    // Simulate page reload (in-memory flags cleared, localStorage revoked digest intact)
+    resetSessionGuardForTest(true);
+    expect(readSessionToken()).toBeNull();
+    const freshApi = createApiClient();
+    expect(freshApi.getToken()).toBeNull();
+
+    removeSpy.mockRestore();
+    setSpy.mockRestore();
+
+    // Once storage recovers and a genuinely new token is written, session resumes cleanly
+    expect(writeSessionToken('fresh-after-recovery')).toBe(true);
+    expect(readSessionToken()).toBe('fresh-after-recovery');
+    expect(window.localStorage.getItem(REVOKED_DIGEST_KEY)).toBeNull();
   });
 });
 
@@ -254,5 +309,39 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
     expect(catalog.plugins).toEqual([]);
     // Public catalog request must NOT carry Authorization header (Astra B3)
     expect(seenHeaders[1]).toBeUndefined();
+  });
+
+  it('aborts and cancels chunked plugin catalog stream exceeding 2 MiB without Content-Length header (R2)', async () => {
+    let pulledChunks = 0;
+    let cancelled = false;
+    const chunk = new Uint8Array(512 * 1024).fill(0x61); // 512 KiB per chunk
+
+    const oversizedStream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulledChunks += 1;
+        if (pulledChunks <= 20) {
+          controller.enqueue(chunk);
+        } else {
+          controller.close();
+        }
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    const mockFetch = vi.fn(async () => {
+      // Deliberately omit Content-Length header to simulate chunked transfer encoding
+      return new Response(oversizedStream, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const api = createApiClient({ fetchImpl: mockFetch as unknown as typeof fetch });
+    await expect(api.getPluginCatalog('official')).rejects.toThrow(/超出 2 MiB 安全上限/);
+    expect(cancelled).toBe(true);
+    // 2 MiB = 4 * 512 KiB; stream must stop at chunk 5 (well before 20 chunks)
+    expect(pulledChunks).toBeLessThanOrEqual(6);
   });
 });

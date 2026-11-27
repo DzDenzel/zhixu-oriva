@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
 import { ApiError, StaleSessionError } from '../api/client';
 import type { PluginCatalogDocument, PluginCatalogEntry } from '../types';
@@ -25,17 +25,35 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
   const [formBSizeWarning, setFormBSizeWarning] = useState<string | null>(null);
   const [formBResult, setFormBResult] = useState<CatalogValidationResult | null>(null);
 
+  // R2: 绑定 (sourceTab, reqId) 防止快速切换目录源时先发后到的响应污染另一标签页
+  const catalogReqSeq = useRef(0);
+  const activeSourceRef = useRef<'official' | 'third-party'>(sourceTab);
+
   async function loadCatalog(source: 'official' | 'third-party') {
+    activeSourceRef.current = source;
+    const reqId = ++catalogReqSeq.current;
     const gen = api.getSessionGeneration();
     setLoading(true);
     setErrorText(null);
     try {
       const doc = await api.getPluginCatalog(source);
-      if (!api.isGenerationCurrent(gen)) return;
+      if (
+        !api.isGenerationCurrent(gen) ||
+        reqId !== catalogReqSeq.current ||
+        activeSourceRef.current !== source
+      ) {
+        return;
+      }
       setCatalog(doc);
     } catch (err) {
       if (err instanceof StaleSessionError) return;
-      if (!api.isGenerationCurrent(gen)) return;
+      if (
+        !api.isGenerationCurrent(gen) ||
+        reqId !== catalogReqSeq.current ||
+        activeSourceRef.current !== source
+      ) {
+        return;
+      }
       setCatalog(null);
       if (err instanceof ApiError) {
         setErrorText(err.message);
@@ -43,7 +61,11 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
         setErrorText('加载插件目录失败');
       }
     } finally {
-      if (api.isGenerationCurrent(gen)) {
+      if (
+        api.isGenerationCurrent(gen) &&
+        reqId === catalogReqSeq.current &&
+        activeSourceRef.current === source
+      ) {
         setLoading(false);
       }
     }

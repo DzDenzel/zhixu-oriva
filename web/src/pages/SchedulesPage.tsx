@@ -76,14 +76,17 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
       onNotify('请填写日程标题', 'warn');
       return;
     }
-    if (editing.endDate < editing.startDate) {
+    const payload = buildScheduleUpsertPayload(editing, mergeServerSnapshot ?? null);
+    if (payload.endDate < payload.startDate) {
       onNotify('结束日期不能早于开始日期', 'warn');
       return;
     }
     if (
-      !editing.allDay &&
-      editing.startDate === editing.endDate &&
-      editing.endTime <= editing.startTime
+      !payload.allDay &&
+      payload.startDate === payload.endDate &&
+      payload.startTime &&
+      payload.endTime &&
+      payload.endTime <= payload.startTime
     ) {
       onNotify('同日定时日程的结束时间必须晚于开始时间', 'warn');
       return;
@@ -92,7 +95,6 @@ export function SchedulesPage({ api, onNotify }: SchedulesPageProps) {
     const gen = api.getSessionGeneration();
     setSaving(true);
     try {
-      const payload = buildScheduleUpsertPayload(editing, mergeServerSnapshot ?? null);
       if (editing.id === null) {
         await api.createSchedule(payload);
         if (!api.isGenerationCurrent(gen)) return;

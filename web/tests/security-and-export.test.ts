@@ -156,7 +156,7 @@ describe('security URL & catalog boundary checks (B5 & B8)', () => {
     expect(tooMany.errors.length).toBeLessThanOrEqual(MAX_ERRORS_COLLECTED);
     expect(tooMany.omittedErrorCount).toBeGreaterThan(0);
 
-    // Same-origin catalog enforces /api/v1/plugins/artifacts/<source>/ contract
+    // Same-origin catalog enforces /api/v1/plugins/artifacts/<source>/ contract & required downloadUrl/sha256 (R2)
     const sameOriginBad = validateSameOriginCatalog(
       JSON.stringify({
         catalogFormatVersion: 1,
@@ -172,12 +172,84 @@ describe('security URL & catalog boundary checks (B5 & B8)', () => {
             requiredCapabilities: [],
             description: 'ok',
             downloadUrl: 'https://evil.example/p1.pljs',
+            sha256: 'a'.repeat(64),
           },
         ],
       }),
       'official',
     );
     expect(sameOriginBad.valid).toBe(false);
+
+    // R2: missing downloadUrl / missing sha256 / mismatched artifact vs downloadUrl filename MUST fail validation
+    const missingIntegrity = validateFormBCatalog(
+      JSON.stringify({
+        catalogFormatVersion: 1,
+        sourceId: 'missing-integrity',
+        sourceType: 'THIRD_PARTY',
+        plugins: [
+          {
+            id: 'no-hash',
+            name: 'Missing Hash & URL',
+            version: '1.0.0',
+            contractVersion: 1,
+            entryPoint: 'main',
+            requiredCapabilities: [],
+            description: 'missing downloadUrl and sha256',
+          },
+        ],
+      }),
+    );
+    expect(missingIntegrity.valid).toBe(false);
+    expect(missingIntegrity.errors.some((e) => e.includes('downloadUrl 不能为空'))).toBe(true);
+    expect(missingIntegrity.errors.some((e) => e.includes('sha256 不能为空'))).toBe(true);
+
+    const mismatchedArtifact = validateFormBCatalog(
+      JSON.stringify({
+        catalogFormatVersion: 1,
+        sourceId: 'mismatch-artifact',
+        sourceType: 'THIRD_PARTY',
+        plugins: [
+          {
+            id: 'mismatch-1',
+            name: 'Mismatch',
+            version: '1.0.0',
+            contractVersion: 1,
+            entryPoint: 'main',
+            artifact: 'plugin-a.pljs',
+            downloadUrl: './artifacts/plugin-b.pljs',
+            sha256: 'b'.repeat(64),
+            requiredCapabilities: [],
+            description: 'artifact filename differs from downloadUrl',
+          },
+        ],
+      }),
+    );
+    expect(mismatchedArtifact.valid).toBe(false);
+    expect(mismatchedArtifact.errors.some((e) => e.includes('不一致'))).toBe(true);
+
+    const sameOriginValid = validateSameOriginCatalog(
+      JSON.stringify({
+        catalogFormatVersion: 1,
+        sourceId: 'official',
+        sourceType: 'OFFICIAL',
+        plugins: [
+          {
+            id: 'ok-1',
+            name: 'Valid Official',
+            version: '1.0.0',
+            contractVersion: 1,
+            entryPoint: 'main',
+            artifact: 'ok-1.pljs',
+            downloadUrl: '/api/v1/plugins/artifacts/official/ok-1.pljs',
+            sha256: 'c'.repeat(64),
+            requiredCapabilities: [],
+            description: 'valid same-origin plugin',
+          },
+        ],
+      }),
+      'official',
+    );
+    expect(sameOriginValid.valid).toBe(true);
   });
 });
 

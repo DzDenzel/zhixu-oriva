@@ -244,7 +244,9 @@ function validateCatalogInternal(
       }
 
       let downloadUrl: string | undefined;
-      if (e.downloadUrl !== undefined && e.downloadUrl !== null) {
+      if (e.downloadUrl === undefined || e.downloadUrl === null || e.downloadUrl === '') {
+        pushError(`plugins[${index}].downloadUrl 不能为空`);
+      } else {
         const validated =
           mode === 'form-b'
             ? safeFormBDownloadUrl(e.downloadUrl)
@@ -257,16 +259,22 @@ function validateCatalogInternal(
           );
         } else {
           downloadUrl = validated;
+          if (artifact) {
+            const urlFile = validated.slice(validated.lastIndexOf('/') + 1);
+            if (urlFile !== artifact) {
+              pushError(`plugins[${index}].downloadUrl 文件名（${urlFile}）与 artifact（${artifact}）不一致`);
+            }
+          }
         }
       }
 
       let sha256: string | undefined;
-      if (e.sha256 !== undefined && e.sha256 !== null && e.sha256 !== '') {
-        if (!isValidSha256Hex(e.sha256)) {
-          pushError(`plugins[${index}].sha256 必须为 64 位十六进制摘要`);
-        } else {
-          sha256 = String(e.sha256).trim().toUpperCase();
-        }
+      if (e.sha256 === undefined || e.sha256 === null || e.sha256 === '') {
+        pushError(`plugins[${index}].sha256 不能为空且必须为 64 位十六进制摘要`);
+      } else if (!isValidSha256Hex(e.sha256)) {
+        pushError(`plugins[${index}].sha256 必须为 64 位十六进制摘要`);
+      } else {
+        sha256 = String(e.sha256).trim().toUpperCase();
       }
 
       const requiredCapabilities: string[] = [];
