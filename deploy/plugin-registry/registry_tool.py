@@ -570,6 +570,10 @@ def _open_anchored_dir_fd(target_dir: Path, label: str, stop_at: Path | None = N
             if cur_fd != -1:
                 os.close(cur_fd)
             raise RegistryValidationError(f"Cannot open anchored directory {label}: {exc}") from exc
+        except BaseException:
+            if cur_fd != -1:
+                os.close(cur_fd)
+            raise
 
     try:
         for seg in rel_parts:
@@ -590,6 +594,10 @@ def _open_anchored_dir_fd(target_dir: Path, label: str, stop_at: Path | None = N
         if cur_fd != -1:
             os.close(cur_fd)
         raise RegistryValidationError(f"Cannot open anchored directory {label}: {exc}") from exc
+    except BaseException:
+        if cur_fd != -1:
+            os.close(cur_fd)
+        raise
 
 
 def _open_anchored_regular_file(
@@ -1755,8 +1763,8 @@ def _write_anchored_output_file(
                     os.mkdir(current)
                     st = _lstat_no_symlink(current, f"output subdirectory {seg}")
                 sub_h = _WinAnchoredDirHandle(current, f"output subdirectory {seg}", expected_id=(st.st_dev, st.st_ino))
-                sub_h.verify_matches(current, expected_id=(st.st_dev, st.st_ino), expected_parent=parent_final)
                 held_subdirs.append(sub_h)
+                sub_h.verify_matches(current, expected_id=(st.st_dev, st.st_ino), expected_parent=parent_final)
                 parent_final = sub_h.final_path
 
             leaf_parent_handle = held_subdirs[-1] if held_subdirs else active_out

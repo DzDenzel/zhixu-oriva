@@ -161,11 +161,30 @@ class PluginRegistryCompatibilityTest {
         } catch (t: Throwable) {
             mainFailure = t
         } finally {
-            readExecutor.shutdownNow()
+            // 1. Kill any descendants first (even when READY PID was never parsed), then force-kill root process under explicit timeout check.
+            try {
+                val phClass = Class.forName("java.lang.ProcessHandle")
+                val destroyForciblyMethod = phClass.getMethod("destroyForcibly")
+                @Suppress("UNCHECKED_CAST")
+                val descStream = Process::class.java.getMethod("descendants").invoke(proc) as java.util.stream.Stream<Any>
+                val descs = mutableListOf<Any>()
+                descStream.use { s -> s.forEach { descs.add(it) } }
+                for (h in descs.asReversed()) {
+                    try {
+                        destroyForciblyMethod.invoke(h)
+                    } catch (t: Throwable) {
+                        cleanupFailures += t
+                    }
+                }
+            } catch (t: Throwable) {
+                cleanupFailures += t
+            }
             try {
                 if (proc.isAlive) {
                     proc.destroyForcibly()
-                    proc.waitFor(2, TimeUnit.SECONDS)
+                    if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+                        cleanupFailures += AssertionError("Root test process failed to terminate within 2s teardown timeout")
+                    }
                 }
             } catch (t: Throwable) {
                 cleanupFailures += t
@@ -182,21 +201,28 @@ class PluginRegistryCompatibilityTest {
                     cleanupFailures += t
                 }
             }
-            // Close the underlying pipe/reader so a blocked readLine() unblocks immediately, then bound daemon join.
+            // 2. Close ONLY the raw inputStream first so any blocked BufferedReader.readLine() unblocks without locking on BufferedReader.close().
             try {
                 proc.inputStream.close()
             } catch (t: Throwable) {
                 cleanupFailures += t
             }
+            readExecutor.shutdownNow()
+            var readerTerminated = false
             try {
-                procReader?.close()
+                readerTerminated = readExecutor.awaitTermination(1, TimeUnit.SECONDS)
+                if (!readerTerminated) {
+                    cleanupFailures += AssertionError("Daemon READY stdout reader thread did not terminate within 1s teardown deadline")
+                }
             } catch (t: Throwable) {
                 cleanupFailures += t
             }
-            try {
-                readExecutor.awaitTermination(1, TimeUnit.SECONDS)
-            } catch (t: Throwable) {
-                cleanupFailures += t
+            if (readerTerminated) {
+                try {
+                    procReader?.close()
+                } catch (t: Throwable) {
+                    cleanupFailures += t
+                }
             }
         }
         if (mainFailure != null) {

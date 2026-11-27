@@ -1294,6 +1294,17 @@ assert.strictEqual(elements.siteTitle.textContent, '<b>站名</b>');
         self.assertTrue(res_special["touchesRegistry"])
         self.assertEqual(res_special["privilegedHits"], ["deploy/plugin-registry/tests/中文 空格'路径.py"])
 
+        # Also prove real git NUL diff preserves C-style quote/backslash names natively on POSIX filesystems (NTFS forbids '"'/'\\' in filenames).
+        if os.name != "nt":
+            _git("checkout", "-b", "pr-posix-quotes", base_sha)
+            posix_q = repo / 'deploy/plugin-registry/tests/posix"quote\\file.py'
+            posix_q.write_text("# posix quote\n", encoding="utf-8")
+            _git("add", ".")
+            _git("commit", "-m", "posix quote filename")
+            res_posix_q = _classify_git_branch()
+            self.assertTrue(res_posix_q["touchesRegistry"])
+            self.assertEqual(res_posix_q["privilegedHits"], ['deploy/plugin-registry/tests/posix"quote\\file.py'])
+
         synthetic_nul = (
             b'deploy/plugin-registry/tests/"quoted"\\t\xe4\xb8\xad\xe6\x96\x87.py\x00'
             b"deploy/plugin-registry/registry_tool.py_backup\x00"
@@ -1303,7 +1314,7 @@ assert.strictEqual(elements.siteTitle.textContent, '<b>站名</b>');
         self.assertEqual(res_syn["privilegedHits"], ['deploy/plugin-registry/tests/"quoted"\\t中文.py'])
 
     def test_r1_r2_anchored_handle_guards_across_clean_and_posix_root_walk(self) -> None:
-        # Simulated POSIX dir_fd walk proves trusted_root opens '/' first segment-by-segment (never raw full-string os.open)
+        # Simulated POSIX dir_fd walk proves trusted_root opens '/' first segment-by-segment AND closes FDs on RegistryValidationError
         opened_calls: list[tuple[str, int | None]] = []
         fake_fds: dict[int, str] = {}
         next_fd = {"v": 100}
@@ -1323,7 +1334,6 @@ assert.strictEqual(elements.siteTitle.textContent, '<b>站名</b>');
         }
 
         def _fake_lstat(p, dir_fd=None):
-            key = fake_fds[dir_fd] if dir_fd is not None else str(p)
             seg = p if isinstance(p, str) else p.name or "/"
             dev, ino = inode_map.get(seg, (1, 99))
             return _FakeSt(dev, ino, stat.S_IFDIR | 0o755)
@@ -1357,18 +1367,33 @@ assert.strictEqual(elements.siteTitle.textContent, '<b>站名</b>');
                 PurePosixPath("/opt/trusted/registry"), "posix test", stop_at=PurePosixPath("/opt/trusted")
             )
             mock_os.close(fd)
-        self.assertEqual(opened_calls[0], ("/", None))
-        self.assertEqual([c[0] for c in opened_calls], ["/", "opt", "trusted", "registry"])
-        self.assertTrue(all(fd is not None for _, fd in opened_calls[1:]))
+            self.assertEqual(fake_fds, {})
 
-        # Windows persistent Win32 directory handle rejects swapped/moved parent during --clean / output
+            # Verify RegistryValidationError mid-walk leaks ZERO opened dir_fds
+            def _symlink_on_trusted(p, dir_fd=None):
+                seg = p if isinstance(p, str) else p.name or "/"
+                mode = (stat.S_IFLNK | 0o777) if seg == "trusted" else (stat.S_IFDIR | 0o755)
+                dev, ino = inode_map.get(seg, (1, 99))
+                return _FakeSt(dev, ino, mode)
+            mock_os.lstat = _symlink_on_trusted
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link"):
+                registry_tool._open_anchored_dir_fd(
+                    PurePosixPath("/opt/trusted/registry"), "posix symlink test", stop_at=PurePosixPath("/opt/trusted")
+                )
+            self.assertEqual(fake_fds, {})
+        self.assertEqual(opened_calls[0], ("/", None))
+        self.assertEqual([c[0] for c in opened_calls[:4]], ["/", "opt", "trusted", "registry"])
+        self.assertTrue(all(fd is not None for _, fd in opened_calls[1:4]))
+
+        # Windows persistent Win32 directory handle works even under 8.3 short paths and detects pure FileIndex mismatch cleanly
         if os.name == "nt":
             out_dir = self.root / "win_handle_out"
             out_dir.mkdir()
             with registry_tool._WinAnchoredDirHandle(out_dir, "test dir") as h:
                 h.verify_matches(out_dir)
-                with patch.object(h, "_query_handle_state", return_value=((999, 999), out_dir)):
-                    with self.assertRaisesRegex(registry_tool.RegistryValidationError, "file index mismatch"):
+                # Hold canonical long path h.final_path fixed while altering (VolumeSerial, FileIndex)
+                with patch.object(h, "_query_handle_state", return_value=((999, 999), h.final_path)):
+                    with self.assertRaisesRegex(registry_tool.RegistryValidationError, "OS handle file index mismatch"):
                         h.verify_matches(out_dir)
 
 
