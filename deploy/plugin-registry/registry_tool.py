@@ -10,6 +10,7 @@ compatible with `PluginCatalogCodec` and `PluginSourcePolicy`.
 from __future__ import annotations
 
 import argparse
+import ctypes
 from dataclasses import dataclass
 import hashlib
 import io
@@ -22,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import zipfile
 
@@ -60,6 +62,7 @@ HEX64_PATTERN = re.compile(r"^[0-9A-F]{64}$")
 META_SIG_PATTERN = re.compile(r"^META-INF/([A-Za-z0-9_-]{1,64})\.(SF|RSA|DSA|EC)$")
 
 MAX_ARCHIVE_MEMBERS = 2048
+MAX_SIGNATURE_ALIASES = 16
 MAX_ENTRY_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 MAX_PACKAGE_FILE_BYTES = 25 * 1024 * 1024
@@ -293,24 +296,54 @@ def _lstat_no_symlink(path: Path, label: str) -> os.stat_result:
     return st
 
 
-def _check_input_path_chain(path: Path, label: str, must_exist: bool = True) -> None:
-    """Reject '..' traversal and symlinked directories before reading or cleaning."""
+def _check_ancestor_chain_no_symlinks(
+    path: Path,
+    label: str,
+    must_exist: bool = True,
+    stop_at: Path | None = None,
+) -> None:
+    """Reject '..' traversal and check every ancestor from stop_at/root/cwd down to path."""
     if ".." in path.parts:
         raise RegistryValidationError(f"Unanchored '..' traversal is forbidden in {label}: {path}")
-    if not path.is_absolute():
-        current = Path.cwd()
-        _lstat_no_symlink(current, f"working directory for {label}")
+
+    if stop_at is not None:
+        if ".." in stop_at.parts:
+            raise RegistryValidationError(f"Unanchored '..' traversal is forbidden in trusted root for {label}: {stop_at}")
+        abs_stop = Path(os.path.abspath(stop_at))
+        abs_path = Path(os.path.abspath(path))
+        _check_ancestor_chain_no_symlinks(abs_stop, f"trusted root for {label}", must_exist=True, stop_at=None)
+        try:
+            rel = abs_path.relative_to(abs_stop)
+        except ValueError as exc:
+            raise RegistryValidationError(f"{label} escapes trusted root {stop_at}: {path}") from exc
+        current = abs_stop
+        for part in rel.parts:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            if os.path.lexists(current):
+                _lstat_no_symlink(current, f"ancestor '{part}' of {label}")
+    elif path.is_absolute():
+        current = Path(path.anchor)
+        for part in path.parts[1:]:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            if os.path.lexists(current):
+                _lstat_no_symlink(current, f"ancestor '{part}' of {label}")
+    else:
+        cwd = Path.cwd()
+        _check_ancestor_chain_no_symlinks(cwd, f"working directory for {label}", must_exist=True, stop_at=None)
+        current = cwd
         for part in path.parts:
             if part in {"", "."}:
                 continue
             current = current / part
             if os.path.lexists(current):
                 _lstat_no_symlink(current, f"path segment '{part}' in {label}")
+
     if must_exist or os.path.lexists(path):
         _lstat_no_symlink(path, label)
-    parent = path.parent
-    if str(parent) and parent != path and os.path.lexists(parent):
-        _lstat_no_symlink(parent, f"parent directory of {label}")
 
 
 def ensure_no_symlinks_to(target: Path, anchor: Path) -> None:
@@ -332,10 +365,70 @@ def ensure_no_symlinks_to(target: Path, anchor: Path) -> None:
         raise RegistryValidationError(f"Real path escapes trusted root: {target.name}")
 
 
-def _open_anchored_regular_file(anchor_dir: Path, rel_parts: tuple[str, ...], label: str) -> int:
-    """Open a regular file anchored to anchor_dir without following symlinks on any component."""
+def _win_final_path_for_fd(fd: int) -> Path | None:
+    if os.name != "nt":
+        return None
+    import ctypes.wintypes as wt
+    import msvcrt
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetFinalPathNameByHandleW.argtypes = [wt.HANDLE, wt.LPWSTR, wt.DWORD, wt.DWORD]
+    k32.GetFinalPathNameByHandleW.restype = wt.DWORD
+
+    handle = msvcrt.get_osfhandle(fd)
+    buf = ctypes.create_unicode_buffer(4096)
+    length = k32.GetFinalPathNameByHandleW(handle, buf, len(buf), 0)
+    if length == 0 or length >= len(buf):
+        raise RegistryValidationError(f"Cannot resolve OS handle path (winerr={ctypes.get_last_error()})")
+    raw_final = buf.value
+    if raw_final.startswith("\\\\?\\UNC\\"):
+        raw_final = "\\\\" + raw_final[8:]
+    elif raw_final.startswith("\\\\?\\"):
+        raw_final = raw_final[4:]
+    return Path(raw_final)
+
+
+def _open_anchored_dir_fd(target_dir: Path, label: str, stop_at: Path | None = None) -> int:
+    """Open a directory descriptor walking segment-by-segment with O_NOFOLLOW on POSIX."""
+    _check_ancestor_chain_no_symlinks(target_dir, label, must_exist=True, stop_at=stop_at)
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if stop_at is not None:
+        start = stop_at
+        rel_parts = target_dir.relative_to(stop_at).parts
+    elif target_dir.is_absolute():
+        start = Path(target_dir.anchor)
+        rel_parts = target_dir.parts[1:]
+    else:
+        start = Path.cwd()
+        rel_parts = target_dir.parts
+
+    cur_fd = -1
+    try:
+        cur_fd = os.open(start, dir_flags)
+        for seg in rel_parts:
+            if seg in {"", "."}:
+                continue
+            next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = next_fd
+        return cur_fd
+    except OSError as exc:
+        if cur_fd != -1:
+            os.close(cur_fd)
+        raise RegistryValidationError(f"Cannot open anchored directory {label}: {exc}") from exc
+
+
+def _open_anchored_regular_file(
+    anchor_dir: Path,
+    rel_parts: tuple[str, ...],
+    label: str,
+    trusted_root: Path | None = None,
+) -> int:
+    """Open a regular file anchored from trusted_root/anchor_dir without following symlinks on any component."""
     if not rel_parts or any(part in {"", ".", ".."} or "/" in part or "\\" in part for part in rel_parts):
         raise RegistryValidationError(f"Unanchored relative path for {label}")
+
+    _check_ancestor_chain_no_symlinks(anchor_dir, f"anchor for {label}", must_exist=True, stop_at=trusted_root)
     target = anchor_dir.joinpath(*rel_parts)
     ensure_no_symlinks_to(target, anchor_dir)
     st = _lstat_no_symlink(target, label)
@@ -348,7 +441,7 @@ def _open_anchored_regular_file(anchor_dir: Path, rel_parts: tuple[str, ...], la
     if os.open in os.supports_dir_fd:
         cur_fd = -1
         try:
-            cur_fd = os.open(anchor_dir, dir_flags)
+            cur_fd = _open_anchored_dir_fd(anchor_dir, f"anchor for {label}", stop_at=trusted_root)
             for seg in rel_parts[:-1]:
                 next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
                 os.close(cur_fd)
@@ -361,10 +454,27 @@ def _open_anchored_regular_file(anchor_dir: Path, rel_parts: tuple[str, ...], la
             if cur_fd != -1:
                 os.close(cur_fd)
 
+    file_fd = -1
     try:
-        return os.open(target, file_flags)
+        file_fd = os.open(target, file_flags)
+        fst = os.fstat(file_fd)
+        if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+            raise RegistryValidationError(f"File identity changed during open for {label}: {target.name}")
+        _check_ancestor_chain_no_symlinks(target, label, must_exist=True, stop_at=trusted_root)
+        real_anchor = Path(os.path.realpath(anchor_dir))
+        real_target = Path(os.path.realpath(target))
+        final_path = _win_final_path_for_fd(file_fd)
+        if final_path is not None:
+            if not final_path.is_relative_to(real_anchor) or final_path != real_target:
+                raise RegistryValidationError(f"Opened handle escapes anchored directory for {label}")
+        opened_fd = file_fd
+        file_fd = -1
+        return opened_fd
     except OSError as exc:
         raise RegistryValidationError(f"Cannot open {label}: {exc}") from exc
+    finally:
+        if file_fd != -1:
+            os.close(file_fd)
 
 
 def _read_bounded_fd(fd: int, max_bytes: int, label: str, allow_empty: bool = False) -> bytes:
@@ -394,24 +504,33 @@ def stream_bounded_package_to_file(
     artifact_path: Path,
     artifacts_dir: Path,
     dest_path: Path,
+    max_allowed_bytes: int = MAX_PACKAGE_FILE_BYTES,
+    trusted_root: Path | None = None,
 ) -> tuple[int, str]:
-    """Stream a single non-symlink artifact into dest_path within MAX_PACKAGE_FILE_BYTES and compute SHA-256."""
+    """Stream a single non-symlink artifact into dest_path within bounded limits and compute SHA-256."""
     ensure_no_symlinks_to(artifact_path, artifacts_dir)
     st = _lstat_no_symlink(artifact_path, f"artifact {artifact_path.name}")
     if not stat.S_ISREG(st.st_mode):
         raise RegistryValidationError(f"Artifact is not a regular file: {artifact_path.name}")
-    if st.st_size <= 0 or st.st_size > MAX_PACKAGE_FILE_BYTES:
+    effective_limit = min(MAX_PACKAGE_FILE_BYTES, max_allowed_bytes)
+    if st.st_size <= 0 or st.st_size > effective_limit:
+        if st.st_size > MAX_PACKAGE_FILE_BYTES or st.st_size <= 0:
+            raise RegistryValidationError(
+                f"Artifact size out of bounds (1..{MAX_PACKAGE_FILE_BYTES} bytes): {artifact_path.name}"
+            )
         raise RegistryValidationError(
-            f"Artifact size out of bounds (1..{MAX_PACKAGE_FILE_BYTES} bytes): {artifact_path.name}"
+            f"Registry cumulative package size exceeds limit ({MAX_TOTAL_REGISTRY_BYTES} bytes)"
         )
 
-    fd = _open_anchored_regular_file(artifacts_dir, (artifact_path.name,), f"artifact {artifact_path.name}")
+    fd = _open_anchored_regular_file(
+        artifacts_dir, (artifact_path.name,), f"artifact {artifact_path.name}", trusted_root=trusted_root
+    )
     hasher = hashlib.sha256()
     total_read = 0
     out_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     try:
         fst = os.fstat(fd)
-        if not stat.S_ISREG(fst.st_mode) or fst.st_size <= 0 or fst.st_size > MAX_PACKAGE_FILE_BYTES:
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size <= 0 or fst.st_size > effective_limit:
             raise RegistryValidationError(f"Artifact descriptor invalid or oversized: {artifact_path.name}")
         out_fd = os.open(dest_path, out_flags, 0o600)
         with os.fdopen(fd, "rb") as src_stream, os.fdopen(out_fd, "wb") as dst_stream:
@@ -421,22 +540,31 @@ def stream_bounded_package_to_file(
                 if not chunk:
                     break
                 total_read += len(chunk)
-                if total_read > MAX_PACKAGE_FILE_BYTES:
+                if total_read > effective_limit:
                     raise RegistryValidationError(
-                        f"Artifact stream exceeded maximum size ({MAX_PACKAGE_FILE_BYTES} bytes): {artifact_path.name}"
+                        f"Artifact stream exceeded maximum size ({effective_limit} bytes): {artifact_path.name}"
                     )
                 hasher.update(chunk)
                 dst_stream.write(chunk)
+    except Exception:
+        if dest_path.exists():
+            dest_path.unlink(missing_ok=True)
+        raise
     finally:
         if fd != -1:
             os.close(fd)
 
     if total_read <= 0:
+        dest_path.unlink(missing_ok=True)
         raise RegistryValidationError(f"Artifact file is empty: {artifact_path.name}")
     return total_read, hasher.hexdigest().upper()
 
 
-def read_bounded_package(artifact_path: Path, artifacts_dir: Path) -> tuple[bytes, str]:
+def read_bounded_package(
+    artifact_path: Path,
+    artifacts_dir: Path,
+    trusted_root: Path | None = None,
+) -> tuple[bytes, str]:
     """Read a non-symlink artifact once within MAX_PACKAGE_FILE_BYTES and compute SHA-256."""
     ensure_no_symlinks_to(artifact_path, artifacts_dir)
     st = _lstat_no_symlink(artifact_path, f"artifact {artifact_path.name}")
@@ -447,9 +575,32 @@ def read_bounded_package(artifact_path: Path, artifacts_dir: Path) -> tuple[byte
             f"Artifact size out of bounds (1..{MAX_PACKAGE_FILE_BYTES} bytes): {artifact_path.name}"
         )
 
-    fd = _open_anchored_regular_file(artifacts_dir, (artifact_path.name,), f"artifact {artifact_path.name}")
+    fd = _open_anchored_regular_file(
+        artifacts_dir, (artifact_path.name,), f"artifact {artifact_path.name}", trusted_root=trusted_root
+    )
     raw = _read_bounded_fd(fd, MAX_PACKAGE_FILE_BYTES, f"artifact {artifact_path.name}")
     return raw, hashlib.sha256(raw).hexdigest().upper()
+
+
+def read_bounded_registry_json(
+    registry_path: Path,
+    trusted_root: Path | None = None,
+) -> dict[str, object]:
+    """Validate ancestor chain, open anchored regular file, enforce <= 2 MiB, and decode JSON object."""
+    _check_ancestor_chain_no_symlinks(registry_path, "registry.json", must_exist=True, stop_at=trusted_root)
+    base_dir = registry_path.parent
+    _lstat_no_symlink(base_dir, "registry directory")
+    reg_fd = _open_anchored_regular_file(
+        base_dir, (registry_path.name,), "registry.json", trusted_root=trusted_root
+    )
+    raw_reg_bytes = _read_bounded_fd(reg_fd, MAX_REGISTRY_JSON_BYTES, "registry.json")
+    try:
+        raw_doc = json.loads(raw_reg_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RegistryValidationError(f"Invalid UTF-8 JSON in {registry_path.name}: {exc}") from exc
+    if not isinstance(raw_doc, dict):
+        raise RegistryValidationError("Registry root must be a JSON object")
+    return raw_doc
 
 
 def _find_jdk_tool(name: str) -> str:
@@ -568,6 +719,10 @@ def _inspect_zipfile_core(
                 alias, ext = sig_match.groups()
                 if ext == "SF":
                     sf_aliases.add(alias)
+                    if len(sf_aliases) > MAX_SIGNATURE_ALIASES:
+                        raise RegistryValidationError(
+                            f"Too many META-INF signature pairs (max {MAX_SIGNATURE_ALIASES}): {label}"
+                        )
                 else:
                     if alias in sig_aliases:
                         raise RegistryValidationError(f"Duplicate signature block for alias: {alias!r}")
@@ -619,18 +774,45 @@ def verify_jar_cryptographic_signers(
     label: str,
     trusted_fingerprints: set[str] | None = None,
 ) -> dict[str, object]:
-    """Run JDK JarFile(file, true) verifier over the exact verified artifact and match trusted anchors."""
+    """Run JDK JarFile(file, true) verifier inside an exclusive reclaimable temp dir."""
     if not VERIFIER_JAVA_PATH.is_file():
         raise RegistryValidationError(f"Missing JarSignerVerifier helper: {VERIFIER_JAVA_PATH}")
     java_bin = _find_jdk_tool("java")
 
-    if isinstance(pkg_source, Path):
-        proc = _run_tool([java_bin, str(VERIFIER_JAVA_PATH), str(pkg_source)])
-    else:
-        with tempfile.TemporaryDirectory(prefix="oriva-jar-verify-") as tmp_dir:
-            tmp_pkg = Path(tmp_dir) / "package.jar"
-            tmp_pkg.write_bytes(pkg_source)
-            proc = _run_tool([java_bin, str(VERIFIER_JAVA_PATH), str(tmp_pkg)])
+    tmp_dir = Path(tempfile.mkdtemp(prefix="oriva-jar-verify-"))
+    try:
+        iso_temp_dir = tmp_dir / "iso"
+        iso_temp_dir.mkdir(parents=True, exist_ok=True)
+        if isinstance(pkg_source, Path):
+            pkg_arg = pkg_source
+        else:
+            pkg_arg = tmp_dir / "package.jar"
+            pkg_arg.write_bytes(pkg_source)
+        proc = _run_tool(
+            [
+                java_bin,
+                f"-Djava.io.tmpdir={iso_temp_dir}",
+                str(VERIFIER_JAVA_PATH),
+                str(pkg_arg),
+                str(iso_temp_dir),
+            ]
+        )
+    finally:
+        cleanup_exc: OSError | None = None
+        for attempt in range(4):
+            try:
+                if tmp_dir.exists():
+                    shutil.rmtree(tmp_dir)
+                cleanup_exc = None
+                break
+            except OSError as exc:
+                cleanup_exc = exc
+                time.sleep(0.05 * (attempt + 1))
+        if cleanup_exc is not None:
+            print(
+                f"WARNING: Failed to clean verifier temp directory {tmp_dir}: {cleanup_exc}",
+                file=sys.stderr,
+            )
 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()
@@ -694,7 +876,7 @@ def validate_contributions(
     contract_version: int,
     declared_capabilities: set[str],
 ) -> None:
-    """Validate manifest contributions aligned with Android PluginContribution.kt (rejects explicit null)."""
+    """Validate manifest contributions aligned 1:1 with Android PluginContribution.kt."""
     if not isinstance(raw_contributions, list):
         raise RegistryValidationError("plugin.json contributions must be a JSON array")
 
@@ -736,6 +918,22 @@ def validate_contributions(
                 field_ids.add(fid)
                 require_non_blank_str(field, "label")
                 require_non_blank_str(field, "onEvent")
+
+                # PluginFormField.options is List<PluginFormChoice> = emptyList() across ALL field kinds.
+                raw_options: list[object] = []
+                if "options" in field:
+                    opts_val = field["options"]
+                    if not isinstance(opts_val, list) or len(opts_val) > 64:
+                        raise RegistryValidationError(f"Invalid options list in form field {fid!r}")
+                    for opt in opts_val:
+                        if (
+                            not isinstance(opt, dict)
+                            or not isinstance(opt.get("value"), str)
+                            or not isinstance(opt.get("label"), str)
+                        ):
+                            raise RegistryValidationError(f"Invalid option entry in form field {fid!r}")
+                    raw_options = opts_val
+
                 fkind = field.get("kind")
                 fval = field.get("value")
                 if fkind == "switch":
@@ -745,13 +943,11 @@ def validate_contributions(
                     if not isinstance(fval, str) or utf16_len(fval) > 4096:
                         raise RegistryValidationError(f"Invalid text value in form field {fid!r}")
                 elif fkind == "choice":
-                    options = field["options"] if "options" in field else []
-                    if not isinstance(fval, str) or not isinstance(options, list) or not options or len(options) > 64:
+                    if not isinstance(fval, str) or not raw_options:
                         raise RegistryValidationError(f"Invalid choice options in form field {fid!r}")
                     opt_values: set[str] = set()
-                    for opt in options:
-                        if not isinstance(opt, dict):
-                            raise RegistryValidationError(f"Invalid choice option in form field {fid!r}")
+                    for opt in raw_options:
+                        assert isinstance(opt, dict)
                         oval = require_raw_non_blank_str(opt, "value")
                         require_non_blank_str(opt, "label")
                         if oval in opt_values:
@@ -767,6 +963,10 @@ def validate_contributions(
             tone = item["tone"] if "tone" in item else "neutral"
             if not isinstance(tone, str) or tone not in CONTRIBUTION_TONES:
                 raise RegistryValidationError(f"Unsupported StatusLine tone: {tone!r}")
+            unavail = item.get("unavailableText")
+            if unavail is not None:
+                if not isinstance(unavail, str) or has_control_chars(unavail) or utf16_len(unavail) > 4096:
+                    raise RegistryValidationError(f"Invalid StatusLine unavailableText: {unavail!r}")
             req_cap = item.get("requiresCapability")
             if req_cap is not None:
                 if not isinstance(req_cap, str) or req_cap not in SYSTEM_CAPABILITIES or req_cap not in declared_capabilities:
@@ -878,27 +1078,13 @@ def validate_package_against_entry(
 def validate_registry(
     registry_path: Path,
     stage_artifacts_dir: Path | None = None,
+    trusted_root: Path | None = None,
 ) -> ValidatedRegistry:
     """Validate registry.json, paths, bounded streaming packages, cryptographic signers, and metadata."""
-    _check_input_path_chain(registry_path, "registry.json", must_exist=True)
+    raw_doc = read_bounded_registry_json(registry_path, trusted_root=trusted_root)
     resolved_registry = registry_path.resolve()
-    if not resolved_registry.is_file():
-        raise RegistryValidationError(f"Registry manifest not found: {registry_path}")
-
     base_dir = resolved_registry.parent
-    _lstat_no_symlink(base_dir, "registry directory")
     artifacts_dir = base_dir / "artifacts"
-
-    reg_fd = _open_anchored_regular_file(base_dir, (resolved_registry.name,), "registry.json")
-    raw_reg_bytes = _read_bounded_fd(reg_fd, MAX_REGISTRY_JSON_BYTES, "registry.json")
-
-    try:
-        raw_doc = json.loads(raw_reg_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RegistryValidationError(f"Invalid UTF-8 JSON in {registry_path.name}: {exc}") from exc
-
-    if not isinstance(raw_doc, dict):
-        raise RegistryValidationError("Registry root must be a JSON object")
 
     if "catalogFormatVersion" in raw_doc:
         catalog_format_version = require_strict_int(
@@ -978,13 +1164,16 @@ def validate_registry(
             validate_http_url(entry["downloadUrl"], f"{plugin_id}.downloadUrl")
 
         artifact_path = artifacts_dir / artifact
+        remaining_repo_budget = MAX_TOTAL_REGISTRY_BYTES - cumulative_package_bytes
 
         def _verify_staged(staged_pkg: Path) -> tuple[int, str, str]:
-            pkg_size, actual_sha256 = stream_bounded_package_to_file(artifact_path, artifacts_dir, staged_pkg)
-            if cumulative_package_bytes + pkg_size > MAX_TOTAL_REGISTRY_BYTES:
-                raise RegistryValidationError(
-                    f"Registry cumulative package size exceeds limit ({MAX_TOTAL_REGISTRY_BYTES} bytes)"
-                )
+            pkg_size, actual_sha256 = stream_bounded_package_to_file(
+                artifact_path,
+                artifacts_dir,
+                staged_pkg,
+                max_allowed_bytes=remaining_repo_budget,
+                trusted_root=trusted_root,
+            )
 
             declared_sha = entry.get("sha256")
             if declared_sha is not None:
@@ -1064,6 +1253,38 @@ def validate_registry(
     )
 
 
+def audit_governance_diff(
+    base_registry: Path,
+    candidate_registry: Path,
+    trusted_root: Path | None = None,
+    candidate_root: Path | None = None,
+) -> dict[str, object]:
+    """Bounded, symlink-safe governance comparison of trust-anchor and source metadata keys."""
+    gov_keys = ("trustedFingerprints", "sourceId", "sourceType", "catalogFormatVersion")
+    base_present = os.path.lexists(base_registry)
+    cand_present = os.path.lexists(candidate_registry)
+    anchor_changed = False
+
+    if cand_present:
+        cand_doc = read_bounded_registry_json(candidate_registry, trusted_root=candidate_root)
+        if base_present:
+            base_doc = read_bounded_registry_json(base_registry, trusted_root=trusted_root)
+            for key in gov_keys:
+                if base_doc.get(key) != cand_doc.get(key):
+                    anchor_changed = True
+                    break
+        else:
+            anchor_changed = True
+    elif base_present:
+        anchor_changed = True
+
+    return {
+        "anchorChanged": anchor_changed,
+        "basePresent": base_present,
+        "candidatePresent": cand_present,
+    }
+
+
 def _write_utf8_lf(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(text.encode("utf-8"))
@@ -1080,28 +1301,26 @@ def _sha256_file_stream(path: Path) -> str:
     return hasher.hexdigest().lower()
 
 
-def _validate_output_dir_anchor(output_dir: Path, protected_dirs: tuple[Path, ...]) -> tuple[Path, Path]:
-    """Ensure output_dir is strictly anchored inside its non-symlink parent and cannot escape on --clean."""
-    _check_input_path_chain(output_dir, "output directory", must_exist=False)
+def _validate_output_dir_anchor(
+    output_dir: Path,
+    protected_exact_or_ancestors: tuple[Path, ...],
+    protected_subtrees: tuple[Path, ...],
+    output_root: Path | None = None,
+) -> tuple[Path, Path, tuple[int, int]]:
+    """Ensure output_dir is strictly anchored inside its non-symlink parent and never overlaps inputs."""
+    _check_ancestor_chain_no_symlinks(output_dir, "output directory", must_exist=False, stop_at=output_root)
     if not output_dir.name or output_dir.name in {".", ".."}:
         raise RegistryValidationError(f"Unsafe output directory name: {output_dir}")
     parent = output_dir.parent
     if not str(parent) or parent == output_dir:
         raise RegistryValidationError(f"Output directory must specify a non-root parent directory: {output_dir}")
 
-    # Verify all existing ancestors along parent have no symlinks/reparse points before mkdir.
-    ancestors_to_check: list[Path] = []
-    cur = parent
-    while cur and cur != cur.parent:
-        if os.path.lexists(cur):
-            ancestors_to_check.append(cur)
-        cur = cur.parent
-    # Check nearest existing parent directory (and relative segments already checked above).
-    if ancestors_to_check:
-        _lstat_no_symlink(ancestors_to_check[0], "output parent directory")
-
+    _check_ancestor_chain_no_symlinks(parent, "output parent directory", must_exist=False, stop_at=output_root)
     parent.mkdir(parents=True, exist_ok=True)
-    _lstat_no_symlink(parent, "output parent directory")
+    parent_st = _lstat_no_symlink(parent, "output parent directory")
+    if not stat.S_ISDIR(parent_st.st_mode):
+        raise RegistryValidationError(f"Output parent is not a directory: {parent}")
+
     real_parent = Path(os.path.realpath(parent))
     target_out = real_parent / output_dir.name
 
@@ -1110,11 +1329,17 @@ def _validate_output_dir_anchor(output_dir: Path, protected_dirs: tuple[Path, ..
     if os.path.commonpath([str(real_parent), str(target_out)]) != str(real_parent):
         raise RegistryValidationError(f"Output directory escapes specified parent: {output_dir}")
 
-    for protected in protected_dirs:
+    for protected in protected_exact_or_ancestors:
         real_prot = Path(os.path.realpath(protected))
         if target_out == real_prot or real_prot.is_relative_to(target_out):
             raise RegistryValidationError(
                 f"Output directory {target_out} overlaps or encloses protected directory {real_prot}"
+            )
+    for subtree in protected_subtrees:
+        real_sub = Path(os.path.realpath(subtree))
+        if target_out == real_sub or real_sub.is_relative_to(target_out) or target_out.is_relative_to(real_sub):
+            raise RegistryValidationError(
+                f"Output directory {target_out} overlaps protected input subtree {real_sub}"
             )
 
     if os.path.lexists(target_out):
@@ -1124,7 +1349,131 @@ def _validate_output_dir_anchor(output_dir: Path, protected_dirs: tuple[Path, ..
         if Path(os.path.realpath(target_out)) != target_out:
             raise RegistryValidationError(f"Output directory resolves outside anchored parent: {target_out}")
 
-    return real_parent, target_out
+    return real_parent, target_out, (parent_st.st_dev, parent_st.st_ino)
+
+
+def _safe_rmtree_dir_fd(parent_fd: int, name: str) -> None:
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    child_fd = os.open(name, dir_flags, dir_fd=parent_fd)
+    try:
+        for entry in os.listdir(child_fd):
+            st = os.lstat(entry, dir_fd=child_fd)
+            if stat.S_ISLNK(st.st_mode):
+                raise RegistryValidationError(f"Symbolic link inside output tree forbidden during --clean: {entry}")
+            if stat.S_ISDIR(st.st_mode):
+                _safe_rmtree_dir_fd(child_fd, entry)
+            else:
+                os.unlink(entry, dir_fd=child_fd)
+    finally:
+        os.close(child_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _safe_rmtree_anchored(target_out: Path, real_parent: Path, expected_parent_id: tuple[int, int]) -> None:
+    cur_parent_st = _lstat_no_symlink(real_parent, "output parent directory")
+    if (cur_parent_st.st_dev, cur_parent_st.st_ino) != expected_parent_id:
+        raise RegistryValidationError("Output parent directory identity changed before --clean")
+
+    if os.open in os.supports_dir_fd:
+        parent_fd = _open_anchored_dir_fd(real_parent, "output parent directory")
+        try:
+            fst = os.fstat(parent_fd)
+            if (fst.st_dev, fst.st_ino) != expected_parent_id:
+                raise RegistryValidationError("Output parent descriptor mismatch before --clean")
+            st = os.lstat(target_out.name, dir_fd=parent_fd)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                raise RegistryValidationError(f"Output path is not a safe directory for --clean: {target_out}")
+            _safe_rmtree_dir_fd(parent_fd, target_out.name)
+            return
+        finally:
+            os.close(parent_fd)
+
+    _lstat_no_symlink(target_out, "output directory")
+    for root_dir, dirs, files in os.walk(target_out, topdown=False, followlinks=False):
+        root_path = Path(root_dir)
+        _lstat_no_symlink(root_path, "output subdirectory")
+        for fname in files:
+            fpath = root_path / fname
+            _lstat_no_symlink(fpath, f"output file {fname}")
+            os.unlink(fpath)
+        for dname in dirs:
+            dpath = root_path / dname
+            _lstat_no_symlink(dpath, f"output directory {dname}")
+            os.rmdir(dpath)
+    _lstat_no_symlink(target_out, "output directory")
+    os.rmdir(target_out)
+
+
+def _write_anchored_output_file(
+    target_out: Path,
+    rel: Path,
+    src_file: Path,
+    expected_out_id: tuple[int, int],
+) -> None:
+    """Write src_file into target_out / rel without ever following any existing symlink in target_out."""
+    cur_out_st = _lstat_no_symlink(target_out, "output directory")
+    if (cur_out_st.st_dev, cur_out_st.st_ino) != expected_out_id:
+        raise RegistryValidationError("Output directory identity changed during publish")
+
+    if os.open in os.supports_dir_fd:
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        write_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        cur_fd = _open_anchored_dir_fd(target_out, "output directory")
+        try:
+            fst = os.fstat(cur_fd)
+            if (fst.st_dev, fst.st_ino) != expected_out_id:
+                raise RegistryValidationError("Output directory descriptor mismatch during publish")
+            for seg in rel.parts[:-1]:
+                try:
+                    os.mkdir(seg, 0o755, dir_fd=cur_fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
+                os.close(cur_fd)
+                cur_fd = next_fd
+            out_fd = os.open(rel.parts[-1], write_flags, 0o644, dir_fd=cur_fd)
+        finally:
+            os.close(cur_fd)
+        with src_file.open("rb") as fin, os.fdopen(out_fd, "wb") as fout:
+            while True:
+                chunk = fin.read(READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                fout.write(chunk)
+        return
+
+    current = target_out
+    for seg in rel.parts[:-1]:
+        current = current / seg
+        if os.path.lexists(current):
+            st = _lstat_no_symlink(current, f"output subdirectory {seg}")
+            if not stat.S_ISDIR(st.st_mode):
+                raise RegistryValidationError(f"Output subdirectory path is not a directory: {current}")
+        else:
+            os.mkdir(current)
+
+    dst_path = target_out / rel
+    if os.path.lexists(dst_path):
+        st = _lstat_no_symlink(dst_path, f"existing output file {dst_path.name}")
+        if not stat.S_ISREG(st.st_mode):
+            raise RegistryValidationError(f"Existing output target is not a regular file: {dst_path}")
+    write_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    out_fd = os.open(dst_path, write_flags, 0o644)
+    try:
+        final_path = _win_final_path_for_fd(out_fd)
+        real_out = Path(os.path.realpath(target_out))
+        if final_path is not None and not final_path.is_relative_to(real_out):
+            raise RegistryValidationError(f"Output file handle escaped output directory: {dst_path.name}")
+        with src_file.open("rb") as fin, os.fdopen(out_fd, "wb") as fout:
+            out_fd = -1
+            while True:
+                chunk = fin.read(READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                fout.write(chunk)
+    finally:
+        if out_fd != -1:
+            os.close(out_fd)
 
 
 def build_static_site(
@@ -1132,13 +1481,17 @@ def build_static_site(
     output_dir: Path,
     web_dir: Path | None = None,
     clean: bool = False,
+    trusted_root: Path | None = None,
+    output_root: Path | None = None,
 ) -> ValidatedRegistry:
     """Validate registry fail-closed via streaming staging, then emit deterministic static site."""
-    _check_input_path_chain(registry_path, "registry.json", must_exist=True)
+    _check_ancestor_chain_no_symlinks(registry_path, "registry.json", must_exist=True, stop_at=trusted_root)
     resolved_registry_dir = registry_path.resolve().parent
+    resolved_artifacts_dir = resolved_registry_dir / "artifacts"
+    resolved_tests_dir = resolved_registry_dir / "tests"
 
     raw_web = web_dir or (Path(__file__).resolve().parent / "web")
-    _check_input_path_chain(raw_web, "web directory", must_exist=True)
+    _check_ancestor_chain_no_symlinks(raw_web, "web directory", must_exist=True)
     resolved_web = raw_web.resolve()
     _lstat_no_symlink(resolved_web, "web directory")
     required_web_files = ("index.html", "style.css", "app.js")
@@ -1148,15 +1501,20 @@ def build_static_site(
         if not asset_path.is_file():
             raise RegistryValidationError(f"Missing web asset: {asset_path}")
 
-    protected_dirs = (resolved_registry_dir, resolved_web, Path(__file__).resolve().parent)
-    real_parent, target_out = _validate_output_dir_anchor(output_dir, protected_dirs)
+    protected_exact_or_ancestors = (resolved_registry_dir, Path(__file__).resolve().parent)
+    protected_subtrees = (resolved_artifacts_dir, resolved_web, resolved_tests_dir)
+    real_parent, target_out, parent_id = _validate_output_dir_anchor(
+        output_dir, protected_exact_or_ancestors, protected_subtrees, output_root=output_root
+    )
 
     with tempfile.TemporaryDirectory(prefix="oriva-site-stage-") as stage_tmp:
         stage_dir = Path(stage_tmp)
         stage_artifacts = stage_dir / "artifacts"
         stage_artifacts.mkdir(parents=True, exist_ok=True)
 
-        validated = validate_registry(registry_path, stage_artifacts_dir=stage_artifacts)
+        validated = validate_registry(
+            registry_path, stage_artifacts_dir=stage_artifacts, trusted_root=trusted_root
+        )
 
         for asset_name in required_web_files:
             web_fd = _open_anchored_regular_file(resolved_web, (asset_name,), f"web asset {asset_name}")
@@ -1179,42 +1537,42 @@ def build_static_site(
             checksum_lines.append(f"{digest}  {rel_posix}")
         _write_utf8_lf(stage_dir / "SHA256SUMS", "\n".join(checksum_lines) + "\n")
 
-        # Re-verify output anchor right before publishing / cleaning.
-        real_parent_after, target_out_after = _validate_output_dir_anchor(output_dir, protected_dirs)
-        if real_parent_after != real_parent or target_out_after != target_out:
+        real_parent_after, target_out_after, parent_id_after = _validate_output_dir_anchor(
+            output_dir, protected_exact_or_ancestors, protected_subtrees, output_root=output_root
+        )
+        if real_parent_after != real_parent or target_out_after != target_out or parent_id_after != parent_id:
             raise RegistryValidationError("Output directory anchor changed during build")
 
         if clean and os.path.lexists(target_out):
-            _lstat_no_symlink(target_out, "output directory")
-            if Path(os.path.realpath(target_out)) != target_out or target_out.parent != real_parent:
-                raise RegistryValidationError(f"Refusing to clean unanchored output directory: {target_out}")
-            shutil.rmtree(target_out)
+            _safe_rmtree_anchored(target_out, real_parent, parent_id)
 
-        target_out.mkdir(parents=True, exist_ok=True)
+        if os.path.lexists(target_out):
+            out_st = _lstat_no_symlink(target_out, "output directory")
+            if not stat.S_ISDIR(out_st.st_mode):
+                raise RegistryValidationError(f"Output path exists and is not a directory: {target_out}")
+        else:
+            os.mkdir(target_out)
+            out_st = _lstat_no_symlink(target_out, "output directory")
+
+        out_id = (out_st.st_dev, out_st.st_ino)
         for src_file in sorted(stage_dir.rglob("*")):
-            rel = src_file.relative_to(stage_dir)
-            dst_path = target_out / rel
             if src_file.is_dir():
-                dst_path.mkdir(parents=True, exist_ok=True)
                 continue
-            dst_path.parent.mkdir(parents=True, exist_ok=True)
-            with src_file.open("rb") as fin, dst_path.open("wb") as fout:
-                while True:
-                    chunk = fin.read(READ_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    fout.write(chunk)
+            rel = src_file.relative_to(stage_dir)
+            _write_anchored_output_file(target_out, rel, src_file, out_id)
 
     return validated
 
 
-def inspect_package_certificates(pkg_path: Path) -> dict[str, object]:
+def inspect_package_certificates(pkg_path: Path, trusted_root: Path | None = None) -> dict[str, object]:
     """Diagnostic-only inspection of package SHA-256 and CodeSigner certificates (grants NO trust)."""
-    _check_input_path_chain(pkg_path, f"package {pkg_path.name}", must_exist=True)
+    _check_ancestor_chain_no_symlinks(pkg_path, f"package {pkg_path.name}", must_exist=True, stop_at=trusted_root)
     resolved = pkg_path.resolve()
     with tempfile.TemporaryDirectory(prefix="oriva-inspect-stage-") as tmp_dir:
         staged = Path(tmp_dir) / resolved.name
-        _, pkg_sha256 = stream_bounded_package_to_file(resolved, resolved.parent, staged)
+        _, pkg_sha256 = stream_bounded_package_to_file(
+            resolved, resolved.parent, staged, trusted_root=trusted_root
+        )
         manifest_bytes, _, _ = inspect_zip_file(staged, resolved.name)
         report = verify_jar_cryptographic_signers(staged, resolved.name, trusted_fingerprints=None)
     pkg_manifest = json.loads(manifest_bytes.decode("utf-8"))
@@ -1237,16 +1595,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     val_parser = subparsers.add_parser("validate", help="Validate registry.json and all signed plugin packages.")
     val_parser.add_argument("--registry", type=Path, default=default_registry, help="Path to registry.json")
+    val_parser.add_argument("--trusted-root", type=Path, default=None, help="Explicit trusted ancestor root for input")
     val_parser.add_argument("--json", action="store_true", help="Output validation summary as JSON")
 
     build_parser = subparsers.add_parser("build", help="Validate and deterministically build static site output.")
     build_parser.add_argument("--registry", type=Path, default=default_registry, help="Path to registry.json")
+    build_parser.add_argument("--trusted-root", type=Path, default=None, help="Explicit trusted ancestor root for input")
     build_parser.add_argument(
         "--output",
         type=Path,
         default=Path(__file__).resolve().parent / "dist",
         help="Destination directory for static site build",
     )
+    build_parser.add_argument("--output-root", type=Path, default=None, help="Explicit trusted ancestor root for output")
     build_parser.add_argument("--web-dir", type=Path, default=None, help="Optional override for web assets directory")
     build_parser.add_argument("--clean", action="store_true", help="Remove existing output directory before writing")
 
@@ -1255,6 +1616,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Diagnostic-only: print per-entry and common leaf signer SHA-256/SPKI fingerprints (grants no trust).",
     )
     inspect_parser.add_argument("--package", type=Path, required=True, help="Path to .plp or .pljs package")
+    inspect_parser.add_argument("--trusted-root", type=Path, default=None, help="Explicit trusted ancestor root")
+
+    gov_parser = subparsers.add_parser(
+        "audit-governance",
+        help="Safely inspect base vs candidate registry.json governance metadata with bounded anchored reads.",
+    )
+    gov_parser.add_argument("--base-registry", type=Path, required=True, help="Path to base registry.json")
+    gov_parser.add_argument("--candidate-registry", type=Path, required=True, help="Path to candidate registry.json")
+    gov_parser.add_argument("--trusted-root", type=Path, default=None, help="Explicit trusted ancestor root for base")
+    gov_parser.add_argument("--candidate-root", type=Path, default=None, help="Explicit trusted ancestor root for candidate")
 
     return parser
 
@@ -1264,7 +1635,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "validate":
-            validated = validate_registry(args.registry)
+            validated = validate_registry(args.registry, trusted_root=args.trusted_root)
             summary = {
                 "status": "ok",
                 "sourceId": validated.source_id,
@@ -1285,15 +1656,32 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "build":
-            validated = build_static_site(args.registry, args.output, web_dir=args.web_dir, clean=args.clean)
+            validated = build_static_site(
+                args.registry,
+                args.output,
+                web_dir=args.web_dir,
+                clean=args.clean,
+                trusted_root=args.trusted_root,
+                output_root=args.output_root,
+            )
             print(
                 f"BUILT {args.output} ({len(validated.plugins)} plugin(s), sourceId={validated.source_id})"
             )
             return 0
 
         if args.command == "inspect-cert":
-            info = inspect_package_certificates(args.package)
+            info = inspect_package_certificates(args.package, trusted_root=args.trusted_root)
             print(json.dumps(info, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "audit-governance":
+            result = audit_governance_diff(
+                args.base_registry,
+                args.candidate_registry,
+                trusted_root=args.trusted_root,
+                candidate_root=args.candidate_root,
+            )
+            print(json.dumps(result, ensure_ascii=False))
             return 0
 
     except RegistryValidationError as exc:

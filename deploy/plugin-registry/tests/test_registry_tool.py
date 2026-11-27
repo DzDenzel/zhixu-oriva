@@ -413,7 +413,7 @@ class RegistryToolTests(unittest.TestCase):
             zout.writestr("META-INF/BOGUS.RSA", b"")
         with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Empty META-INF"):
             registry_tool.inspect_zip_bytes(empty_pair_pkg.read_bytes(), "empty-pair.pljs")
-        with self.assertRaises(registry_tool.RegistryValidationError):
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Empty META-INF"):
             registry_tool.verify_jar_cryptographic_signers(empty_pair_pkg, "empty-pair.pljs", {self.fp_a})
 
         # 4b. Non-empty corrupt auxiliary .SF / .RSA pair alongside valid ALPHA
@@ -423,7 +423,7 @@ class RegistryToolTests(unittest.TestCase):
                 zout.writestr(item, zin.read(item.filename))
             zout.writestr("META-INF/BOGUS.SF", b"Signature-Version: 1.0\r\nSHA-256-Digest-Manifest: invalid\r\n\r\n")
             zout.writestr("META-INF/BOGUS.RSA", b"not-a-valid-pkcs7-block")
-        with self.assertRaises(registry_tool.RegistryValidationError):
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Cryptographic JAR verification failed"):
             registry_tool.verify_jar_cryptographic_signers(corrupt_pair_pkg, "corrupt-pair.pljs", {self.fp_a})
 
         # 4c. Valid PKCS7 auxiliary pair referencing an absent entry -> rejected
@@ -451,8 +451,39 @@ class RegistryToolTests(unittest.TestCase):
                 zout.writestr(item, za.read(item.filename))
             zout.writestr("META-INF/MANONLY.SF", zm.read("META-INF/MANONLY.SF"))
             zout.writestr("META-INF/MANONLY.RSA", zm.read("META-INF/MANONLY.RSA"))
-        with self.assertRaises(registry_tool.RegistryValidationError):
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Unattributed|ineffective|Invalid signature file digest"):
             registry_tool.verify_jar_cryptographic_signers(manonly_pkg, "manonly-extra.pljs", {self.fp_a})
+
+        # 4e. Exceeding MAX_SIGNATURE_ALIASES (17 pairs) is rejected by both Python and JarSignerVerifier
+        many_aliases_pkg = reg_dir / "artifacts" / "many-aliases.pljs"
+        with zipfile.ZipFile(base_signed, "r") as zin, zipfile.ZipFile(many_aliases_pkg, "w") as zout:
+            for item in zin.infolist():
+                zout.writestr(item, zin.read(item.filename))
+            for idx in range(registry_tool.MAX_SIGNATURE_ALIASES):
+                alias_name = f"X{idx:02d}"
+                zout.writestr(f"META-INF/{alias_name}.SF", b"Signature-Version: 1.0\r\n\r\n")
+                zout.writestr(f"META-INF/{alias_name}.RSA", b"stub-block")
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Too many META-INF signature pairs"):
+            registry_tool.inspect_zip_bytes(many_aliases_pkg.read_bytes(), "many-aliases.pljs")
+        with patch.object(registry_tool, "inspect_zip_bytes"):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Too many META-INF signature pairs"):
+                registry_tool.verify_jar_cryptographic_signers(many_aliases_pkg, "many-aliases.pljs", {self.fp_a})
+
+        # 4f. Subprocess timeout cleans up the exclusive isolated temp dir + per-alias JARs without leaking
+        custom_tmp = self.root / "isolated_tmp_probe"
+        custom_tmp.mkdir()
+
+        def fake_timeout_run(cmd, *args, **kwargs):
+            tmp_arg = Path(cmd[-1])
+            self.assertTrue(tmp_arg.is_dir())
+            (tmp_arg / "oriva-sig-iso-leaked.jar").write_bytes(b"simulated-isolated-jar")
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
+
+        with patch.object(registry_tool.tempfile, "gettempdir", return_value=str(custom_tmp)):
+            with patch.object(registry_tool.subprocess, "run", side_effect=fake_timeout_run):
+                with self.assertRaisesRegex(registry_tool.RegistryValidationError, "timed out"):
+                    registry_tool.verify_jar_cryptographic_signers(base_signed, "base-valid.pljs", {self.fp_a})
+        self.assertEqual(list(custom_tmp.iterdir()), [])
 
         reg_path.write_text(
             json.dumps(
@@ -721,6 +752,73 @@ class RegistryToolTests(unittest.TestCase):
         with self.assertRaisesRegex(registry_tool.RegistryValidationError, "overlaps or encloses"):
             registry_tool.build_static_site(reg_path, reg_dir, clean=True)
 
+        # 8. S2 v1.3: protected input subtrees, clean=False output symlink guard, ancestor symlinks, bounded governance audit
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "overlaps protected input subtree"):
+            registry_tool.build_static_site(reg_path, reg_dir / "artifacts", clean=True)
+
+        nonclean_out = self.root / "nonclean_dist"
+        nonclean_out.mkdir()
+        (nonclean_out / "catalog.json").write_text("{}", encoding="utf-8")
+
+        def fake_nonclean_lstat(p, *args, **kwargs):
+            st = real_lstat(p, *args, **kwargs)
+            if Path(p) == nonclean_out / "catalog.json":
+                return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
+            return st
+
+        with patch.object(registry_tool.os, "lstat", fake_nonclean_lstat):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
+                registry_tool.build_static_site(reg_path, nonclean_out, clean=False)
+
+        def fake_ancestor_lstat(p, *args, **kwargs):
+            st = real_lstat(p, *args, **kwargs)
+            if Path(p) == reg_dir:
+                return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
+            return st
+
+        with patch.object(registry_tool.os, "lstat", fake_ancestor_lstat):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
+                registry_tool.validate_registry(reg_path)
+
+        # Bounded staging budget check inside stream_bounded_package_to_file
+        staged_tmp = self.root / "staged_budget.pljs"
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "cumulative package size"):
+            registry_tool.stream_bounded_package_to_file(
+                pkg,
+                reg_dir / "artifacts",
+                staged_tmp,
+                max_allowed_bytes=max(1, pkg.stat().st_size - 1),
+            )
+
+        # Bounded governance audit refuses oversized (>2 MiB) or symlinked candidate registry.json before JSON decode
+        gov_dir, gov_reg = self._make_workspace("gov_audit")
+        gov_reg.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a],
+                    "plugins": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        big_cand = self.root / "big_cand_registry.json"
+        big_cand.write_bytes(b" " * 32)
+        with patch.object(registry_tool, "MAX_REGISTRY_JSON_BYTES", 16):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "size out of bounds"):
+                registry_tool.audit_governance_diff(gov_reg, big_cand)
+
+        def fake_gov_lstat(p, *args, **kwargs):
+            st = real_lstat(p, *args, **kwargs)
+            if Path(p) == big_cand:
+                return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
+            return st
+
+        with patch.object(registry_tool.os, "lstat", fake_gov_lstat):
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
+                registry_tool.audit_governance_diff(gov_reg, big_cand)
+
     def test_s4_path_segments_contributions_and_dangerous_urls(self) -> None:
         # Unsafe id/version path segment (FilePluginArtifactStore parity)
         for bad_id in ("bad/id", "bad:id", ".."):
@@ -848,6 +946,75 @@ class RegistryToolTests(unittest.TestCase):
         _write_unsigned_package(pkg_u16, m_utf16)
         _sign_package(pkg_u16, self.ks_a, self.env_a, "alpha")
         self.assertEqual(len(registry_tool.validate_registry(reg_path).plugins), 1)
+
+        # S4 v1.3 parity: options=null/"bad" on switch/text fields and non-string unavailableText without requiresCapability
+        reg_dir, reg_path = self._make_workspace("s4_options_unavail")
+        m_opts = _base_manifest("demo-community", "js")
+        m_opts["contributions"] = [
+            {
+                "kind": "FormSection",
+                "id": "opts-form",
+                "slot": "plan.edit.configuration",
+                "title": "Opts",
+                "fields": [{"id": "sw", "kind": "switch", "label": "S", "value": True, "options": None, "onEvent": "e"}],
+            }
+        ]
+        pkg_opts = reg_dir / "artifacts" / "demo-js-1.0.0.pljs"
+        _write_unsigned_package(pkg_opts, m_opts)
+        _sign_package(pkg_opts, self.ks_a, self.env_a, "alpha")
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", m_opts)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Invalid options list"):
+            registry_tool.validate_registry(reg_path)
+
+        m_opts["contributions"] = [
+            {
+                "kind": "FormSection",
+                "id": "opts-form",
+                "slot": "plan.edit.configuration",
+                "title": "Opts",
+                "fields": [{"id": "txt", "kind": "text", "label": "T", "value": "ok", "options": "bad", "onEvent": "e"}],
+            }
+        ]
+        _write_unsigned_package(pkg_opts, m_opts)
+        _sign_package(pkg_opts, self.ks_a, self.env_a, "alpha")
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Invalid options list"):
+            registry_tool.validate_registry(reg_path)
+
+        m_unavail = _base_manifest("demo-community", "js")
+        m_unavail["contributions"] = [
+            {
+                "kind": "StatusLine",
+                "id": "sl-bad",
+                "slot": "plan.detail.protection",
+                "text": "ok",
+                "unavailableText": 123,
+            }
+        ]
+        _write_unsigned_package(pkg_opts, m_unavail)
+        _sign_package(pkg_opts, self.ks_a, self.env_a, "alpha")
+        reg_path.write_text(
+            json.dumps(
+                {
+                    "sourceId": "demo-community",
+                    "sourceType": "THIRD_PARTY",
+                    "trustedFingerprints": [self.fp_a],
+                    "plugins": [self._entry_from_manifest("demo-js-1.0.0.pljs", m_unavail)],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Invalid StatusLine unavailableText"):
+            registry_tool.validate_registry(reg_path)
 
         # Dangerous URLs
         bad_urls = [

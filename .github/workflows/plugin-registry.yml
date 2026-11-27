@@ -51,6 +51,7 @@ jobs:
           from pathlib import Path
           import shutil
           import subprocess
+          import sys
           import zipfile
 
           event = os.environ["EVENT_NAME"]
@@ -142,17 +143,31 @@ jobs:
               )
               privileged_hits = [p for p in changed if p == privileged_prefixes[0] or p.startswith(privileged_prefixes[1:])]
 
-              anchor_changed = False
               base_reg = trusted_dir / "registry.json"
               cand_reg = candidate_dir / "registry.json"
-              if base_reg.is_file() and cand_reg.is_file():
-                  b_doc = json.loads(base_reg.read_text(encoding="utf-8"))
-                  c_doc = json.loads(cand_reg.read_text(encoding="utf-8"))
-                  for key in ("trustedFingerprints", "sourceId", "sourceType", "catalogFormatVersion"):
-                      if b_doc.get(key) != c_doc.get(key):
-                          anchor_changed = True
-              elif cand_reg.is_file():
-                  anchor_changed = True
+              gov_proc = subprocess.run(
+                  [
+                      sys.executable,
+                      "-I",
+                      str(verifier_root / "registry_tool.py"),
+                      "audit-governance",
+                      "--base-registry",
+                      str(base_reg),
+                      "--candidate-registry",
+                      str(cand_reg),
+                      "--trusted-root",
+                      str(trusted_checkout),
+                      "--candidate-root",
+                      str(workspace),
+                  ],
+                  capture_output=True,
+                  text=True,
+                  check=False,
+              )
+              if gov_proc.returncode != 0:
+                  print(f"::error::Bounded candidate governance pre-read failed: {(gov_proc.stderr or gov_proc.stdout).strip()}")
+                  raise SystemExit(gov_proc.returncode)
+              anchor_changed = bool(json.loads(gov_proc.stdout)["anchorChanged"])
 
               lines = [
                   "### Plugin Registry Verification Governance",
@@ -160,7 +175,7 @@ jobs:
                   "- Execution mode: `python3 -I` (isolated sys.path; workspace never on module path)",
                   f"- Privileged code/workflow files changed: `{len(privileged_hits)}`",
                   f"- Trust anchor / source metadata changed: `{anchor_changed}`",
-                  "- Note: Enforce GitHub Repository Rulesets / Branch Protection requiring maintainer approval on `.github/workflows/plugin-registry.yml`, `deploy/plugin-registry/registry_tool.py`, `deploy/plugin-registry/JarSignerVerifier.java`, and `deploy/plugin-registry/registry.json` (`.github/CODEOWNERS` is excluded by `release.py` public archive boundary).",
+                  "- Note: Enforce GitHub Repository Rulesets / Branch Protection requiring `@DzDenzel` approval on `.github/workflows/plugin-registry.yml`, `deploy/plugin-registry/registry_tool.py`, `deploy/plugin-registry/JarSignerVerifier.java`, `deploy/plugin-registry/registry.json`, `deploy/plugin-registry/web/**`, and `deploy/plugin-registry/tests/**` (`.github/CODEOWNERS` is excluded by `release.py` public archive boundary).",
               ]
               if privileged_hits or anchor_changed:
                   print("::warning::PR modifies privileged verifier/workflow/web files or trust anchors; maintainer approval required via Rulesets before merge.")
@@ -182,11 +197,11 @@ jobs:
 
       - name: Validate candidate registry manifest and signed artifacts (isolated python3 -I)
         working-directory: ${{ runner.temp }}
-        run: python3 -I "${{ steps.verifier.outputs.root }}/registry_tool.py" validate --registry "${{ github.workspace }}/deploy/plugin-registry/registry.json" --json
+        run: python3 -I "${{ steps.verifier.outputs.root }}/registry_tool.py" validate --registry "${{ github.workspace }}/deploy/plugin-registry/registry.json" --trusted-root "${{ github.workspace }}" --json
 
       - name: Build deterministic static plugin registry site (isolated output in runner.temp)
         working-directory: ${{ runner.temp }}
-        run: python3 -I "${{ steps.verifier.outputs.root }}/registry_tool.py" build --registry "${{ github.workspace }}/deploy/plugin-registry/registry.json" --web-dir "${{ steps.verifier.outputs.root }}/web" --output "${{ steps.verifier.outputs.dist }}" --clean
+        run: python3 -I "${{ steps.verifier.outputs.root }}/registry_tool.py" build --registry "${{ github.workspace }}/deploy/plugin-registry/registry.json" --trusted-root "${{ github.workspace }}" --web-dir "${{ steps.verifier.outputs.root }}/web" --output "${{ steps.verifier.outputs.dist }}" --output-root "${{ runner.temp }}" --clean
 
       - name: Verify generated SHA256SUMS
         working-directory: ${{ steps.verifier.outputs.dist }}

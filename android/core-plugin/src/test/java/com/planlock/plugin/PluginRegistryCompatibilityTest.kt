@@ -1,8 +1,10 @@
 package com.planlock.plugin
 
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.security.SecureRandom
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -12,6 +14,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -29,37 +32,132 @@ class PluginRegistryCompatibilityTest {
     }
 
     private fun destroyProcessTree(proc: Process) {
-        runCatching {
-            val stream = Process::class.java.getMethod("descendants").invoke(proc) as? java.util.stream.Stream<*>
-            stream?.forEach { handle ->
-                runCatching { handle?.javaClass?.getMethod("destroyForcibly")?.invoke(handle) }
+        val phClass = Class.forName("java.lang.ProcessHandle")
+        val destroyForciblyMethod = phClass.getMethod("destroyForcibly")
+        val onExitMethod = phClass.getMethod("onExit")
+        val isAliveMethod = phClass.getMethod("isAlive")
+        val descendantsMethod = Process::class.java.getMethod("descendants")
+
+        val failures = mutableListOf<Throwable>()
+        val descendants = mutableListOf<Any>()
+        try {
+            @Suppress("UNCHECKED_CAST")
+            val stream = descendantsMethod.invoke(proc) as java.util.stream.Stream<Any>
+            stream.use { s -> s.forEach { descendants.add(it) } }
+        } catch (t: Throwable) {
+            failures += t
+        }
+
+        for (handle in descendants.asReversed()) {
+            try {
+                destroyForciblyMethod.invoke(handle)
+            } catch (t: Throwable) {
+                failures += t
             }
         }
-        proc.destroyForcibly()
-        proc.waitFor(5, TimeUnit.SECONDS)
+
+        try {
+            proc.destroyForcibly()
+            if (!proc.waitFor(5, TimeUnit.SECONDS)) {
+                failures += AssertionError("Root process did not terminate within 5s")
+            }
+        } catch (t: Throwable) {
+            failures += t
+        }
+
+        for (handle in descendants) {
+            try {
+                val future = onExitMethod.invoke(handle) as CompletableFuture<*>
+                future.get(5, TimeUnit.SECONDS)
+                if (isAliveMethod.invoke(handle) as Boolean) {
+                    failures += AssertionError("Descendant process remained alive after termination")
+                }
+            } catch (t: Throwable) {
+                failures += t
+            }
+        }
+
+        if (failures.isNotEmpty()) {
+            val error = AssertionError("Process tree teardown failed (${failures.size} error(s))")
+            failures.forEach { error.addSuppressed(it) }
+            throw error
+        }
     }
 
     private fun findPythonCommand(): String {
         for (candidate in listOf("python3", "python")) {
-            val ok = runCatching {
-                val proc = ProcessBuilder(candidate, "--version")
+            val proc = try {
+                ProcessBuilder(candidate, "--version")
                     .redirectErrorStream(true)
                     .start()
-                val finished = proc.waitFor(5, TimeUnit.SECONDS)
-                if (!finished) {
-                    destroyProcessTree(proc)
-                    false
-                } else {
-                    proc.exitValue() == 0
-                }
-            }.getOrDefault(false)
-            if (ok) return candidate
+            } catch (_: IOException) {
+                continue
+            }
+            val finished = proc.waitFor(5, TimeUnit.SECONDS)
+            if (!finished) {
+                destroyProcessTree(proc)
+                continue
+            }
+            if (proc.exitValue() == 0) return candidate
         }
         error("Python 3 runtime is required to execute registry_tool.py compatibility build")
     }
 
+    @Test
+    fun destroyProcessTreeTerminatesRealProcessAndDescendantWithoutIllegalAccessException() {
+        val python = findPythonCommand()
+        val script =
+            "import os, subprocess, sys, time; " +
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); " +
+                "print('READY:' + str(os.getpid()) + ':' + str(g.pid), flush=True); " +
+                "time.sleep(60)"
+        val proc = ProcessBuilder(python, "-c", script)
+            .redirectErrorStream(true)
+            .start()
+        var grandchildPid: Long = -1L
+        try {
+            val outputLines = mutableListOf<String>()
+            val reader = proc.inputStream.bufferedReader()
+            var line: String? = null
+            while (true) {
+                val next = reader.readLine() ?: break
+                outputLines += next
+                if (next.startsWith("READY:")) {
+                    line = next
+                    break
+                }
+            }
+            val readyLine = line
+                ?: error("Subprocess exited without READY marker. Output:\n${outputLines.joinToString("\n")}")
+            grandchildPid = readyLine.substringAfterLast(':').toLong()
+            destroyProcessTree(proc)
+            assertFalse("Root process should be terminated", proc.isAlive)
+
+            val phClass = Class.forName("java.lang.ProcessHandle")
+            val ofMethod = phClass.getMethod("of", Long::class.javaPrimitiveType)
+            val isAliveMethod = phClass.getMethod("isAlive")
+            @Suppress("UNCHECKED_CAST")
+            val opt = ofMethod.invoke(null, grandchildPid) as java.util.Optional<Any>
+            if (opt.isPresent) {
+                assertFalse("Grandchild process $grandchildPid should be terminated", isAliveMethod.invoke(opt.get()) as Boolean)
+            }
+        } finally {
+            if (proc.isAlive) proc.destroyForcibly()
+            if (grandchildPid > 0L) {
+                runCatching {
+                    val phClass = Class.forName("java.lang.ProcessHandle")
+                    @Suppress("UNCHECKED_CAST")
+                    val opt = phClass.getMethod("of", Long::class.javaPrimitiveType).invoke(null, grandchildPid) as java.util.Optional<Any>
+                    if (opt.isPresent) {
+                        phClass.getMethod("destroyForcibly").invoke(opt.get())
+                    }
+                }
+            }
+        }
+    }
+
     private fun findJdkTool(toolName: String): String {
-        val exeSuffix = if (System.getProperty("os.name").lowercase().contains("win")) ".exe" else ""
+        val exeSuffix = if (System.getProperty("os.name").orEmpty().lowercase().contains("win")) ".exe" else ""
         val candidates = buildList {
             System.getProperty("java.home")?.let { add(File(it, "bin/$toolName$exeSuffix")) }
             System.getenv("JAVA_HOME")?.let { add(File(it, "bin/$toolName$exeSuffix")) }
@@ -335,10 +433,38 @@ class PluginRegistryCompatibilityTest {
             val nullContribPkg = File(nullContribDir, "artifacts/demo.pljs")
             writePljs(nullContribPkg, baseManifest(extraJson = ""","contributions":null"""))
             signPackage(tempDir, nullContribPkg, ksA, envA, "alpha")
-            assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(nullContribPkg, "community-x") }
+            val ncErr = assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(nullContribPkg, "community-x") }
+            assertTrue("Expected Android contributions null rejection: ${ncErr.message}", ncErr.message.orEmpty().contains("contributions", ignoreCase = true))
             val (ncCode, ncOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(nullContribDir, "registry.json").absolutePath)
             assertNotEquals(0, ncCode)
             assertTrue("Expected contributions array rejection: $ncOut", ncOut.contains("contributions must be a JSON array"))
+
+            // 3b. S4 v1.3 parity: options=null on switch field and unavailableText=123 without requiresCapability rejected by both Android and Python.
+            val nullOptsDir = writeReg("nullopts", "community-x", fpA, "demo.pljs", baseEntry("demo.pljs"))
+            val nullOptsPkg = File(nullOptsDir, "artifacts/demo.pljs")
+            writePljs(
+                nullOptsPkg,
+                baseManifest(extraJson = ""","contributions":[{"kind":"FormSection","id":"f","slot":"plan.edit.configuration","title":"T","fields":[{"id":"sw","kind":"switch","label":"S","value":true,"options":null,"onEvent":"e"}]}]"""),
+            )
+            signPackage(tempDir, nullOptsPkg, ksA, envA, "alpha")
+            val optErr = assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(nullOptsPkg, "community-x") }
+            assertTrue("Expected Android options null rejection: ${optErr.message}", optErr.message.orEmpty().contains("options", ignoreCase = true))
+            val (optCode, optOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(nullOptsDir, "registry.json").absolutePath)
+            assertNotEquals(0, optCode)
+            assertTrue("Expected Python options list rejection: $optOut", optOut.contains("Invalid options list"))
+
+            val unavailDir = writeReg("unavailnum", "community-x", fpA, "demo.pljs", baseEntry("demo.pljs"))
+            val unavailPkg = File(unavailDir, "artifacts/demo.pljs")
+            writePljs(
+                unavailPkg,
+                baseManifest(extraJson = ""","contributions":[{"kind":"StatusLine","id":"sl","slot":"plan.detail.protection","text":"ok","unavailableText":123}]"""),
+            )
+            signPackage(tempDir, unavailPkg, ksA, envA, "alpha")
+            val uaErr = assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(unavailPkg, "community-x") }
+            assertTrue("Expected Android unavailableText rejection: ${uaErr.message}", uaErr.message.orEmpty().contains("unavailableText", ignoreCase = true) || uaErr.message.orEmpty().contains("string", ignoreCase = true))
+            val (uaCode, uaOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(unavailDir, "registry.json").absolutePath)
+            assertNotEquals(0, uaCode)
+            assertTrue("Expected Python unavailableText rejection: $uaOut", uaOut.contains("Invalid StatusLine unavailableText"))
 
             // 4. Invalid FormSection on contractVersion=1 in the same signed package rejected by both Android and Python.
             val badFormDir = writeReg("badform", "community-x", fpA, "demo.pljs", baseEntry("demo.pljs", contractVersion = 2))
@@ -349,7 +475,8 @@ class PluginRegistryCompatibilityTest {
             ).replace("\"type\":\"js\"", "\"type\":\"dex\"").replace("\"entryPoint\":\"entryPoint\"", "\"entryPoint\":\"a.B\"")
             writePljs(badFormPkg, badFormManifest, extraEntries = mapOf("classes.dex" to ("dex\n037\u0000".toByteArray() + ByteArray(32))))
             signPackage(tempDir, badFormPkg, ksA, envA, "alpha")
-            assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(badFormPkg, "community-x") }
+            val bfErr = assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(badFormPkg, "community-x") }
+            assertFalse("Expected non-blank Android rejection message", bfErr.message.isNullOrBlank())
             val (bfCode, bfOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(badFormDir, "registry.json").absolutePath)
             assertNotEquals(0, bfCode)
             assertTrue("Expected FormSection rejection: $bfOut", bfOut.contains("FormSection"))
@@ -363,7 +490,8 @@ class PluginRegistryCompatibilityTest {
                 baseManifest(extraJson = ""","contributions":[{"kind":"FormSection","id":"f","slot":"plan.edit.configuration","title":"T","fields":[{"id":"n","kind":"text","label":"N","value":"$tooLongText","onEvent":"e"}]}]"""),
             )
             signPackage(tempDir, utf16BadPkg, ksA, envA, "alpha")
-            assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(utf16BadPkg, "community-x") }
+            val u16Err = assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(utf16BadPkg, "community-x") }
+            assertTrue("Expected Android UTF-16 text limit rejection: ${u16Err.message}", u16Err.message.orEmpty().contains("Invalid form field"))
             val (uBadCode, uBadOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(utf16BadDir, "registry.json").absolutePath)
             assertNotEquals(0, uBadCode)
             assertTrue("Expected UTF-16 text limit rejection: $uBadOut", uBadOut.contains("Invalid text value"))
@@ -448,9 +576,10 @@ class PluginRegistryCompatibilityTest {
             }
 
             // Anchor = {fpA} -> BOTH Android and Python reject for signer intersection failure!
-            assertThrows(IllegalArgumentException::class.java) {
+            val mixErr = assertThrows(IllegalArgumentException::class.java) {
                 SignedJarPluginPackageVerifier(mapOf("community-mixed" to setOf(fpA))).verify(mixedCommunityPkg, "community-mixed")
             }
+            assertTrue("Expected Android signer intersection rejection: ${mixErr.message}", mixErr.message.orEmpty().contains("not trusted for every payload"))
             val mixRegA = writeReg("mixA", "community-mixed", fpA, "mixed.pljs", baseEntry("mixed.pljs"))
             mixedCommunityPkg.copyTo(File(mixRegA, "artifacts/mixed.pljs"), overwrite = true)
             val (mixACode, mixAOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(mixRegA, "registry.json").absolutePath)

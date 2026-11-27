@@ -41,6 +41,7 @@ public final class JarSignerVerifier {
     private static final long MAX_ENTRY_BYTES = 20L * 1024 * 1024;
     private static final long MAX_TOTAL_UNCOMPRESSED_BYTES = 50L * 1024 * 1024;
     private static final int MAX_ARCHIVE_MEMBERS = 2048;
+    private static final int MAX_SIGNATURE_ALIASES = 16;
     private static final Pattern META_SIG_PATTERN =
         Pattern.compile("^META-INF/([A-Za-z0-9_-]{1,64})\\.(SF|RSA|DSA|EC)$");
 
@@ -71,8 +72,8 @@ public final class JarSignerVerifier {
     }
 
     public static void main(String[] args) {
-        if (args.length != 1) {
-            System.err.println("Usage: JarSignerVerifier <package-path>");
+        if (args.length < 1 || args.length > 2) {
+            System.err.println("Usage: JarSignerVerifier <package-path> [isolated-temp-dir]");
             System.exit(2);
         }
         try {
@@ -80,11 +81,20 @@ public final class JarSignerVerifier {
             if (Files.isSymbolicLink(target) || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
                 throw new SecurityException("Package path must be a regular non-symlink file");
             }
+            Path isolatedTempDir;
+            if (args.length == 2) {
+                isolatedTempDir = Path.of(args[1]);
+                if (Files.isSymbolicLink(isolatedTempDir) || !Files.isDirectory(isolatedTempDir, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new SecurityException("Isolated temp dir must be a non-symlink directory");
+                }
+            } else {
+                isolatedTempDir = Path.of(System.getProperty("java.io.tmpdir"));
+            }
             long fileSize = Files.size(target);
             if (fileSize <= 0 || fileSize > MAX_PACKAGE_BYTES) {
                 throw new SecurityException("Package size out of bounds: " + fileSize);
             }
-            String json = verifyAndInspect(target);
+            String json = verifyAndInspect(target, isolatedTempDir);
             System.out.println(json);
         } catch (Throwable err) {
             String msg = err.getMessage();
@@ -93,7 +103,7 @@ public final class JarSignerVerifier {
         }
     }
 
-    private static String verifyAndInspect(Path target) throws Exception {
+    private static String verifyAndInspect(Path target, Path isolatedTempDir) throws Exception {
         Set<String> seenNames = new HashSet<>();
         Set<String> sfAliases = new TreeSet<>();
         Set<String> sigAliases = new TreeSet<>();
@@ -231,8 +241,13 @@ public final class JarSignerVerifier {
         if (!hasPluginJson) {
             throw new SecurityException("Plugin package is missing plugin.json");
         }
+        if (sfAliases.size() > MAX_SIGNATURE_ALIASES) {
+            throw new SecurityException(
+                "Too many META-INF signature pairs (max " + MAX_SIGNATURE_ALIASES + "): " + sfAliases.size()
+            );
+        }
         if (sfAliases.size() > 1) {
-            verifyEverySignaturePairAttributed(target, sfAliases, sigEntryByAlias, payloadCertsByName);
+            verifyEverySignaturePairAttributed(target, sfAliases, sigEntryByAlias, payloadCertsByName, isolatedTempDir);
         }
         if (commonCertSigners == null) {
             commonCertSigners = Collections.emptySet();
@@ -249,7 +264,8 @@ public final class JarSignerVerifier {
         Path target,
         Set<String> sfAliases,
         Map<String, String> sigEntryByAlias,
-        Map<String, Set<String>> payloadCertsByName
+        Map<String, Set<String>> payloadCertsByName,
+        Path isolatedTempDir
     ) throws Exception {
         byte[] buffer = new byte[65536];
         try (ZipFile rawZip = new ZipFile(target.toFile())) {
@@ -259,7 +275,7 @@ public final class JarSignerVerifier {
                 if (sigName == null) {
                     throw new SecurityException("Missing signature block for alias: " + alias);
                 }
-                Path isoJar = Files.createTempFile("oriva-sig-iso-", ".jar");
+                Path isoJar = Files.createTempFile(isolatedTempDir, "oriva-sig-iso-", ".jar");
                 try {
                     try (ZipOutputStream zout = new ZipOutputStream(Files.newOutputStream(isoJar))) {
                         Enumeration<? extends ZipEntry> rawEntries = rawZip.entries();
