@@ -301,5 +301,37 @@ function Get-NetRoute { param($AddressFamily,$DestinationPrefix,$ErrorAction)
                 self.assertNotIn('172.32.1.2', result.stdout)
                 self.assertNotIn('203.0.113.1', result.stdout)
 
+    def test_docker_build_context_and_secret_exclusions(self):
+        compose_text = (ROOT / 'deploy' / 'docker-compose.yml').read_text(encoding='utf-8')
+        self.assertIn('context: ..', compose_text)
+        self.assertIn('dockerfile: backend/Dockerfile', compose_text)
+
+        workflow_text = (ROOT / '.github' / 'workflows' / 'backend-image.yml').read_text(encoding='utf-8')
+        self.assertIn('context: .', workflow_text)
+        self.assertIn('file: backend/Dockerfile', workflow_text)
+        self.assertNotIn('context: backend', workflow_text)
+
+        dockerignore_lines = {
+            line.strip()
+            for line in (ROOT / '.dockerignore').read_text(encoding='utf-8').splitlines()
+            if line.strip() and not line.strip().startswith('#')
+        }
+        for required_rule in (
+            '*',
+            '!/backend/',
+            '!/web/',
+            '**/.npmrc',
+            '**/.env',
+            '**/.env.*',
+            '**/.envrc',
+            '**/*.pfx',
+            '**/*.p12',
+            '**/*.key',
+            '**/*.pem',
+            '**/*.jks',
+            '**/*.keystore',
+        ):
+            self.assertIn(required_rule, dockerignore_lines)
+
 
 if __name__ == '__main__': unittest.main()

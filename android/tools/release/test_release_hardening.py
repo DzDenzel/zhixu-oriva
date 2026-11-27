@@ -48,7 +48,7 @@ class T1MavenAndArchiveTests(unittest.TestCase):
         self.assertIn("-ntp", mvn_cmd)
         self.assertIn("-Dmaven.repo.local=" + expected_repo, mvn_cmd)
 
-        for bad_sub in ("backend/.m2", "android/m2-cache", "deploy/m2", ".github/m2"):
+        for bad_sub in ("backend/.m2", "android/m2-cache", "deploy/m2", "web/.m2", ".github/m2"):
             with self.assertRaisesRegex(r.ReleaseError, "outside public source directories"):
                 r.make_plan(self.root, maven_repo=self.root / bad_sub)
 
@@ -154,6 +154,40 @@ class T1MavenAndArchiveTests(unittest.TestCase):
             z.writestr("zhixu-oriva-2.2.0/deploy/ok.zip", inner_ok.getvalue())
         with zipfile.ZipFile(io.BytesIO(valid_buf.getvalue())) as z:
             self.assertEqual(r.audit_archive(z), 2)
+
+    def test_audit_archive_allows_web_source_and_blocks_web_artifacts_and_secrets(self) -> None:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for d in ("zhixu-oriva-2.2.0/", "zhixu-oriva-2.2.0/web/", "zhixu-oriva-2.2.0/web/src/"):
+                z.writestr(d, b"")
+            z.writestr("zhixu-oriva-2.2.0/.dockerignore", b"*\n!/backend/\n!/web/\n")
+            z.writestr("zhixu-oriva-2.2.0/web/package.json", b'{"name":"oriva-web-portal"}\n')
+            z.writestr("zhixu-oriva-2.2.0/web/src/main.tsx", b"export const ok = true;\n")
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as z:
+            self.assertEqual(r.audit_archive(z), 3)
+
+        for bad_web in (
+            "zhixu-oriva-2.2.0/web/node_modules/pkg/index.js",
+            "zhixu-oriva-2.2.0/web/dist/index.html",
+            "zhixu-oriva-2.2.0/web/.env",
+            "zhixu-oriva-2.2.0/web/.env.local",
+            "zhixu-oriva-2.2.0/web/dev.key",
+        ):
+            bad_buf = io.BytesIO()
+            with zipfile.ZipFile(bad_buf, "w") as z:
+                z.writestr(bad_web, b"bad")
+            with zipfile.ZipFile(io.BytesIO(bad_buf.getvalue())) as z:
+                with self.assertRaises(r.ReleaseError, msg=bad_web):
+                    r.audit_archive(z)
+
+        # Release secret patterns (e.g. hardcoded JWT-like strings) inside web/ must fail audit
+        secret_buf = io.BytesIO()
+        synthetic_jwt = b"eyJ" + b"header0123456789." + b"payload0123456789." + b"sig0123456789"
+        with zipfile.ZipFile(secret_buf, "w") as z:
+            z.writestr("zhixu-oriva-2.2.0/web/src/leak.ts", b"const t = '" + synthetic_jwt + b"';\n")
+        with zipfile.ZipFile(io.BytesIO(secret_buf.getvalue())) as z:
+            with self.assertRaisesRegex(r.ReleaseError, "Sensitive content found"):
+                r.audit_archive(z)
 
 
 class R1R2R3PublishAndProcessTests(unittest.TestCase):

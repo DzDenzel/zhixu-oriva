@@ -3,10 +3,12 @@
 !/android/
 !/backend/
 !/deploy/
+!/web/
 !/.github/
 !/README.md
 !/LICENSE
 !/.gitignore
+!/.dockerignore
 !/docs/
 /docs/*
 !/docs/screenshots/

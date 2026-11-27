@@ -133,4 +133,56 @@ class RecordServiceStatsTest {
         assertTrue(csv.contains("violation,7,3,2026-10-04T09:02,,\"浏览器, \"\"安全\"\"\n版\",app.browser,,violation-1,2026-10-04T09:02,2026-10-04T09:12,600000,USAGE_STATS_APPROXIMATE"), csv);
         assertTrue(json.contains("\"durationMs\":600000"));
     }
+
+    @Test
+    void exportNeutralizesCsvFormulaTriggersBeforeQuoting() {
+        LocalDateTime at = LocalDateTime.of(2026, 10, 5, 10, 0);
+        String[] payloads = {
+                "=CMD|' /C calc'!A0",
+                "+SUM(1,2)",
+                "-1+1",
+                "@SUM(1,1)",
+                "\t=1+1",
+                "\r+1+1",
+                "  =HYPERLINK(\"https://example.com\",\"click\"),x\ny",
+                "\uFF1D1+1",
+                "\uFF0B2",
+                "\uFF0D3",
+                "\uFF20cmd",
+                "\u2007=1+1",
+                "\u202F@SUM(1,1)",
+                "\uFEFF+2"
+        };
+        List<ViolationRecord> list = new java.util.ArrayList<>();
+        for (int i = 0; i < payloads.length; i++) {
+            ViolationRecord v = new ViolationRecord();
+            v.setPlanId(1L);
+            v.setDeviceId(2L);
+            v.setRecordAt(at.plusMinutes(i));
+            v.setAppName(payloads[i]);
+            v.setPackageName("app.formula." + i);
+            v.setClientId("formula-" + i);
+            list.add(v);
+        }
+        when(executions.findAllByUser(11L)).thenReturn(List.of());
+        when(violations.findAllByUser(11L)).thenReturn(list);
+        when(unlocks.findAllByUser(11L)).thenReturn(List.of());
+
+        String csv = service.export(11L, "csv");
+
+        assertTrue(csv.contains(",'=CMD|' /C calc'!A0,app.formula.0,"), csv);
+        assertTrue(csv.contains(",\"'+SUM(1,2)\",app.formula.1,"), csv);
+        assertTrue(csv.contains(",'-1+1,app.formula.2,"), csv);
+        assertTrue(csv.contains(",\"'@SUM(1,1)\",app.formula.3,"), csv);
+        assertTrue(csv.contains(",'\t=1+1,app.formula.4,"), csv);
+        assertTrue(csv.contains(",\"'\r+1+1\",app.formula.5,"), csv);
+        assertTrue(csv.contains(",\"'  =HYPERLINK(\"\"https://example.com\"\",\"\"click\"\"),x\ny\",app.formula.6,"), csv);
+        assertTrue(csv.contains(",'\uFF1D1+1,app.formula.7,"), csv);
+        assertTrue(csv.contains(",'\uFF0B2,app.formula.8,"), csv);
+        assertTrue(csv.contains(",'\uFF0D3,app.formula.9,"), csv);
+        assertTrue(csv.contains(",'\uFF20cmd,app.formula.10,"), csv);
+        assertTrue(csv.contains(",'\u2007=1+1,app.formula.11,"), csv);
+        assertTrue(csv.contains(",\"'\u202F@SUM(1,1)\",app.formula.12,"), csv);
+        assertTrue(csv.contains(",'\uFEFF+2,app.formula.13,"), csv);
+    }
 }

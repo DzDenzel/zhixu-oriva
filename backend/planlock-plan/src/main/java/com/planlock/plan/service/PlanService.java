@@ -15,6 +15,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -124,7 +125,10 @@ public class PlanService {
     public String exportIcs(Long userId) {
         List<Plan> plans = planMapper.findByUserId(userId);
         DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss");
-        StringBuilder sb = new StringBuilder("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//PlanLock//V0.1//CN\r\n");
+        StringBuilder sb = new StringBuilder();
+        appendIcsLine(sb, "BEGIN:VCALENDAR");
+        appendIcsLine(sb, "VERSION:2.0");
+        appendIcsLine(sb, "PRODID:-//PlanLock//V0.1//CN");
         for (Plan p : plans) {
             LocalDate base = LocalDate.now();
             LocalDateTime start = LocalDateTime.of(base, p.getStartTime());
@@ -132,16 +136,16 @@ public class PlanService {
             if (!end.isAfter(start)) {
                 end = end.plusDays(1);
             }
-            sb.append("BEGIN:VEVENT\r\n");
-            sb.append("UID:plan-").append(p.getId()).append("@planlock\r\n");
-            sb.append("DTSTAMP:").append(LocalDateTime.now().format(dtf)).append("\r\n");
-            sb.append("DTSTART:").append(start.format(dtf)).append("\r\n");
-            sb.append("DTEND:").append(end.format(dtf)).append("\r\n");
-            sb.append("SUMMARY:").append(icsText(p.getName())).append("\r\n");
-            sb.append("CATEGORIES:").append(icsText(p.getType())).append("\r\n");
-            sb.append("END:VEVENT\r\n");
+            appendIcsLine(sb, "BEGIN:VEVENT");
+            appendIcsLine(sb, "UID:plan-" + p.getId() + "@planlock");
+            appendIcsLine(sb, "DTSTAMP:" + LocalDateTime.now().format(dtf));
+            appendIcsLine(sb, "DTSTART:" + start.format(dtf));
+            appendIcsLine(sb, "DTEND:" + end.format(dtf));
+            appendIcsLine(sb, "SUMMARY:" + icsText(p.getName()));
+            appendIcsLine(sb, "CATEGORIES:" + icsText(p.getType()));
+            appendIcsLine(sb, "END:VEVENT");
         }
-        sb.append("END:VCALENDAR\r\n");
+        appendIcsLine(sb, "END:VCALENDAR");
         return sb.toString();
     }
 
@@ -154,8 +158,41 @@ public class PlanService {
         if (value == null) {
             return "";
         }
-        return value.replace("\\", "\\\\").replace(";", "\\;")
-                .replace(",", "\\,").replace("\n", "\\n");
+        String normalized = value.replace("\r\n", "\n").replace("\r", "\n");
+        StringBuilder cleaned = new StringBuilder(normalized.length());
+        for (int i = 0; i < normalized.length(); i++) {
+            char ch = normalized.charAt(i);
+            // Strip ASCII control characters other than '\n' (which becomes literal "\\n")
+            if ((ch < 0x20 && ch != '\n') || ch == 0x7F) {
+                continue;
+            }
+            cleaned.append(ch);
+        }
+        return cleaned.toString()
+                .replace("\\", "\\\\")
+                .replace(";", "\\;")
+                .replace(",", "\\,")
+                .replace("\n", "\\n");
+    }
+
+    /** Fold a logical ICS line at 75 UTF-8 octets per RFC 5545 §3.1 without splitting codepoints. */
+    private static void appendIcsLine(StringBuilder sb, String line) {
+        int lineBytes = 0;
+        int offset = 0;
+        while (offset < line.length()) {
+            int codePoint = line.codePointAt(offset);
+            int charCount = Character.charCount(codePoint);
+            String token = line.substring(offset, offset + charCount);
+            int tokenBytes = token.getBytes(StandardCharsets.UTF_8).length;
+            if (lineBytes + tokenBytes > 75 && lineBytes > 0) {
+                sb.append("\r\n ");
+                lineBytes = 1;
+            }
+            sb.append(token);
+            lineBytes += tokenBytes;
+            offset += charCount;
+        }
+        sb.append("\r\n");
     }
 
     private void apply(Plan plan, PlanUpsertRequest req) {
