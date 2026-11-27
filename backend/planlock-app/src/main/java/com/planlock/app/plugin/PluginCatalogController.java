@@ -15,11 +15,16 @@ import java.util.Map;
 import java.util.Set;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.planlock.common.ApiResponse;
+import com.planlock.common.ErrorCode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
+import org.springframework.http.CacheControl;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -36,12 +41,19 @@ public class PluginCatalogController {
         this.pluginDirectory = Path.of(pluginDirectory).toAbsolutePath().normalize();
     }
 
+    /** 不支持的插件目录来源（继承 IllegalArgumentException 以兼容既有直调单测，HTTP 层由局部异常处理器映射为明确 404/1003）。 */
+    static final class UnknownPluginSourceException extends IllegalArgumentException {
+        UnknownPluginSourceException() {
+            super("Unknown plugin source");
+        }
+    }
+
     @GetMapping("/catalog/{source}")
     public Map<String, Object> catalog(@PathVariable String source) {
         String sourceType = switch (source) {
             case "official" -> "OFFICIAL";
             case "third-party" -> "THIRD_PARTY";
-            default -> throw new IllegalArgumentException("Unknown plugin source");
+            default -> throw new UnknownPluginSourceException();
         };
         Path sourceRoot = pluginDirectory.resolve(source).normalize();
         Path catalogFile = sourceRoot.resolve("catalog.json");
@@ -172,6 +184,15 @@ public class PluginCatalogController {
             if (Character.isISOControl(value.charAt(i))) return true;
         }
         return false;
+    }
+
+    @ExceptionHandler(UnknownPluginSourceException.class)
+    public ResponseEntity<ApiResponse<Void>> handleUnknownSource(UnknownPluginSourceException ignored) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .contentType(MediaType.APPLICATION_JSON)
+                .cacheControl(CacheControl.noStore())
+                .header("X-Content-Type-Options", "nosniff")
+                .body(ApiResponse.error(ErrorCode.NOT_FOUND.getCode(), ErrorCode.NOT_FOUND.getDefaultMessage()));
     }
 
     @GetMapping("/artifacts/{source}/{fileName:.+}")

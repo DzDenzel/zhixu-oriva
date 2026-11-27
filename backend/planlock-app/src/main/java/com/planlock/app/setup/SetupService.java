@@ -40,11 +40,19 @@ public class SetupService {
     }
 
     public Map<String,Object> state() {
-        return jdbc.queryForMap("SELECT instance_id, initialized FROM deployment_instance WHERE id = 1");
+        return jdbc.queryForMap("SELECT instance_id, initialized, instance_label FROM deployment_instance WHERE id = 1");
     }
     public boolean initialized(Map<String,Object> state) {
         Object value=state.get("initialized");
         return Boolean.TRUE.equals(value) || value instanceof Number number && number.intValue()!=0;
+    }
+    public boolean isDeploymentEnabled() {
+        return enabled;
+    }
+    /** 部署模式且实例尚未初始化时返回 true，供 Web 数字站入口分流至 /setup。 */
+    public boolean isSetupPending() {
+        if (!enabled) return false;
+        return !initialized(state());
     }
     public void requirePage() {
         requireEnabled();

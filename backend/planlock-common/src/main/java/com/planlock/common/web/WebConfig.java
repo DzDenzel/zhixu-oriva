@@ -15,7 +15,11 @@ import java.util.List;
 @RequiredArgsConstructor
 public class WebConfig implements WebMvcConfigurer {
 
-    /** 全应用唯一公开路由白名单，由认证拦截器与前置请求体过滤器共享。 */
+    /**
+     * 全应用唯一公开路由白名单，由认证拦截器与前置请求体过滤器共享。
+     * 仅放行真实存在的公开端点，绝不使用宽泛的 {@code /api/v1/plugins/**} 通配，
+     * 防止匿名请求探测未知子路径时绕过统一 1001 门禁（REQ-041 R1）。
+     */
     public static final List<String> PUBLIC_API_PATTERNS = List.of(
             "/api/v1/auth/device",
             "/api/v1/health",
@@ -24,7 +28,10 @@ public class WebConfig implements WebMvcConfigurer {
             "/api/v1/auth/register",
             "/api/v1/auth/login",
             "/api/v1/me/backup-password/reset",
-            "/api/v1/plugins/**"
+            "/api/v1/plugins/catalog/official",
+            "/api/v1/plugins/catalog/third-party",
+            "/api/v1/plugins/artifacts/official/*",
+            "/api/v1/plugins/artifacts/third-party/*"
     );
 
     private final AuthInterceptor authInterceptor;
@@ -32,7 +39,7 @@ public class WebConfig implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(authInterceptor)
-                .addPathPatterns("/api/v1/**")
+                .addPathPatterns("/api/**")
                 .excludePathPatterns(PUBLIC_API_PATTERNS);
     }
 }

@@ -75,8 +75,8 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
             filterChain.doFilter(request, response);
             return;
         }
-        String path = normalizePath(request);
-        if (isProtectedApiRoute(path) && !isAuthorized(request)) {
+        String path = ApiPathMatcher.resolvePathWithinApplication(request);
+        if (ApiPathMatcher.isProtectedApiRequest(request) && !isAuthorized(request)) {
             log.warn("rejected unauthenticated json request before body read: method={}, uri={}",
                     request.getMethod(), request.getRequestURI());
             writeSafeJsonError(response, SAFE_UNAUTHORIZED_JSON);
@@ -268,22 +268,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
     }
 
     boolean isProtectedApiRoute(String path) {
-        if (!pathMatcher.match("/api/v1/**", path)) {
-            return false;
-        }
-        if (hasSuspiciousPublicPathToken(path)) {
-            return true;
-        }
-        for (String publicPattern : WebConfig.PUBLIC_API_PATTERNS) {
-            if (pathMatcher.match(publicPattern, path)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static boolean hasSuspiciousPublicPathToken(String path) {
-        return path.contains("..") || path.indexOf(';') >= 0 || path.indexOf('%') >= 0 || path.indexOf('\\') >= 0;
+        return ApiPathMatcher.isProtectedApiPath(path);
     }
 
     private boolean isAuthorized(HttpServletRequest request) {
@@ -357,15 +342,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
     }
 
     private static String normalizePath(HttpServletRequest request) {
-        String uri = request.getRequestURI();
-        if (uri == null) {
-            return "/";
-        }
-        String contextPath = request.getContextPath();
-        if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
-            return uri.substring(contextPath.length());
-        }
-        return uri;
+        return ApiPathMatcher.resolvePathWithinApplication(request);
     }
 
     private static boolean isJsonRequest(HttpServletRequest request) {
@@ -385,6 +362,8 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
     private static void writeSafeJsonError(HttpServletResponse response, String body) throws IOException {
         response.setStatus(HttpServletResponse.SC_OK);
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("X-Content-Type-Options", "nosniff");
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
         response.getWriter().write(body);

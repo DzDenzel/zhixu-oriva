@@ -5,6 +5,7 @@ import com.planlock.account.dto.BackupPasswordResetRequest;
 import com.planlock.account.dto.BackupPasswordSetRequest;
 import com.planlock.account.dto.DeviceRegisterRequest;
 import com.planlock.account.dto.LoginRequest;
+import com.planlock.account.dto.MeResponse;
 import com.planlock.account.dto.RegisterRequest;
 import com.planlock.account.dto.SendCodeRequest;
 import com.planlock.account.entity.Device;
@@ -13,9 +14,11 @@ import com.planlock.account.mapper.DeviceMapper;
 import com.planlock.account.mapper.MergeMapper;
 import com.planlock.account.mapper.UserMapper;
 import com.planlock.common.BusinessException;
+import com.planlock.common.DeploymentMetadataProvider;
 import com.planlock.common.ErrorCode;
 import com.planlock.common.auth.JwtUtil;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,6 +47,222 @@ public class AuthService {
 
     @Value("${planlock.deployment.enabled:false}")
     private boolean deploymentEnabled;
+
+    @Value("${planlock.version:2.2.0}")
+    private String appVersion = "2.2.0";
+
+    @Autowired(required = false)
+    private DeploymentMetadataProvider deploymentMetadataProvider;
+
+    public MeResponse getCurrentProfile(Long userId, Long deviceId) {
+        if (userId == null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
+        }
+        User user = userMapper.findById(userId);
+        if (user == null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
+        }
+        boolean guest = !hasText(user.getPhone()) && !hasText(user.getEmail());
+        Long resolvedDeviceId = null;
+        String deviceName = null;
+        String devicePlatform = null;
+        if (deviceId != null) {
+            Device device = deviceMapper.findById(deviceId);
+            if (device != null && userId.equals(device.getUserId())) {
+                resolvedDeviceId = device.getId();
+                deviceName = device.getDeviceName();
+                devicePlatform = device.getPlatform();
+            }
+        }
+        String instanceLabel = null;
+        boolean effectiveDeploymentEnabled = this.deploymentEnabled;
+        boolean initialized = false;
+        Long ownerUserId = null;
+        String version = hasText(this.appVersion) ? this.appVersion : "2.2.0";
+        if (deploymentMetadataProvider != null) {
+            DeploymentMetadataProvider.DeploymentMetadata metadata = deploymentMetadataProvider.getMetadata();
+            if (metadata != null) {
+                instanceLabel = metadata.instanceLabel();
+                effectiveDeploymentEnabled = metadata.deploymentEnabled();
+                initialized = metadata.initialized();
+                ownerUserId = metadata.ownerUserId();
+                if (hasText(metadata.version())) {
+                    version = metadata.version();
+                }
+            }
+        }
+        String userType;
+        if (guest) {
+            userType = "GUEST";
+        } else if (effectiveDeploymentEnabled && initialized && ownerUserId != null && ownerUserId.equals(user.getId())) {
+            userType = "OWNER";
+        } else {
+            userType = "STANDARD";
+        }
+        return MeResponse.builder()
+                .userId(user.getId())
+                .deviceId(resolvedDeviceId)
+                .accountMasked(maskAccount(user.getEmail(), user.getPhone()))
+                .userType(userType)
+                .guest(guest)
+                .deviceName(deviceName)
+                .devicePlatform(devicePlatform)
+                .instanceLabel(instanceLabel)
+                .deploymentEnabled(effectiveDeploymentEnabled)
+                .version(version)
+                .build();
+    }
+
+    /**
+     * 账号展示脱敏（REQ-041 R4）：
+     * <ol>
+     *   <li>先扫描原始未裁剪字符串：凡包含任意控制字符（含首尾 {@code \u0000}、{@code \t}、{@code \r}、{@code \n}）、
+     *       Unicode 格式控制符（{@code \p{Cf}}）、不换行空格或非 ASCII 空白，立即整体掩码为 {@code "***"}；</li>
+     *   <li>仅兼容剥离外层常规普通 ASCII 空格（{@code ' '}，U+0020），避免 {@link String#trim()} 误吞 {@code <= U+0020} 控制字符；</li>
+     *   <li>主体内部残留普通空格或格式畸形时同样整体回退为 {@code "***"}。</li>
+     * </ol>
+     */
+    static String maskAccount(String email, String phone) {
+        if (email != null && !email.isEmpty()) {
+            if (containsForbiddenRawControlOrNonAsciiSpace(email)) {
+                return "***";
+            }
+            String stripped = stripOuterAsciiSpaces(email);
+            if (!stripped.isEmpty()) {
+                return maskEmail(stripped);
+            }
+        }
+        if (phone != null && !phone.isEmpty()) {
+            if (containsForbiddenRawControlOrNonAsciiSpace(phone)) {
+                return "***";
+            }
+            String stripped = stripOuterAsciiSpaces(phone);
+            if (!stripped.isEmpty()) {
+                return maskPhone(stripped);
+            }
+        }
+        return null;
+    }
+
+    private static String maskEmail(String trimmed) {
+        if (containsForbiddenInvisibleOrSpace(trimmed)) {
+            return "***";
+        }
+        int firstAt = trimmed.indexOf('@');
+        int lastAt = trimmed.lastIndexOf('@');
+        if (firstAt <= 0 || firstAt != lastAt || firstAt == trimmed.length() - 1) {
+            return "***";
+        }
+        String local = trimmed.substring(0, firstAt);
+        String domain = trimmed.substring(firstAt + 1);
+        if (!isSafeEmailDomain(domain)) {
+            return "***";
+        }
+        int[] localCps = local.codePoints().toArray();
+        int len = localCps.length;
+        if (len <= 1) {
+            return "*@" + domain;
+        }
+        if (len == 2) {
+            return sliceCodePoints(localCps, 0, 1) + "*@" + domain;
+        }
+        if (len <= 4) {
+            return sliceCodePoints(localCps, 0, 1) + "***@" + domain;
+        }
+        return sliceCodePoints(localCps, 0, 2) + "***" + sliceCodePoints(localCps, len - 1, len) + "@" + domain;
+    }
+
+    private static String maskPhone(String trimmed) {
+        if (containsForbiddenInvisibleOrSpace(trimmed)) {
+            return "***";
+        }
+        // 严禁连续分隔符或首尾连字符，仅允许可选前导 '+' 与单连字符分隔的数字组
+        if (!trimmed.matches("\\+?[0-9]+(?:-[0-9]+)*")) {
+            return "***";
+        }
+        String digits = trimmed.replace("+", "").replace("-", "");
+        int digitLen = digits.length();
+        if (digitLen < 1 || digitLen > 15) {
+            return "***";
+        }
+        if (digitLen <= 4) {
+            return "****";
+        }
+        if (digitLen <= 8) {
+            return digits.substring(0, 1) + "****" + digits.substring(digitLen - 2);
+        }
+        return digits.substring(0, 3) + "****" + digits.substring(digitLen - 4);
+    }
+
+    private static boolean containsForbiddenRawControlOrNonAsciiSpace(String value) {
+        return value.codePoints().anyMatch(cp -> {
+            if (cp == ' ') {
+                return false;
+            }
+            return isForbiddenCodePoint(cp);
+        });
+    }
+
+    private static String stripOuterAsciiSpaces(String value) {
+        int start = 0;
+        int end = value.length();
+        while (start < end && value.charAt(start) == ' ') {
+            start++;
+        }
+        while (end > start && value.charAt(end - 1) == ' ') {
+            end--;
+        }
+        return value.substring(start, end);
+    }
+
+    private static boolean containsForbiddenInvisibleOrSpace(String value) {
+        return value.codePoints().anyMatch(AuthService::isForbiddenCodePoint);
+    }
+
+    private static boolean isForbiddenCodePoint(int cp) {
+        if (Character.isISOControl(cp) || Character.isWhitespace(cp) || Character.isSpaceChar(cp)) {
+            return true;
+        }
+        int type = Character.getType(cp);
+        return type == Character.FORMAT
+                || type == Character.CONTROL
+                || type == Character.LINE_SEPARATOR
+                || type == Character.PARAGRAPH_SEPARATOR
+                || type == Character.SURROGATE
+                || type == Character.PRIVATE_USE
+                || type == Character.UNASSIGNED;
+    }
+
+    private static boolean isSafeEmailDomain(String domain) {
+        if (domain.isEmpty() || domain.length() > 253) {
+            return false;
+        }
+        String[] labels = domain.split("\\.", -1);
+        if (labels.length < 2) {
+            return false;
+        }
+        for (String label : labels) {
+            if (label.isEmpty() || label.length() > 63 || label.startsWith("-") || label.endsWith("-")) {
+                return false;
+            }
+            for (int i = 0; i < label.length(); i++) {
+                char c = label.charAt(i);
+                boolean ok = (c >= 'a' && c <= 'z')
+                        || (c >= 'A' && c <= 'Z')
+                        || (c >= '0' && c <= '9')
+                        || c == '-';
+                if (!ok) {
+                    return false;
+                }
+            }
+        }
+        String tld = labels[labels.length - 1];
+        return tld.length() >= 2 && tld.chars().anyMatch(Character::isLetter);
+    }
+
+    private static String sliceCodePoints(int[] cps, int startInclusive, int endExclusive) {
+        return new String(cps, startInclusive, endExclusive - startInclusive);
+    }
 
     @Transactional
     public AuthResponse deviceRegister(DeviceRegisterRequest req) {

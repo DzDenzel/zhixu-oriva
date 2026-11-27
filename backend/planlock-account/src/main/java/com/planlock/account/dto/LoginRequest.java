@@ -23,6 +23,6 @@ public class LoginRequest {
     private String deviceName;
 
     @NotBlank(message = "平台不能为空")
-    @Pattern(regexp = "android|ios|windows", message = "平台取值仅支持 android/ios/windows")
+    @Pattern(regexp = "android|ios|windows|web", message = "平台取值仅支持 android/ios/windows/web")
     private String platform;
 }
