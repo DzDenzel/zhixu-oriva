@@ -1,6 +1,9 @@
 package com.planlock.common.web;
 
+import jakarta.servlet.RequestDispatcher;
+import jakarta.servlet.http.HttpServletMapping;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.MappingMatch;
 import org.springframework.http.server.PathContainer;
 import org.springframework.http.server.RequestPath;
 import org.springframework.util.AntPathMatcher;
@@ -50,6 +53,8 @@ public final class ApiPathMatcher {
 
     /**
      * 判断请求在 Spring MVC 6.2 路径语义下是否属于 {@code /api/**} 空间。
+     * <p>一旦 {@link ServletRequestPathUtils#parseAndCache(HttpServletRequest)} 原生解析成功，即直接以该权威结果
+     * 决定分类（绝不把合法非 API 结果再次落入字符串回退）；仅在畸形百分号编码等解析异常时才启用容错回退。</p>
      */
     public static boolean isApiRequest(HttpServletRequest request) {
         if (request == null) {
@@ -57,8 +62,8 @@ public final class ApiPathMatcher {
         }
         try {
             RequestPath parsed = ServletRequestPathUtils.parseAndCache(request);
-            if (parsed != null && isApiPathContainer(parsed.pathWithinApplication())) {
-                return true;
+            if (parsed != null && parsed.pathWithinApplication() != null) {
+                return isApiPathContainer(parsed.pathWithinApplication());
             }
         } catch (IllegalArgumentException ignored) {
             // 非法百分号编码时回退到容错首段检测，避免漏判 API 前缀
@@ -89,13 +94,11 @@ public final class ApiPathMatcher {
         }
         try {
             PathContainer container = PathContainer.parsePath(rawPath, PathContainer.Options.HTTP_PATH);
-            if (isApiPathContainer(container)) {
-                return true;
-            }
+            return isApiPathContainer(container);
         } catch (IllegalArgumentException ignored) {
             // 畸形 % 编码时回退容错首段解析
+            return isApiFirstSegmentFallback(rawPath);
         }
-        return isApiFirstSegmentFallback(rawPath);
     }
 
     /**
@@ -112,23 +115,61 @@ public final class ApiPathMatcher {
     }
 
     static String extractFallbackPathWithinApplication(HttpServletRequest request) {
-        String uri = request.getRequestURI();
+        Object includeUri = request.getAttribute(RequestDispatcher.INCLUDE_REQUEST_URI);
+        String uri = includeUri instanceof String s ? s : request.getRequestURI();
         if (uri == null) {
             return "/";
         }
         String path = uri;
-        String contextPath = request.getContextPath();
-        if (contextPath != null && !contextPath.isEmpty() && path.startsWith(contextPath)) {
-            path = path.substring(contextPath.length());
+        Object includeContextPath = request.getAttribute(RequestDispatcher.INCLUDE_CONTEXT_PATH);
+        String contextPath = includeContextPath instanceof String s ? s : request.getContextPath();
+        if (contextPath != null && !contextPath.isEmpty() && !"/".equals(contextPath) && path.startsWith(contextPath)) {
+            int ctxLen = contextPath.length();
+            if (path.length() == ctxLen || path.charAt(ctxLen) == '/' || path.charAt(ctxLen) == ';') {
+                path = path.substring(ctxLen);
+            }
         }
-        // 与 Spring ServletRequestPath 一致：当前缀映射 Servlet（pathInfo != null）存在时剥离 servletPath 前缀
-        String pathInfo = request.getPathInfo();
-        String servletPath = request.getServletPath();
-        if (pathInfo != null && servletPath != null && !servletPath.isEmpty() && path.startsWith(servletPath)) {
-            String stripped = path.substring(servletPath.length());
-            path = stripped.isEmpty() ? "/" : stripped;
+        String servletPathPrefix = resolveFallbackServletPathPrefix(request);
+        if (servletPathPrefix != null && path.startsWith(servletPathPrefix)) {
+            String stripped = path.substring(servletPathPrefix.length());
+            if (stripped.isEmpty()) {
+                path = "/";
+            } else if (stripped.charAt(0) == '/') {
+                path = stripped;
+            } else if (stripped.charAt(0) == ';') {
+                int nextSlash = stripped.indexOf('/');
+                path = nextSlash < 0 ? "/" : stripped.substring(nextSlash);
+            }
         }
         return path.isEmpty() ? "/" : path;
+    }
+
+    private static String resolveFallbackServletPathPrefix(HttpServletRequest request) {
+        Object includeMapping = request.getAttribute(RequestDispatcher.INCLUDE_MAPPING);
+        HttpServletMapping mapping = includeMapping instanceof HttpServletMapping m
+                ? m
+                : request.getHttpServletMapping();
+        MappingMatch match = mapping != null ? mapping.getMappingMatch() : null;
+        boolean prefixMapping;
+        if (match != null) {
+            // 与 Spring 6.2 ServletRequestPathUtils.getServletPathPrefix 同一判据：仅 MappingMatch.PATH 剥离前缀
+            prefixMapping = (match == MappingMatch.PATH);
+        } else {
+            // 仅在未确认非前缀映射（如旧 mock 未显式设置 MappingMatch）时兼容 pathInfo != null
+            prefixMapping = (request.getPathInfo() != null);
+        }
+        if (!prefixMapping) {
+            return null;
+        }
+        Object includeServletPath = request.getAttribute(RequestDispatcher.INCLUDE_SERVLET_PATH);
+        String servletPath = includeServletPath instanceof String s ? s : request.getServletPath();
+        if (servletPath == null || servletPath.isEmpty()) {
+            return null;
+        }
+        if (servletPath.endsWith("/")) {
+            servletPath = servletPath.substring(0, servletPath.length() - 1);
+        }
+        return servletPath.isEmpty() ? null : servletPath;
     }
 
     static boolean hasSuspiciousPublicPathToken(String path) {

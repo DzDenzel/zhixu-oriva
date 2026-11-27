@@ -3,8 +3,10 @@ package com.planlock.common.web;
 import com.planlock.common.ErrorCode;
 import com.planlock.common.auth.JwtUtil;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.http.MappingMatch;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.web.MockHttpServletMapping;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
@@ -206,5 +208,98 @@ class ProtectedApiPreAuthFilterTest {
         AtomicBoolean bodyProceeded = new AtomicBoolean(false);
         bodyLimitFilter.doFilter(publicReq, new MockHttpServletResponse(), (r, s) -> bodyProceeded.set(true));
         assertThat(bodyProceeded.get()).isTrue();
+    }
+
+    @Test
+    void pathMappingMountRootAndMalformedPercentFallbackAreClassifiedConsistently() throws Exception {
+        // 1) Explicit MappingMatch.PATH hitting exact mount root (/ctx/api, servletPath="/api", pathInfo=null):
+        //    Spring pathWithinApplication is empty ("/"), so it MUST be classified as non-API and pass both filters.
+        MockHttpServletRequest mountRootReq = new MockHttpServletRequest("GET", "/ctx/api");
+        mountRootReq.setContextPath("/ctx");
+        mountRootReq.setServletPath("/api");
+        mountRootReq.setPathInfo(null);
+        mountRootReq.setHttpServletMapping(new MockHttpServletMapping("", "/api/*", "dispatcher", MappingMatch.PATH));
+
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(mountRootReq)).isEqualTo("/");
+        assertThat(ApiPathMatcher.extractFallbackPathWithinApplication(mountRootReq)).isEqualTo("/");
+        assertThat(ApiPathMatcher.isApiRequest(mountRootReq)).isFalse();
+        assertThat(ApiPathMatcher.isProtectedApiRequest(mountRootReq)).isFalse();
+
+        AtomicBoolean preAuthProceeded = new AtomicBoolean(false);
+        preAuthFilter.doFilter(mountRootReq, new MockHttpServletResponse(), (r, s) -> preAuthProceeded.set(true));
+        assertThat(preAuthProceeded.get()).isTrue();
+
+        MockHttpServletRequest mountRootJsonReq = new MockHttpServletRequest("POST", "/ctx/api");
+        mountRootJsonReq.setContextPath("/ctx");
+        mountRootJsonReq.setServletPath("/api");
+        mountRootJsonReq.setPathInfo(null);
+        mountRootJsonReq.setHttpServletMapping(new MockHttpServletMapping("", "/api/*", "dispatcher", MappingMatch.PATH));
+        mountRootJsonReq.setContentType("application/json");
+        mountRootJsonReq.setContent("{\"x\":1}".getBytes(StandardCharsets.UTF_8));
+        AtomicBoolean bodyProceeded = new AtomicBoolean(false);
+        bodyLimitFilter.doFilter(mountRootJsonReq, new MockHttpServletResponse(), (r, s) -> bodyProceeded.set(true));
+        assertThat(bodyProceeded.get()).isTrue();
+
+        // 2) Same MappingMatch.PATH mount root with malformed % encoding triggers fallback, which must also strip servletPath
+        MockHttpServletRequest malformedMountRoot = new MockHttpServletRequest("GET", "/ctx/api;bad=%ZZ");
+        malformedMountRoot.setContextPath("/ctx");
+        malformedMountRoot.setServletPath("/api");
+        malformedMountRoot.setPathInfo(null);
+        malformedMountRoot.setHttpServletMapping(new MockHttpServletMapping("", "/api/*", "dispatcher", MappingMatch.PATH));
+
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(malformedMountRoot)).isEqualTo("/");
+        assertThat(ApiPathMatcher.isApiRequest(malformedMountRoot)).isFalse();
+        assertThat(ApiPathMatcher.isProtectedApiRequest(malformedMountRoot)).isFalse();
+        AtomicBoolean malformedRootProceeded = new AtomicBoolean(false);
+        preAuthFilter.doFilter(malformedMountRoot, new MockHttpServletResponse(), (r, s) -> malformedRootProceeded.set(true));
+        assertThat(malformedRootProceeded.get()).isTrue();
+
+        // 3) Prefix-mapped /api/* with pathInfo="/v1/me" has pathWithinApplication="/v1/me" (non-API inside app)
+        MockHttpServletRequest prefixedNonApiSubpath = new MockHttpServletRequest("GET", "/ctx/api/v1/me");
+        prefixedNonApiSubpath.setContextPath("/ctx");
+        prefixedNonApiSubpath.setServletPath("/api");
+        prefixedNonApiSubpath.setPathInfo("/v1/me");
+        prefixedNonApiSubpath.setHttpServletMapping(new MockHttpServletMapping("v1/me", "/api/*", "dispatcher", MappingMatch.PATH));
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(prefixedNonApiSubpath)).isEqualTo("/v1/me");
+        assertThat(ApiPathMatcher.isApiRequest(prefixedNonApiSubpath)).isFalse();
+        assertThat(ApiPathMatcher.isProtectedApiRequest(prefixedNonApiSubpath)).isFalse();
+
+        // 4) Prefix-mapped /api/* (or /portal/*) targeting malformed % inside app's /api/** still blocks with 1001
+        MockHttpServletRequest malformedApiSubpath = new MockHttpServletRequest("GET", "/ctx/api/api/%ZZ");
+        malformedApiSubpath.setContextPath("/ctx");
+        malformedApiSubpath.setServletPath("/api");
+        malformedApiSubpath.setPathInfo("/api/%ZZ");
+        malformedApiSubpath.setHttpServletMapping(new MockHttpServletMapping("api/%ZZ", "/api/*", "dispatcher", MappingMatch.PATH));
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(malformedApiSubpath)).isEqualTo("/api/%ZZ");
+        assertThat(ApiPathMatcher.isApiRequest(malformedApiSubpath)).isTrue();
+        assertThat(ApiPathMatcher.isProtectedApiRequest(malformedApiSubpath)).isTrue();
+        MockHttpServletResponse malformedApiRes = new MockHttpServletResponse();
+        preAuthFilter.doFilter(malformedApiSubpath, malformedApiRes, (r, s) -> {
+            throw new AssertionError("malformed /api/%ZZ inside prefix servlet must be blocked");
+        });
+        assertThat(malformedApiRes.getStatus()).isEqualTo(200);
+        assertThat(malformedApiRes.getHeader("Cache-Control")).isEqualTo("no-store");
+        assertThat(malformedApiRes.getHeader("X-Content-Type-Options")).isEqualTo("nosniff");
+        assertThat(malformedApiRes.getContentAsString(StandardCharsets.UTF_8))
+                .contains("\"code\":" + ErrorCode.UNAUTHORIZED.getCode());
+
+        // 5) Default root servlet (/ctx/api/v1/me) & EXACT mapping (/ctx/api) still classify as protected API
+        MockHttpServletRequest defaultRootApi = new MockHttpServletRequest("GET", "/ctx/api/v1/me");
+        defaultRootApi.setContextPath("/ctx");
+        defaultRootApi.setServletPath("");
+        defaultRootApi.setPathInfo(null);
+        defaultRootApi.setHttpServletMapping(new MockHttpServletMapping("", "/", "dispatcher", MappingMatch.DEFAULT));
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(defaultRootApi)).isEqualTo("/api/v1/me");
+        assertThat(ApiPathMatcher.isApiRequest(defaultRootApi)).isTrue();
+        assertThat(ApiPathMatcher.isProtectedApiRequest(defaultRootApi)).isTrue();
+
+        MockHttpServletRequest exactApi = new MockHttpServletRequest("GET", "/ctx/api");
+        exactApi.setContextPath("/ctx");
+        exactApi.setServletPath("/api");
+        exactApi.setPathInfo(null);
+        exactApi.setHttpServletMapping(new MockHttpServletMapping("api", "/api", "dispatcher", MappingMatch.EXACT));
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(exactApi)).isEqualTo("/api");
+        assertThat(ApiPathMatcher.isApiRequest(exactApi)).isTrue();
+        assertThat(ApiPathMatcher.isProtectedApiRequest(exactApi)).isTrue();
     }
 }
