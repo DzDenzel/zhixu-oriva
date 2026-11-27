@@ -65,7 +65,7 @@ function canonicalPlanRepeatRule(rule?: PlanRepeatRule | null): string {
     normalized.weekdays = Array.from(new Set(rule.weekdays)).sort((a, b) => a - b);
   }
   if (Array.isArray(rule.dates)) {
-    normalized.dates = [...rule.dates];
+    normalized.dates = Array.from(new Set(rule.dates)).sort();
   }
   return JSON.stringify(normalized);
 }
@@ -424,6 +424,54 @@ function buildEditedScheduleRepeatRule(
   return JSON.stringify({ type: 'yearly', month, day });
 }
 
+/**
+ * 按 UI 所拥有的日程重复规则字段（type、去重排序后的 weekdays、monthly day、yearly month/day）
+ * 提取规范化语义键，用于忽略后端合法空白与键序差异，且兼顾后端可能保留的未暴露扩展字段（Astra R4 v1.2）。
+ */
+function canonicalScheduleRepeatRuleSemantics(raw?: string | null): string {
+  if (raw === null || raw === undefined || raw.trim() === '') {
+    return 'none';
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return `opaque:${raw}`;
+    }
+    const obj = parsed as Record<string, unknown>;
+    const type = typeof obj.type === 'string' ? obj.type.trim().toLowerCase() : '';
+    if (type === 'daily') {
+      return JSON.stringify({ type: 'daily' });
+    }
+    if (type === 'weekly' && Array.isArray(obj.weekdays)) {
+      const days = Array.from(
+        new Set(
+          obj.weekdays.filter(
+            (d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 1 && d <= 7,
+          ),
+        ),
+      ).sort((a, b) => a - b);
+      if (days.length > 0) {
+        return JSON.stringify({ type: 'weekly', weekdays: days });
+      }
+    }
+    if (type === 'monthly' && typeof obj.day === 'number' && Number.isInteger(obj.day)) {
+      return JSON.stringify({ type: 'monthly', day: obj.day });
+    }
+    if (
+      type === 'yearly' &&
+      typeof obj.month === 'number' &&
+      Number.isInteger(obj.month) &&
+      typeof obj.day === 'number' &&
+      Number.isInteger(obj.day)
+    ) {
+      return JSON.stringify({ type: 'yearly', month: obj.month, day: obj.day });
+    }
+    return `opaque:${raw}`;
+  } catch {
+    return `opaque:${raw}`;
+  }
+}
+
 function isScheduleFieldModified(
   nextForm: ScheduleFormState,
   field: ScheduleEditableField,
@@ -458,8 +506,9 @@ function isScheduleFieldModified(
         return false;
       }
       return (
-        buildEditedScheduleRepeatRule(nextForm, orig.repeatRule ?? null) !==
-        (orig.repeatRule ?? null)
+        canonicalScheduleRepeatRuleSemantics(
+          buildEditedScheduleRepeatRule(nextForm, orig.repeatRule ?? null),
+        ) !== canonicalScheduleRepeatRuleSemantics(orig.repeatRule ?? null)
       );
   }
 }
@@ -496,17 +545,21 @@ export function buildScheduleUpsertPayload(
   if (base) {
     const dirty = form.dirtyFields;
     const allDay = dirty.has('allDay') ? form.allDay : Boolean(base.allDay);
-    const switchedFromAllDayToTimed = dirty.has('allDay') && !allDay;
+    const baseHasActiveTimes = !base.allDay;
     const startTime = allDay
       ? null
-      : dirty.has('startTime') || switchedFromAllDayToTimed
+      : dirty.has('startTime')
         ? toBackendTime(form.startTime)
-        : (base.startTime ?? toBackendTime(form.startTime));
+        : baseHasActiveTimes && base.startTime
+          ? base.startTime
+          : toBackendTime(form.startTime);
     const endTime = allDay
       ? null
-      : dirty.has('endTime') || switchedFromAllDayToTimed
+      : dirty.has('endTime')
         ? toBackendTime(form.endTime)
-        : (base.endTime ?? toBackendTime(form.endTime));
+        : baseHasActiveTimes && base.endTime
+          ? base.endTime
+          : toBackendTime(form.endTime);
 
     const hasBaseCoords =
       base.locationLat !== null &&

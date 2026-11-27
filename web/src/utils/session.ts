@@ -1,27 +1,33 @@
 /**
- * 会话与设备标识管理（对齐 ADR-022 D2 & REQ-041 W2 & Astra B3 / R1）：
+ * 会话与设备标识管理（对齐 ADR-022 D2 & REQ-041 W2 & Astra B3 / R1 v1.2）：
  * - JWT 仅存放在单标签作用域的 sessionStorage，绝不写入 localStorage 或 cookie；
- * - 写入新令牌时，只有在 sessionStorage.setItem 明确未抛异常成功落盘后才解除内存失效栅栏；
+ * - 写入新令牌时，只有在 sessionStorage.setItem 明确未抛异常成功落盘且回读确认一致后才解除内存失效栅栏；
  * - 清除令牌时采用三层防御：
  *   1) 内存失效栅栏（sessionInvalidated / rejectedStaleToken）；
  *   2) 尝试 removeItem，失败则回退覆写哨兵值 "__ORIVA_REVOKED__"；
- *   3) 若 sessionStorage 双操作均抛异常导致旧值仍残留，则在 localStorage 记录该旧令牌的不可逆
- *      非秘密摘要（绝不存原始 JWT），使页面刷新或新建 ApiClient 实例同样拒收该残留旧凭据。
+ *   3) 若 sessionStorage 双操作均抛异常导致旧值仍残留，则在 localStorage 按独立摘要键
+ *      （oriva.web.session.revoked.<digest>）与只追加有界集合（oriva.web.session.revokedSet，上限 64 条）
+ *      持久化该旧令牌的 64-bit FNV-1a 不可逆非秘密摘要（绝不存原始 JWT）；
+ *      任意其他同源标签页的登录或清理动作绝不删除或覆盖其他标签尚存在的撤销记录；
+ * - 冷启动读取持久化撤销清单若发生存储异常或格式损坏而无法确认撤销状态，严格按 fail-closed 拒收疑似残留旧令牌。
  */
 
 export const TOKEN_SESSION_KEY = 'oriva.web.session.token';
-export const REVOKED_DIGEST_KEY = 'oriva.web.session.revokedDigest';
+export const REVOKED_DIGEST_PREFIX = 'oriva.web.session.revoked.';
+export const REVOKED_DIGEST_SET_KEY = 'oriva.web.session.revokedSet';
 export const REVOKED_TOKEN_SENTINEL = '__ORIVA_REVOKED__';
 export const DEVICE_UID_KEY = 'oriva.web.deviceUid';
 export const THEME_KEY = 'oriva.web.theme';
 
+const MAX_PERSISTED_REVOKED_DIGESTS = 64;
 const WEB_UID_PATTERN = /^web-[A-Za-z0-9-]{8,64}$/;
+const DIGEST_HEX_PATTERN = /^[0-9a-f]{16}$/;
 
 let sessionInvalidated = false;
 let rejectedStaleToken: string | null = null;
 
 /** 非秘密 64-bit FNV-1a 摘要（仅用于在极端存储删除失败时跨刷新拒收残留旧凭据，绝不还原 JWT） */
-function digestTokenNonSecret(token: string): string {
+export function digestTokenNonSecret(token: string): string {
   let h1 = 0x811c9dc5;
   let h2 = 0x9e3779b9;
   for (let i = 0; i < token.length; i += 1) {
@@ -34,28 +40,99 @@ function digestTokenNonSecret(token: string): string {
   return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
 }
 
-function recordPersistedRevokedDigest(token: string): void {
+/**
+ * 仅追加（不覆盖其他标签记录）地将残留旧令牌的非秘密摘要写入独立键与有界索引集合。
+ */
+function recordPersistedRevokedDigest(token: string): boolean {
+  const digest = digestTokenNonSecret(token);
+  let keyWritten = false;
   try {
-    window.localStorage.setItem(REVOKED_DIGEST_KEY, digestTokenNonSecret(token));
+    window.localStorage.setItem(`${REVOKED_DIGEST_PREFIX}${digest}`, '1');
+    keyWritten = window.localStorage.getItem(`${REVOKED_DIGEST_PREFIX}${digest}`) !== null;
   } catch {
-    // ignore localStorage failure
+    keyWritten = false;
+  }
+
+  let setWritten = false;
+  try {
+    const existingRaw = window.localStorage.getItem(REVOKED_DIGEST_SET_KEY);
+    let list: string[] = [];
+    if (existingRaw !== null) {
+      const parsed: unknown = JSON.parse(existingRaw);
+      if (Array.isArray(parsed)) {
+        list = parsed.filter((item): item is string => typeof item === 'string' && DIGEST_HEX_PATTERN.test(item));
+      }
+    }
+    if (!list.includes(digest)) {
+      list.push(digest);
+    }
+    while (list.length > MAX_PERSISTED_REVOKED_DIGESTS) {
+      const evicted = list.shift();
+      if (evicted && evicted !== digest) {
+        try {
+          window.localStorage.removeItem(`${REVOKED_DIGEST_PREFIX}${evicted}`);
+        } catch {
+          // ignore eviction failure
+        }
+      }
+    }
+    window.localStorage.setItem(REVOKED_DIGEST_SET_KEY, JSON.stringify(list));
+    setWritten = true;
+  } catch {
+    setWritten = false;
+  }
+
+  return keyWritten || setWritten;
+}
+
+/**
+ * 校验令牌摘要是否已被持久化撤销：
+ * - 命中独立摘要键或撤销集合中该摘要 => 拒收（true）；
+ * - 读取 localStorage 抛异常或撤销集合被破坏无法解析 => fail-closed 拒收（true），绝不放行疑似残留旧凭据。
+ */
+function isDigestRevokedOrUnverifiable(token: string): boolean {
+  const digest = digestTokenNonSecret(token);
+  try {
+    const perDigestMarker = window.localStorage.getItem(`${REVOKED_DIGEST_PREFIX}${digest}`);
+    if (perDigestMarker !== null) {
+      return true;
+    }
+    const rawSet = window.localStorage.getItem(REVOKED_DIGEST_SET_KEY);
+    if (rawSet !== null) {
+      const parsed: unknown = JSON.parse(rawSet);
+      if (!Array.isArray(parsed)) {
+        return true;
+      }
+      for (const entry of parsed) {
+        if (typeof entry !== 'string' || !DIGEST_HEX_PATTERN.test(entry)) {
+          return true;
+        }
+        if (entry === digest) {
+          return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    // 无法确认持久化撤销状态（存储权限受限或数据损坏）=> 严格 fail-closed
+    return true;
   }
 }
 
-function clearPersistedRevokedDigest(): void {
+function clearAllPersistedRevokedDigestsForTest(): void {
   try {
-    window.localStorage.removeItem(REVOKED_DIGEST_KEY);
+    const toRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (key && (key === REVOKED_DIGEST_SET_KEY || key.startsWith(REVOKED_DIGEST_PREFIX))) {
+        toRemove.push(key);
+      }
+    }
+    for (const key of toRemove) {
+      window.localStorage.removeItem(key);
+    }
   } catch {
     // ignore
-  }
-}
-
-function matchesPersistedRevokedDigest(token: string): boolean {
-  try {
-    const saved = window.localStorage.getItem(REVOKED_DIGEST_KEY);
-    return Boolean(saved && saved === digestTokenNonSecret(token));
-  } catch {
-    return false;
   }
 }
 
@@ -112,7 +189,7 @@ export function readSessionToken(): string | null {
     if (rejectedStaleToken !== null && token === rejectedStaleToken) {
       return null;
     }
-    if (matchesPersistedRevokedDigest(token)) {
+    if (isDigestRevokedOrUnverifiable(token)) {
       return null;
     }
     return token;
@@ -122,8 +199,8 @@ export function readSessionToken(): string | null {
 }
 
 /**
- * 仅在 sessionStorage.setItem 明确成功落盘且回读确认与新令牌一致时，才解除内存失效栅栏（Astra R1）。
- * 若写入失败，保持原有失效拒绝状态不变，绝不解除对残留旧凭据的阻断。
+ * 仅在 sessionStorage.setItem 明确成功落盘且回读确认与新令牌一致时，才解除本标签页内存失效栅栏（Astra R1）。
+ * 绝不删除或修改 localStorage 中其他同源标签页留存的持久化撤销摘要。
  */
 export function writeSessionToken(token: string): boolean {
   const normalized = token.trim();
@@ -136,7 +213,6 @@ export function writeSessionToken(token: string): boolean {
     }
     sessionInvalidated = false;
     rejectedStaleToken = null;
-    clearPersistedRevokedDigest();
     return true;
   } catch {
     return false;
@@ -145,13 +221,15 @@ export function writeSessionToken(token: string): boolean {
 
 export interface ClearSessionResult {
   storageCleared: boolean;
+  revocationPersisted: boolean;
 }
 
 /**
  * 原子化清除会话：
  * 1) 立即激活内存失效栅栏并记录旧令牌；
  * 2) 尝试 removeItem；若失败或旧值仍在，则尝试覆写为哨兵值 REVOKED_TOKEN_SENTINEL；
- * 3) 若双写入均失败导致旧值仍残留于 sessionStorage，则记录不可逆撤销摘要供新实例/刷新后拒收。
+ * 3) 若双写入均失败导致旧值仍残留于 sessionStorage，则向独立摘要键与只追加有界撤销集合写入该旧令牌的不可逆摘要；
+ *    无论本标签清除成功与否，绝不删除其他同源标签页的撤销记录。
  */
 export function clearSessionToken(): ClearSessionResult {
   let stale: string | null = null;
@@ -185,21 +263,20 @@ export function clearSessionToken(): ClearSessionResult {
     }
   }
 
+  let revocationPersisted = false;
   if (!cleared && stale) {
-    recordPersistedRevokedDigest(stale);
-  } else if (cleared) {
-    clearPersistedRevokedDigest();
+    revocationPersisted = recordPersistedRevokedDigest(stale);
   }
 
-  return { storageCleared: cleared };
+  return { storageCleared: cleared, revocationPersisted };
 }
 
-/** 仅供单元测试在用例间重置模块级内存栅栏；preservePersistedDigest=true 用于模拟页面刷新 */
+/** 仅供单元测试在用例间重置模块级内存栅栏；preservePersistedDigest=true 用于模拟同源页面刷新 */
 export function resetSessionGuardForTest(preservePersistedDigest = false): void {
   sessionInvalidated = false;
   rejectedStaleToken = null;
   if (!preservePersistedDigest) {
-    clearPersistedRevokedDigest();
+    clearAllPersistedRevokedDigestsForTest();
   }
 }
 

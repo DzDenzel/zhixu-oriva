@@ -17,7 +17,6 @@ import type {
   TodaySummary,
 } from '../types';
 import { MAX_CATALOG_BYTES, validateSameOriginCatalog } from '../utils/catalog';
-import { utf8ByteLength } from '../utils/security';
 import {
   buildWebDeviceName,
   clearSessionToken,
@@ -94,7 +93,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
     memoryToken = token;
     if (token) {
       writeSessionToken(token);
-      return { storageCleared: true };
+      return { storageCleared: true, revocationPersisted: false };
     }
     return clearSessionToken();
   }
@@ -495,47 +494,44 @@ async function readResponseTextBounded(
   maxBytes: number,
   assertStillValid: () => void,
 ): Promise<string> {
-  if (response.body && typeof response.body.getReader === 'function') {
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let totalBytes = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        try {
-          assertStillValid();
-        } catch (err) {
-          await reader.cancel().catch(() => {});
-          throw err;
-        }
-        if (done) break;
-        if (!value || value.byteLength === 0) continue;
-        totalBytes += value.byteLength;
-        if (totalBytes > maxBytes) {
-          await reader.cancel().catch(() => {});
-          throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
-        }
-        chunks.push(value);
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    throw new ApiError(
+      2001,
+      '插件目录响应缺少可读流，无法在读取前执行 2 MiB 安全上限校验，已拒绝解析',
+      response.status,
+    );
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      try {
+        assertStillValid();
+      } catch (err) {
+        await reader.cancel().catch(() => {});
+        throw err;
       }
-    } finally {
-      reader.releaseLock();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
+      }
+      chunks.push(value);
     }
-    const merged = new Uint8Array(totalBytes);
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder('utf-8').decode(merged);
+  } finally {
+    reader.releaseLock();
   }
-
-  // Fallback for synthetic test Response objects without ReadableStream body
-  const rawText = await response.text();
-  assertStillValid();
-  if (utf8ByteLength(rawText) > maxBytes) {
-    throw new ApiError(2001, '插件目录响应体积超出 2 MiB 安全上限', response.status);
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
   }
-  return rawText;
+  return new TextDecoder('utf-8').decode(merged);
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;

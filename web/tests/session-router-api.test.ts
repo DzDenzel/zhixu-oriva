@@ -4,10 +4,12 @@ import { PORTAL_ROUTES, resolveRoute } from '../src/utils/router';
 import {
   clearSessionToken,
   DEVICE_UID_KEY,
+  digestTokenNonSecret,
   getOrCreateDeviceUid,
   readSessionToken,
   resetSessionGuardForTest,
-  REVOKED_DIGEST_KEY,
+  REVOKED_DIGEST_PREFIX,
+  REVOKED_DIGEST_SET_KEY,
   REVOKED_TOKEN_SENTINEL,
   TOKEN_SESSION_KEY,
   writeSessionToken,
@@ -54,18 +56,20 @@ describe('session & deviceUid lifecycle (B3)', () => {
     expect(readSessionToken()).toBe('jwt-new-session');
   });
 
-  it('rejects lingering stale token across page reload and failed writeSessionToken when both removeItem and setItem throw (R1)', () => {
-    const staleJwt = 'stale-session-token-r1-xyz';
-    expect(writeSessionToken(staleJwt)).toBe(true);
+  it('isolates persisted revocation digests across tabs and fails closed on revocation storage/parse errors (R1)', () => {
+    const tabAToken = 'stale-tab-a-session-token-r1';
+    const tabADigest = digestTokenNonSecret(tabAToken);
+    expect(writeSessionToken(tabAToken)).toBe(true);
 
-    // Simulate sessionStorage removeItem & setItem BOTH throwing while localStorage remains writable
+    // Tab A experiences sessionStorage removeItem + setItem double failure while localStorage works
     const origRemove = Storage.prototype.removeItem;
     const origSet = Storage.prototype.setItem;
+    const origGet = Storage.prototype.getItem;
     const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (
       this: Storage,
       key: string,
     ) {
-      if (this === window.sessionStorage) throw new Error('sessionStorage remove blocked');
+      if (this === window.sessionStorage) throw new Error('tab A sessionStorage remove blocked');
       return origRemove.call(this, key);
     });
     const setSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
@@ -73,38 +77,84 @@ describe('session & deviceUid lifecycle (B3)', () => {
       key: string,
       val: string,
     ) {
-      if (this === window.sessionStorage) throw new Error('sessionStorage set blocked');
+      if (this === window.sessionStorage) throw new Error('tab A sessionStorage set blocked');
       return origSet.call(this, key, val);
     });
 
-    const cleared = clearSessionToken();
-    expect(cleared.storageCleared).toBe(false);
-    // Raw JWT still lingers in sessionStorage, yet readSessionToken MUST return null
-    expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe(staleJwt);
+    const clearedA = clearSessionToken();
+    expect(clearedA.storageCleared).toBe(false);
+    expect(clearedA.revocationPersisted).toBe(true);
+    expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe(tabAToken);
     expect(readSessionToken()).toBeNull();
 
-    // localStorage stores only a non-secret 16-hex digest (NEVER the raw JWT)
-    const savedDigest = window.localStorage.getItem(REVOKED_DIGEST_KEY);
-    expect(savedDigest).toMatch(/^[0-9a-f]{16}$/);
-    expect(savedDigest).not.toContain(staleJwt);
+    // Persisted record stores only non-secret 16-hex digest (NEVER raw JWT)
+    expect(window.localStorage.getItem(`${REVOKED_DIGEST_PREFIX}${tabADigest}`)).toBe('1');
+    const savedSetRaw = window.localStorage.getItem(REVOKED_DIGEST_SET_KEY) ?? '';
+    expect(savedSetRaw).toContain(tabADigest);
+    expect(savedSetRaw).not.toContain(tabAToken);
 
-    // Attempting to write a new token while sessionStorage.setItem fails MUST NOT lift the fence
+    // Failed writeSessionToken MUST NOT lift the fence
     expect(writeSessionToken('replacement-token')).toBe(false);
     expect(readSessionToken()).toBeNull();
-
-    // Simulate page reload (in-memory flags cleared, localStorage revoked digest intact)
-    resetSessionGuardForTest(true);
-    expect(readSessionToken()).toBeNull();
-    const freshApi = createApiClient();
-    expect(freshApi.getToken()).toBeNull();
 
     removeSpy.mockRestore();
     setSpy.mockRestore();
 
-    // Once storage recovers and a genuinely new token is written, session resumes cleanly
-    expect(writeSessionToken('fresh-after-recovery')).toBe(true);
-    expect(readSessionToken()).toBe('fresh-after-recovery');
-    expect(window.localStorage.getItem(REVOKED_DIGEST_KEY)).toBeNull();
+    // Simulate same-origin Tab B (separate working sessionStorage, shared localStorage) logging in,
+    // cleanly logging out, and also encountering another failed clear -> MUST NEVER delete/overwrite Tab A's digest!
+    resetSessionGuardForTest(true);
+    expect(writeSessionToken('tab-b-valid-token')).toBe(true);
+    expect(readSessionToken()).toBe('tab-b-valid-token');
+    expect(clearSessionToken().storageCleared).toBe(true);
+    expect(window.localStorage.getItem(`${REVOKED_DIGEST_PREFIX}${tabADigest}`)).toBe('1');
+
+    // Tab B also has a failed clear on another token -> appends without evicting Tab A's digest
+    expect(writeSessionToken('tab-b-stale-token')).toBe(true);
+    const removeSpyB = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (this === window.sessionStorage) throw new Error('tab B remove blocked');
+      return origRemove.call(this, key);
+    });
+    const setSpyB = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      val: string,
+    ) {
+      if (this === window.sessionStorage) throw new Error('tab B set blocked');
+      return origSet.call(this, key, val);
+    });
+    expect(clearSessionToken().storageCleared).toBe(false);
+    removeSpyB.mockRestore();
+    setSpyB.mockRestore();
+
+    // Now simulate Tab A refreshing with lingering tabAToken still in Tab A's sessionStorage!
+    window.sessionStorage.setItem(TOKEN_SESSION_KEY, tabAToken);
+    resetSessionGuardForTest(true);
+    expect(readSessionToken()).toBeNull();
+    expect(createApiClient().getToken()).toBeNull();
+
+    // Genuine fresh token written after storage recovers still works, while tabADigest remains revoked
+    expect(writeSessionToken('tab-a-fresh-after-recovery')).toBe(true);
+    expect(readSessionToken()).toBe('tab-a-fresh-after-recovery');
+    expect(window.localStorage.getItem(`${REVOKED_DIGEST_PREFIX}${tabADigest}`)).toBe('1');
+
+    // Corrupted revocation set in localStorage => fail-closed (never allow suspect token)
+    window.localStorage.setItem(REVOKED_DIGEST_SET_KEY, '{corrupted-json');
+    expect(readSessionToken()).toBeNull();
+
+    // Storage read permission error on localStorage => fail-closed
+    window.localStorage.removeItem(REVOKED_DIGEST_SET_KEY);
+    const getSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (this === window.localStorage) throw new Error('localStorage read denied');
+      return origGet.call(this, key);
+    });
+    expect(readSessionToken()).toBeNull();
+    getSpy.mockRestore();
   });
 });
 
@@ -343,5 +393,20 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
     expect(cancelled).toBe(true);
     // 2 MiB = 4 * 512 KiB; stream must stop at chunk 5 (well before 20 chunks)
     expect(pulledChunks).toBeLessThanOrEqual(6);
+  });
+
+  it('rejects plugin catalog response lacking readable stream body WITHOUT calling response.text() (R2)', async () => {
+    const textSpy = vi.fn(async () => '{"catalogFormatVersion":1,"sourceId":"official","sourceType":"OFFICIAL","plugins":[]}');
+    const mockFetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      body: null,
+      text: textSpy,
+    })) as unknown as typeof fetch;
+
+    const api = createApiClient({ fetchImpl: mockFetch });
+    await expect(api.getPluginCatalog('official')).rejects.toThrow(/缺少可读流/);
+    expect(textSpy).not.toHaveBeenCalled();
   });
 });

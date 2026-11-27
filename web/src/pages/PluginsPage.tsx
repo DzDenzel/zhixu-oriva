@@ -17,7 +17,10 @@ export interface PluginsPageProps {
 
 export function PluginsPage({ api, onNotify }: PluginsPageProps) {
   const [sourceTab, setSourceTab] = useState<'official' | 'third-party'>('official');
-  const [catalog, setCatalog] = useState<PluginCatalogDocument | null>(null);
+  const [catalogState, setCatalogState] = useState<{
+    source: 'official' | 'third-party';
+    doc: PluginCatalogDocument;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState<string | null>(null);
 
@@ -25,16 +28,12 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
   const [formBSizeWarning, setFormBSizeWarning] = useState<string | null>(null);
   const [formBResult, setFormBResult] = useState<CatalogValidationResult | null>(null);
 
-  // R2: 绑定 (sourceTab, reqId) 防止快速切换目录源时先发后到的响应污染另一标签页
+  // R2: 切源点击时同步递增 catalogReqSeq 并绑定 activeSourceRef，立即废止先前在途请求且杜绝首帧串闪
   const catalogReqSeq = useRef(0);
-  const activeSourceRef = useRef<'official' | 'third-party'>(sourceTab);
+  const activeSourceRef = useRef<'official' | 'third-party'>('official');
 
-  async function loadCatalog(source: 'official' | 'third-party') {
-    activeSourceRef.current = source;
-    const reqId = ++catalogReqSeq.current;
+  async function loadCatalog(source: 'official' | 'third-party', reqId: number) {
     const gen = api.getSessionGeneration();
-    setLoading(true);
-    setErrorText(null);
     try {
       const doc = await api.getPluginCatalog(source);
       if (
@@ -44,7 +43,7 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
       ) {
         return;
       }
-      setCatalog(doc);
+      setCatalogState({ source, doc });
     } catch (err) {
       if (err instanceof StaleSessionError) return;
       if (
@@ -54,7 +53,7 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
       ) {
         return;
       }
-      setCatalog(null);
+      setCatalogState(null);
       if (err instanceof ApiError) {
         setErrorText(err.message);
       } else {
@@ -71,9 +70,30 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
     }
   }
 
+  function switchSourceTab(nextSource: 'official' | 'third-party') {
+    if (nextSource === activeSourceRef.current) return;
+    const reqId = ++catalogReqSeq.current;
+    activeSourceRef.current = nextSource;
+    setSourceTab(nextSource);
+    setCatalogState(null);
+    setErrorText(null);
+    setLoading(true);
+    void loadCatalog(nextSource, reqId);
+  }
+
   useEffect(() => {
-    void loadCatalog(sourceTab);
-  }, [sourceTab]);
+    const reqId = ++catalogReqSeq.current;
+    activeSourceRef.current = 'official';
+    setCatalogState(null);
+    setErrorText(null);
+    setLoading(true);
+    void loadCatalog('official', reqId);
+    return () => {
+      catalogReqSeq.current += 1;
+    };
+  }, []);
+
+  const catalog = catalogState && catalogState.source === sourceTab ? catalogState.doc : null;
 
   async function copyText(value: string, label: string) {
     try {
@@ -233,7 +253,7 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
               role="tab"
               aria-selected={sourceTab === 'official'}
               class={`segmented-btn${sourceTab === 'official' ? ' is-active' : ''}`}
-              onClick={() => setSourceTab('official')}
+              onClick={() => switchSourceTab('official')}
             >
               本实例官方源（official）
             </button>
@@ -242,7 +262,7 @@ export function PluginsPage({ api, onNotify }: PluginsPageProps) {
               role="tab"
               aria-selected={sourceTab === 'third-party'}
               class={`segmented-btn${sourceTab === 'third-party' ? ' is-active' : ''}`}
-              onClick={() => setSourceTab('third-party')}
+              onClick={() => switchSourceTab('third-party')}
             >
               本实例第三方源（third-party）
             </button>

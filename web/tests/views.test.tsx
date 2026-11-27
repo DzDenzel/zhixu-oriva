@@ -230,6 +230,81 @@ describe('B6 & B7 payload fidelity: custom dates, multi-weekday, strategy 1409 &
     expect(mergedSched.startTime).toBe('14:05:30');
     expect(mergedSched.endTime).toBe('15:10:45');
   });
+
+  it('compares schedule repeatRule semantically (ignoring whitespace/key order/extra backend fields) and preserves server times when both sides switch allDay->timed on 1409 (R4 v1.2)', () => {
+    // 1) Non-canonical whitespace, reversed key order, unsorted weekdays, and extra backend field
+    const nonCanonicalRule = '{  "weekdays" : [ 5, 1, 3 ],  "type" : "weekly",  "interval" : 2  }';
+    const schedWithNonCanonical: ScheduleItem = {
+      id: 51,
+      userId: 1,
+      title: '英语口语',
+      startDate: '2026-12-01',
+      endDate: '2026-12-01',
+      startTime: '08:00:00',
+      endTime: '09:00:00',
+      allDay: false,
+      repeatRule: nonCanonicalRule,
+      status: 1,
+      version: 3,
+    };
+
+    let form = scheduleFormFromItem(schedWithNonCanonical);
+    // Change to daily (dirty), then pick weekly (with parsed [1, 3, 5], semantically identical to original!)
+    form = withScheduleField(form, 'repeatMode', 'daily', 'repeatRule');
+    expect(form.dirtyFields.has('repeatRule')).toBe(true);
+    form = withScheduleField(form, 'repeatMode', 'weekly', 'repeatRule');
+    // Semantic match MUST clear repeatRule dirty bit!
+    expect(form.dirtyFields.has('repeatRule')).toBe(false);
+
+    // Ordinary save preserves exact original JSON (including whitespace, key order, and unexposed interval=2)
+    expect(buildScheduleUpsertPayload(form).repeatRule).toBe(nonCanonicalRule);
+
+    // 1409 overwrite MUST keep server's concurrently updated repeatRule instead of overwriting with local!
+    const serverUpdatedRule: ScheduleItem = {
+      ...schedWithNonCanonical,
+      repeatRule: '{"type":"weekly","weekdays":[1,3,5,6],"interval":2}',
+      version: 4,
+    };
+    expect(buildScheduleUpsertPayload(form, serverUpdatedRule).repeatRule).toBe(
+      '{"type":"weekly","weekdays":[1,3,5,6],"interval":2}',
+    );
+
+    // 2) Both Web and Mobile switch an allDay=true schedule to timed (allDay=false); only Mobile edits startTime/endTime
+    const allDayOrig: ScheduleItem = {
+      id: 52,
+      userId: 1,
+      title: '季度复盘',
+      startDate: '2026-12-05',
+      endDate: '2026-12-05',
+      startTime: null,
+      endTime: null,
+      allDay: true,
+      status: 1,
+      version: 1,
+    };
+    const webSwitchedOnlyAllDay = withScheduleField(scheduleFormFromItem(allDayOrig), 'allDay', false, 'allDay');
+    expect(webSwitchedOnlyAllDay.dirtyFields.has('allDay')).toBe(true);
+    expect(webSwitchedOnlyAllDay.dirtyFields.has('startTime')).toBe(false);
+    expect(webSwitchedOnlyAllDay.dirtyFields.has('endTime')).toBe(false);
+
+    const mobileSwitchedAndSetTime: ScheduleItem = {
+      ...allDayOrig,
+      allDay: false,
+      startTime: '14:30:00',
+      endTime: '16:00:00',
+      version: 2,
+    };
+    const mergedAllDayConflict = buildScheduleUpsertPayload(webSwitchedOnlyAllDay, mobileSwitchedAndSetTime);
+    expect(mergedAllDayConflict.allDay).toBe(false);
+    expect(mergedAllDayConflict.startTime).toBe('14:30:00');
+    expect(mergedAllDayConflict.endTime).toBe('16:00:00');
+
+    // If Web explicitly edited startTime only, Web's startTime wins while Mobile's endTime is still preserved
+    const webAlsoEditedStart = withScheduleField(webSwitchedOnlyAllDay, 'startTime', '13:45', 'startTime');
+    const mergedPartialTime = buildScheduleUpsertPayload(webAlsoEditedStart, mobileSwitchedAndSetTime);
+    expect(mergedPartialTime.startTime).toBe('13:45:00');
+    expect(mergedPartialTime.endTime).toBe('16:00:00');
+  });
 });
 
 describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 trust copy', () => {
@@ -491,51 +566,96 @@ describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 tru
     expect(container.textContent).toContain('92:70:60:2B');
   });
 
-  it('exits bootstrapping to LoginPage when cold-start token receives 1001/401 on App mount (R1)', async () => {
-    resetSessionGuardForTest();
-    window.localStorage.clear();
-    window.sessionStorage.clear();
-    writeSessionToken('expired-cold-start-jwt');
-    window.history.replaceState(null, '', '/today');
+  it('exits bootstrapping to LoginPage when cold-start token receives 1001 or HTTP 401 on App mount (R1)', async () => {
+    for (const statusCase of ['code-1001', 'http-401'] as const) {
+      render(null, container);
+      resetSessionGuardForTest();
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+      writeSessionToken(`expired-cold-start-${statusCase}`);
+      window.history.replaceState(null, '', '/today');
 
-    const fetchSpy = vi.spyOn(window, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ code: 1001, message: '登录会话已失效', data: null }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
+      const fetchSpy = vi.spyOn(window, 'fetch').mockResolvedValue(
+        statusCase === 'code-1001'
+          ? new Response(JSON.stringify({ code: 1001, message: '登录会话已失效', data: null }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          : new Response('Unauthorized', { status: 401 }),
+      );
 
-    render(<App />, container);
-    await flushUi();
+      render(<App />, container);
+      await flushUi();
 
-    expect(container.textContent).not.toContain('正在连接个人数字站…');
-    expect(container.querySelector('input[name="account"]')).not.toBeNull();
-    expect(container.textContent).toContain('登录会话已失效');
+      expect(container.textContent).not.toContain('正在连接个人数字站…');
+      expect(container.querySelector('input[name="account"]')).not.toBeNull();
+      expect(container.textContent).toContain('登录会话已失效');
 
-    fetchSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
     resetSessionGuardForTest();
     window.sessionStorage.clear();
   });
 
-  it('prevents delayed official catalog response from overwriting third-party tab on PluginsPage (R2)', async () => {
-    let resolveOfficial!: (doc: PluginCatalogDocument) => void;
+  it('synchronously invalidates stale official view/request on click switch to third-party tab (R2 v1.2)', async () => {
+    let resolveOfficialFirst!: (doc: PluginCatalogDocument) => void;
     let resolveThirdParty!: (doc: PluginCatalogDocument) => void;
+    let officialCalls = 0;
 
     const getPluginCatalog = vi.fn((source: 'official' | 'third-party') => {
+      if (source === 'official') {
+        officialCalls += 1;
+        if (officialCalls === 1) {
+          return Promise.resolve<PluginCatalogDocument>({
+            catalogFormatVersion: 1,
+            sourceId: 'official',
+            sourceType: 'OFFICIAL',
+            plugins: [
+              {
+                id: 'official-loaded',
+                name: '已加载官方插件',
+                version: '1.0.0',
+                contractVersion: 2,
+                entryPoint: 'main',
+                downloadUrl: '/api/v1/plugins/artifacts/official/official-loaded.pljs',
+                sha256: 'c'.repeat(64),
+                requiredCapabilities: [],
+                description: 'loaded official desc',
+              },
+            ],
+          });
+        }
+        return new Promise<PluginCatalogDocument>((resolve) => {
+          resolveOfficialFirst = resolve;
+        });
+      }
       return new Promise<PluginCatalogDocument>((resolve) => {
-        if (source === 'official') resolveOfficial = resolve;
-        else resolveThirdParty = resolve;
+        resolveThirdParty = resolve;
       });
     });
 
     const api = baseClientStub({ getPluginCatalog });
     render(<PluginsPage api={api} onNotify={() => {}} />, container);
     await flushUi();
+    expect(container.textContent).toContain('已加载官方插件');
 
+    // Click third-party tab -> MUST immediately clear previous official items & show loading state on first frame!
+    const officialTab = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('official'),
+    );
     const thirdPartyTab = Array.from(container.querySelectorAll('button')).find((b) =>
       b.textContent?.includes('third-party'),
     );
     expect(thirdPartyTab).toBeDefined();
+    thirdPartyTab?.click();
+    await flushUi();
+
+    expect(container.textContent).not.toContain('已加载官方插件');
+    expect(container.textContent).toContain('正在拉取同源公开插件目录…');
+
+    // Now switch back to official (creates pending request #2) and immediately switch to third-party again
+    officialTab?.click();
+    await flushUi();
     thirdPartyTab?.click();
     await flushUi();
 
@@ -562,7 +682,7 @@ describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 tru
     expect(container.textContent).toContain('第三方专属插件');
 
     // Now delayed official response arrives -> MUST be ignored!
-    resolveOfficial({
+    resolveOfficialFirst({
       catalogFormatVersion: 1,
       sourceId: 'official',
       sourceType: 'OFFICIAL',
