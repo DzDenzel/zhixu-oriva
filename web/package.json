@@ -1,0 +1,24 @@
+{
+  "name": "oriva-web-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "知序 ORIVA Web 数字站（同源零外链静态 SPA，REQ-041）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^10.26.4"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.2",
+    "vitest": "^3.0.9"
+  }
+}
