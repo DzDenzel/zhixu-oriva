@@ -1,9 +1,6 @@
 name: Validate and build ORIVA plugin registry
 on:
   pull_request:
-    paths:
-      - 'deploy/plugin-registry/**'
-      - '.github/workflows/plugin-registry.yml'
   push:
     branches:
       - main
@@ -36,7 +33,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Extract isolated trusted verifier and audit governance changes
+      - name: Check scope, baseline capabilities, and extract isolated trusted verifier
         id: verifier
         working-directory: ${{ runner.temp }}
         env:
@@ -67,147 +64,196 @@ jobs:
           if dist_dir.exists():
               shutil.rmtree(dist_dir)
 
+          run_registry = "true"
+          verifier_root = ""
+
           if event == "pull_request":
               base_sha = os.environ["BASE_SHA"]
-              required_trusted_files = (
-                  "deploy/plugin-registry/registry_tool.py",
-                  "deploy/plugin-registry/JarSignerVerifier.java",
-                  "deploy/plugin-registry/tests/test_registry_tool.py",
-                  "deploy/plugin-registry/web/index.html",
-                  "deploy/plugin-registry/web/style.css",
-                  "deploy/plugin-registry/web/app.js",
-              )
-              missing = []
-              for rel in required_trusted_files:
-                  probe = subprocess.run(
-                      ["git", "-C", str(workspace), "cat-file", "-e", f"{base_sha}:{rel}"],
-                      capture_output=True,
-                      check=False,
-                  )
-                  if probe.returncode != 0:
-                      missing.append(rel)
-
-              if missing:
-                  lines = [
-                      "### Plugin Registry Verification Blocked (Bootstrap PR)",
-                      f"- Base commit `{base_sha[:12]}` does not yet contain trusted verifier assets: `{', '.join(missing)}`.",
-                      "- **Fail-closed policy**: PR workflows never execute candidate verifier code from an untrusted PR head.",
-                      "- **Maintainer action**: Audit all files manually and merge via maintainer-controlled `workflow_dispatch` / protected push.",
-                  ]
-                  summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                  print(
-                      "::error::Bootstrap PR blocked: base commit lacks trusted verifier files "
-                      f"({', '.join(missing)}). Executing candidate PR verifier code is forbidden; "
-                      "maintainer manual audit and workflow_dispatch are required."
-                  )
-                  raise SystemExit(1)
-
-              trusted_checkout.mkdir(parents=True, exist_ok=True)
-              archive_zip = runner_temp / "trusted_verifier.zip"
-              archive_paths = [
-                  "deploy/plugin-registry",
-                  "android/core-plugin/src/test/resources/signing/mixed.pljs",
-              ]
-              subprocess.run(
-                  ["git", "-C", str(workspace), "archive", "--format=zip", f"--output={archive_zip}", base_sha, "--", *archive_paths],
-                  check=True,
-              )
-              with zipfile.ZipFile(archive_zip, "r") as zf:
-                  for info in zf.infolist():
-                      if info.is_dir():
-                          continue
-                      rel_path = Path(info.filename)
-                      if rel_path.is_absolute() or ".." in rel_path.parts:
-                          raise RuntimeError(f"Unsafe archive entry: {info.filename}")
-                      target = (trusted_checkout / rel_path).resolve()
-                      if os.path.commonpath([str(trusted_checkout), str(target)]) != str(trusted_checkout):
-                          raise RuntimeError(f"Escaping archive entry: {info.filename}")
-                      target.parent.mkdir(parents=True, exist_ok=True)
-                      target.write_bytes(zf.read(info.filename))
-              archive_zip.unlink(missing_ok=True)
-
-              trusted_dir = trusted_checkout / "deploy" / "plugin-registry"
-              verifier_root = trusted_dir.resolve()
-              trusted_source = f"isolated trusted base ({base_sha[:12]}) in runner.temp"
-
               changed = subprocess.check_output(
                   ["git", "-C", str(workspace), "diff", "--name-only", f"{base_sha}...HEAD"],
                   text=True,
               ).splitlines()
-              privileged_prefixes = (
-                  ".github/workflows/plugin-registry.yml",
-                  "deploy/plugin-registry/registry_tool.py",
-                  "deploy/plugin-registry/JarSignerVerifier.java",
-                  "deploy/plugin-registry/web/",
-                  "deploy/plugin-registry/tests/",
+              touches_registry = any(
+                  p == ".github/workflows/plugin-registry.yml" or p.startswith("deploy/plugin-registry/")
+                  for p in changed
               )
-              privileged_hits = [p for p in changed if p == privileged_prefixes[0] or p.startswith(privileged_prefixes[1:])]
+              if not touches_registry:
+                  run_registry = "false"
+                  summary_path.write_text(
+                      "\n".join([
+                          "### Plugin Registry Check Skipped",
+                          "- PR does not modify `deploy/plugin-registry/**` or `.github/workflows/plugin-registry.yml`.",
+                          "- Required status check `validate-and-build` passes immediately without blocking unrelated PRs.",
+                          "",
+                      ]),
+                      encoding="utf-8",
+                  )
+              else:
+                  required_trusted_files = (
+                      "deploy/plugin-registry/registry_tool.py",
+                      "deploy/plugin-registry/JarSignerVerifier.java",
+                      "deploy/plugin-registry/tests/test_registry_tool.py",
+                      "deploy/plugin-registry/web/index.html",
+                      "deploy/plugin-registry/web/style.css",
+                      "deploy/plugin-registry/web/app.js",
+                  )
+                  missing = []
+                  for rel in required_trusted_files:
+                      probe = subprocess.run(
+                          ["git", "-C", str(workspace), "cat-file", "-e", f"{base_sha}:{rel}"],
+                          capture_output=True,
+                          check=False,
+                      )
+                      if probe.returncode != 0:
+                          missing.append(rel)
 
-              base_reg = trusted_dir / "registry.json"
-              cand_reg = candidate_dir / "registry.json"
-              gov_proc = subprocess.run(
-                  [
-                      sys.executable,
-                      "-I",
-                      str(verifier_root / "registry_tool.py"),
-                      "audit-governance",
-                      "--base-registry",
-                      str(base_reg),
-                      "--candidate-registry",
-                      str(cand_reg),
-                      "--trusted-root",
-                      str(trusted_checkout),
-                      "--candidate-root",
-                      str(workspace),
-                  ],
-                  capture_output=True,
-                  text=True,
-                  check=False,
-              )
-              if gov_proc.returncode != 0:
-                  print(f"::error::Bounded candidate governance pre-read failed: {(gov_proc.stderr or gov_proc.stdout).strip()}")
-                  raise SystemExit(gov_proc.returncode)
-              anchor_changed = bool(json.loads(gov_proc.stdout)["anchorChanged"])
+                  if missing:
+                      lines = [
+                          "### Plugin Registry Verification Blocked (Bootstrap PR)",
+                          f"- Base commit `{base_sha[:12]}` does not yet contain trusted verifier assets: `{', '.join(missing)}`.",
+                          "- **Fail-closed policy**: PR workflows never execute candidate verifier code from an untrusted PR head.",
+                          "- **GitHub Required Check note**: Manual `workflow_dispatch` runs do NOT satisfy a `pull_request` required check; maintainer `@DzDenzel` must manually audit all files and merge via authorized Ruleset bypass / protected merge.",
+                      ]
+                      summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                      print(
+                          "::error::Bootstrap PR blocked (fail-closed): base commit lacks trusted verifier files "
+                          f"({', '.join(missing)}). Executing candidate PR verifier code is forbidden; "
+                          "maintainer manual audit and authorized Ruleset bypass merge are required."
+                      )
+                      raise SystemExit(1)
 
-              lines = [
-                  "### Plugin Registry Verification Governance",
-                  f"- Verifier source: `{trusted_source}`",
-                  "- Execution mode: `python3 -I` (isolated sys.path; workspace never on module path)",
-                  f"- Privileged code/workflow files changed: `{len(privileged_hits)}`",
-                  f"- Trust anchor / source metadata changed: `{anchor_changed}`",
-                  "- Note: Enforce GitHub Repository Rulesets / Branch Protection requiring `@DzDenzel` approval on `.github/workflows/plugin-registry.yml`, `deploy/plugin-registry/registry_tool.py`, `deploy/plugin-registry/JarSignerVerifier.java`, `deploy/plugin-registry/registry.json`, `deploy/plugin-registry/web/**`, and `deploy/plugin-registry/tests/**` (`.github/CODEOWNERS` is excluded by `release.py` public archive boundary).",
-              ]
-              if privileged_hits or anchor_changed:
-                  print("::warning::PR modifies privileged verifier/workflow/web files or trust anchors; maintainer approval required via Rulesets before merge.")
-                  lines.append("- **Action Required**: Maintainer explicit approval required before merging.")
-                  for item in privileged_hits:
-                      lines.append(f"  - `{item}`")
-              summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                  trusted_checkout.mkdir(parents=True, exist_ok=True)
+                  archive_zip = runner_temp / "trusted_verifier.zip"
+                  archive_paths = [
+                      "deploy/plugin-registry",
+                      "android/core-plugin/src/test/resources/signing/mixed.pljs",
+                  ]
+                  subprocess.run(
+                      ["git", "-C", str(workspace), "archive", "--format=zip", f"--output={archive_zip}", base_sha, "--", *archive_paths],
+                      check=True,
+                  )
+                  with zipfile.ZipFile(archive_zip, "r") as zf:
+                      for info in zf.infolist():
+                          if info.is_dir():
+                              continue
+                          rel_path = Path(info.filename)
+                          if rel_path.is_absolute() or ".." in rel_path.parts:
+                              raise RuntimeError(f"Unsafe archive entry: {info.filename}")
+                          target = (trusted_checkout / rel_path).resolve()
+                          if os.path.commonpath([str(trusted_checkout), str(target)]) != str(trusted_checkout):
+                              raise RuntimeError(f"Escaping archive entry: {info.filename}")
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          target.write_bytes(zf.read(info.filename))
+                  archive_zip.unlink(missing_ok=True)
+
+                  trusted_dir = trusted_checkout / "deploy" / "plugin-registry"
+                  verifier_root = trusted_dir.resolve()
+                  trusted_tool = verifier_root / "registry_tool.py"
+
+                  # Negotiate trusted base CLI capabilities before invoking isolated CLI flags (fail-closed)
+                  help_top = subprocess.run([sys.executable, "-I", str(trusted_tool), "--help"], capture_output=True, text=True, check=False)
+                  help_val = subprocess.run([sys.executable, "-I", str(trusted_tool), "validate", "--help"], capture_output=True, text=True, check=False)
+                  help_bld = subprocess.run([sys.executable, "-I", str(trusted_tool), "build", "--help"], capture_output=True, text=True, check=False)
+                  has_caps = (
+                      "audit-governance" in (help_top.stdout + help_top.stderr)
+                      and "--trusted-root" in (help_val.stdout + help_val.stderr)
+                      and "--output-root" in (help_bld.stdout + help_bld.stderr)
+                  )
+                  if not has_caps:
+                      lines = [
+                          "### Plugin Registry Verification Blocked (Legacy Base Verifier Upgrade)",
+                          f"- Base commit `{base_sha[:12]}` uses an older `registry_tool.py` CLI that lacks `--trusted-root`, `--output-root`, or `audit-governance`.",
+                          "- **Fail-closed policy**: Never fall back to executing candidate PR verifier code.",
+                          "- **Maintainer action**: `@DzDenzel` must manually audit all modified files and merge this upgrade PR using an authorized Ruleset bypass; subsequent PRs will automatically execute the upgraded base verifier.",
+                      ]
+                      summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                      print(
+                          "::error::Legacy base verifier CLI incompatible with isolated v1.3/v1.4 flags; "
+                          "refusing candidate code execution. Maintainer manual audit and Ruleset bypass merge required."
+                      )
+                      raise SystemExit(1)
+
+                  trusted_source = f"isolated trusted base ({base_sha[:12]}) in runner.temp"
+                  privileged_prefixes = (
+                      ".github/workflows/plugin-registry.yml",
+                      "deploy/plugin-registry/registry_tool.py",
+                      "deploy/plugin-registry/JarSignerVerifier.java",
+                      "deploy/plugin-registry/web/",
+                      "deploy/plugin-registry/tests/",
+                  )
+                  privileged_hits = [p for p in changed if p == privileged_prefixes[0] or p.startswith(privileged_prefixes[1:])]
+
+                  base_reg = trusted_dir / "registry.json"
+                  cand_reg = candidate_dir / "registry.json"
+                  gov_proc = subprocess.run(
+                      [
+                          sys.executable,
+                          "-I",
+                          str(trusted_tool),
+                          "audit-governance",
+                          "--base-registry",
+                          str(base_reg),
+                          "--candidate-registry",
+                          str(cand_reg),
+                          "--trusted-root",
+                          str(trusted_checkout),
+                          "--candidate-root",
+                          str(workspace),
+                      ],
+                      capture_output=True,
+                      text=True,
+                      check=False,
+                  )
+                  if gov_proc.returncode != 0:
+                      print(f"::error::Bounded candidate governance pre-read failed: {(gov_proc.stderr or gov_proc.stdout).strip()}")
+                      raise SystemExit(gov_proc.returncode)
+                  anchor_changed = bool(json.loads(gov_proc.stdout)["anchorChanged"])
+
+                  lines = [
+                      "### Plugin Registry Verification Governance",
+                      f"- Verifier source: `{trusted_source}`",
+                      "- Execution mode: `python3 -I` (isolated sys.path; workspace never on module path)",
+                      f"- Privileged code/workflow files changed: `{len(privileged_hits)}`",
+                      f"- Trust anchor / source metadata changed: `{anchor_changed}`",
+                      "- Note: Enforce GitHub Repository Rulesets / Branch Protection requiring `@DzDenzel` approval on `.github/workflows/plugin-registry.yml`, `deploy/plugin-registry/registry_tool.py`, `deploy/plugin-registry/JarSignerVerifier.java`, `deploy/plugin-registry/registry.json`, `deploy/plugin-registry/web/**`, and `deploy/plugin-registry/tests/**` (`.github/CODEOWNERS` is excluded by `release.py` public archive boundary).",
+                  ]
+                  if privileged_hits or anchor_changed:
+                      print("::warning::PR modifies privileged verifier/workflow/web files or trust anchors; maintainer approval required via Rulesets before merge.")
+                      lines.append("- **Action Required**: Maintainer explicit approval required before merging.")
+                      for item in privileged_hits:
+                          lines.append(f"  - `{item}`")
+                  summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
           else:
               verifier_root = candidate_dir.resolve()
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"run_registry={run_registry}\n")
               out.write(f"root={verifier_root}\n")
               out.write(f"dist={dist_dir}\n")
           PY
 
       - name: Run plugin registry unit and adversarial tests (isolated python3 -I from runner.temp)
+        if: steps.verifier.outputs.run_registry == 'true'
         working-directory: ${{ runner.temp }}
         run: python3 -I -m unittest discover -s "${{ steps.verifier.outputs.root }}/tests" -t "${{ steps.verifier.outputs.root }}/tests" -v
 
       - name: Validate candidate registry manifest and signed artifacts (isolated python3 -I)
+        if: steps.verifier.outputs.run_registry == 'true'
         working-directory: ${{ runner.temp }}
         run: python3 -I "${{ steps.verifier.outputs.root }}/registry_tool.py" validate --registry "${{ github.workspace }}/deploy/plugin-registry/registry.json" --trusted-root "${{ github.workspace }}" --json
 
       - name: Build deterministic static plugin registry site (isolated output in runner.temp)
+        if: steps.verifier.outputs.run_registry == 'true'
         working-directory: ${{ runner.temp }}
         run: python3 -I "${{ steps.verifier.outputs.root }}/registry_tool.py" build --registry "${{ github.workspace }}/deploy/plugin-registry/registry.json" --trusted-root "${{ github.workspace }}" --web-dir "${{ steps.verifier.outputs.root }}/web" --output "${{ steps.verifier.outputs.dist }}" --output-root "${{ runner.temp }}" --clean
 
       - name: Verify generated SHA256SUMS
+        if: steps.verifier.outputs.run_registry == 'true'
         working-directory: ${{ steps.verifier.outputs.dist }}
         run: sha256sum -c SHA256SUMS
 
       - name: Upload preview static site artifact
+        if: steps.verifier.outputs.run_registry == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: plugin-registry-site

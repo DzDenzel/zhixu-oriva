@@ -72,8 +72,8 @@ public final class JarSignerVerifier {
     }
 
     public static void main(String[] args) {
-        if (args.length < 1 || args.length > 2) {
-            System.err.println("Usage: JarSignerVerifier <package-path> [isolated-temp-dir]");
+        if (args.length != 2) {
+            System.err.println("Usage: JarSignerVerifier <package-path> <isolated-temp-dir>");
             System.exit(2);
         }
         try {
@@ -81,14 +81,21 @@ public final class JarSignerVerifier {
             if (Files.isSymbolicLink(target) || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
                 throw new SecurityException("Package path must be a regular non-symlink file");
             }
-            Path isolatedTempDir;
-            if (args.length == 2) {
-                isolatedTempDir = Path.of(args[1]);
-                if (Files.isSymbolicLink(isolatedTempDir) || !Files.isDirectory(isolatedTempDir, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new SecurityException("Isolated temp dir must be a non-symlink directory");
+            Path isolatedTempDir = Path.of(args[1]);
+            if (Files.isSymbolicLink(isolatedTempDir) || !Files.isDirectory(isolatedTempDir, LinkOption.NOFOLLOW_LINKS)) {
+                throw new SecurityException("Isolated temp dir must be a non-symlink directory");
+            }
+            Path absIso = isolatedTempDir.toAbsolutePath().normalize();
+            Path realIso = isolatedTempDir.toRealPath();
+            if (!absIso.equals(realIso)) {
+                // Allow Windows 8.3 short-path canonicalization only if zero symlink/reparse ancestors exist, else reject
+                Path probe = absIso.getRoot();
+                for (Path seg : absIso) {
+                    probe = probe.resolve(seg);
+                    if (Files.exists(probe, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(probe)) {
+                        throw new SecurityException("Isolated temp dir ancestor must not be a symlink");
+                    }
                 }
-            } else {
-                isolatedTempDir = Path.of(System.getProperty("java.io.tmpdir"));
             }
             long fileSize = Files.size(target);
             if (fileSize <= 0 || fileSize > MAX_PACKAGE_BYTES) {

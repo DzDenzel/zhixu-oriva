@@ -485,6 +485,17 @@ class RegistryToolTests(unittest.TestCase):
                     registry_tool.verify_jar_cryptographic_signers(base_signed, "base-valid.pljs", {self.fp_a})
         self.assertEqual(list(custom_tmp.iterdir()), [])
 
+        # 4g. JarSignerVerifier.java MUST require explicit <isolated-temp-dir> (1-arg system tmpdir fallback disabled)
+        java_bin = registry_tool._find_jdk_tool("java")
+        one_arg_proc = subprocess.run(
+            [java_bin, str(registry_tool.VERIFIER_JAVA_PATH), str(base_signed)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(one_arg_proc.returncode, 2)
+        self.assertIn("<isolated-temp-dir>", one_arg_proc.stderr)
+
         reg_path.write_text(
             json.dumps(
                 {
@@ -733,14 +744,16 @@ class RegistryToolTests(unittest.TestCase):
         victim_dir.mkdir()
         (victim_dir / "keep.txt").write_text("must-survive", encoding="utf-8")
         symlinked_out = self.root / "symlink_dist"
+        symlinked_out.mkdir()
+        symlinked_out_st = real_lstat(symlinked_out)
+        symlinked_out_id = (symlinked_out_st.st_dev, symlinked_out_st.st_ino)
 
         def fake_clean_lstat(p, *args, **kwargs):
             st = real_lstat(p, *args, **kwargs)
-            if Path(p) == symlinked_out:
+            if (st.st_dev, st.st_ino) == symlinked_out_id:
                 return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
             return st
 
-        symlinked_out.mkdir()
         with patch.object(registry_tool.os, "lstat", fake_clean_lstat):
             with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
                 registry_tool.build_static_site(reg_path, symlinked_out, clean=True)
@@ -752,17 +765,20 @@ class RegistryToolTests(unittest.TestCase):
         with self.assertRaisesRegex(registry_tool.RegistryValidationError, "overlaps or encloses"):
             registry_tool.build_static_site(reg_path, reg_dir, clean=True)
 
-        # 8. S2 v1.3: protected input subtrees, clean=False output symlink guard, ancestor symlinks, bounded governance audit
+        # 8. S2 v1.4: protected input subtrees, clean=False output symlink guard, ancestor symlinks (8.3-safe by dev/ino), hardlinks, and 8.3 short paths
         with self.assertRaisesRegex(registry_tool.RegistryValidationError, "overlaps protected input subtree"):
             registry_tool.build_static_site(reg_path, reg_dir / "artifacts", clean=True)
 
         nonclean_out = self.root / "nonclean_dist"
         nonclean_out.mkdir()
-        (nonclean_out / "catalog.json").write_text("{}", encoding="utf-8")
+        nonclean_cat = nonclean_out / "catalog.json"
+        nonclean_cat.write_text("{}", encoding="utf-8")
+        nonclean_cat_st = real_lstat(nonclean_cat)
+        nonclean_cat_id = (nonclean_cat_st.st_dev, nonclean_cat_st.st_ino)
 
         def fake_nonclean_lstat(p, *args, **kwargs):
             st = real_lstat(p, *args, **kwargs)
-            if Path(p) == nonclean_out / "catalog.json":
+            if (st.st_dev, st.st_ino) == nonclean_cat_id:
                 return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
             return st
 
@@ -770,15 +786,51 @@ class RegistryToolTests(unittest.TestCase):
             with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
                 registry_tool.build_static_site(reg_path, nonclean_out, clean=False)
 
+        reg_dir_st = real_lstat(reg_dir)
+        reg_dir_id = (reg_dir_st.st_dev, reg_dir_st.st_ino)
+
         def fake_ancestor_lstat(p, *args, **kwargs):
             st = real_lstat(p, *args, **kwargs)
-            if Path(p) == reg_dir:
+            if (st.st_dev, st.st_ino) == reg_dir_id:
                 return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
             return st
 
         with patch.object(registry_tool.os, "lstat", fake_ancestor_lstat):
             with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Symbolic link is forbidden"):
                 registry_tool.validate_registry(reg_path)
+
+        # Hardlink at destination in clean=False must be rejected BEFORE any write, keeping linked input inode untouched!
+        seed_input = self.root / "precious_input.txt"
+        seed_input.write_bytes(b"ORIGINAL_INPUT_BYTES")
+        hardlink_out = self.root / "hardlink_dist"
+        hardlink_out.mkdir()
+        linked_target = hardlink_out / "catalog.json"
+        os.link(seed_input, linked_target)
+        with self.assertRaisesRegex(registry_tool.RegistryValidationError, "Hard-linked output target"):
+            registry_tool.build_static_site(reg_path, hardlink_out, clean=False)
+        self.assertEqual(seed_input.read_bytes(), b"ORIGINAL_INPUT_BYTES")
+
+        # clean=True safely unlinks the directory entry and builds deterministically without modifying linked input inode
+        registry_tool.build_static_site(reg_path, hardlink_out, clean=True)
+        self.assertEqual(seed_input.read_bytes(), b"ORIGINAL_INPUT_BYTES")
+        self.assertIn("demo-community", (hardlink_out / "catalog.json").read_text(encoding="utf-8"))
+
+        # Mixed Windows 8.3 short path (--trusted-root) + long canonical path (registry.json) works seamlessly on non-symlink dirs
+        if os.name == "nt":
+            import ctypes
+            short_buf = ctypes.create_unicode_buffer(512)
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            short_len = k32.GetShortPathNameW(str(self.root), short_buf, len(short_buf))
+            if short_len > 0:
+                short_root = Path(short_buf.value)
+                long_reg = Path(os.path.realpath(reg_path))
+                validated_mixed = registry_tool.validate_registry(long_reg, trusted_root=short_root)
+                self.assertEqual(validated_mixed.source_id, "demo-community")
+                short_dist = short_root / "short_83_dist"
+                registry_tool.build_static_site(
+                    long_reg, short_dist, clean=True, trusted_root=short_root, output_root=short_root
+                )
+                self.assertTrue((short_dist / "SHA256SUMS").is_file())
 
         # Bounded staging budget check inside stream_bounded_package_to_file
         staged_tmp = self.root / "staged_budget.pljs"
@@ -805,13 +857,15 @@ class RegistryToolTests(unittest.TestCase):
         )
         big_cand = self.root / "big_cand_registry.json"
         big_cand.write_bytes(b" " * 32)
+        big_cand_st = real_lstat(big_cand)
+        big_cand_id = (big_cand_st.st_dev, big_cand_st.st_ino)
         with patch.object(registry_tool, "MAX_REGISTRY_JSON_BYTES", 16):
             with self.assertRaisesRegex(registry_tool.RegistryValidationError, "size out of bounds"):
                 registry_tool.audit_governance_diff(gov_reg, big_cand)
 
         def fake_gov_lstat(p, *args, **kwargs):
             st = real_lstat(p, *args, **kwargs)
-            if Path(p) == big_cand:
+            if (st.st_dev, st.st_ino) == big_cand_id:
                 return os.stat_result((stat.S_IFLNK | 0o777, *st[1:]))
             return st
 

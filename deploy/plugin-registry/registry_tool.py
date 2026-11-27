@@ -296,73 +296,87 @@ def _lstat_no_symlink(path: Path, label: str) -> os.stat_result:
     return st
 
 
+def _resolve_non_symlink_path(
+    path: Path,
+    label: str,
+    must_exist: bool = True,
+    stop_at: Path | None = None,
+) -> Path:
+    """Verify every ancestor is a non-symlink/non-reparse point, then resolve 8.3/case equivalence cleanly."""
+    if ".." in path.parts:
+        raise RegistryValidationError(f"Unanchored '..' traversal is forbidden in {label}: {path}")
+
+    real_stop: Path | None = None
+    if stop_at is not None:
+        real_stop = _resolve_non_symlink_path(stop_at, f"trusted root for {label}", must_exist=True, stop_at=None)
+
+    if path.is_absolute():
+        abs_path = Path(os.path.abspath(path))
+        anchor = Path(abs_path.anchor)
+        _lstat_no_symlink(anchor, f"root anchor of {label}")
+        current = anchor
+        deepest_existing = anchor
+        suffix_parts: list[str] = []
+        missing_seen = False
+        for part in abs_path.parts[1:]:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            if not missing_seen and os.path.lexists(current):
+                _lstat_no_symlink(current, f"ancestor '{part}' of {label}")
+                deepest_existing = current
+            else:
+                if must_exist and not os.path.lexists(current):
+                    _lstat_no_symlink(current, label)
+                missing_seen = True
+                suffix_parts.append(part)
+        if os.path.lexists(abs_path):
+            _lstat_no_symlink(abs_path, label)
+        real_prefix = Path(os.path.realpath(deepest_existing))
+        canonical = real_prefix.joinpath(*suffix_parts) if suffix_parts else real_prefix
+    else:
+        cwd_real = _resolve_non_symlink_path(Path.cwd(), f"working directory for {label}", must_exist=True, stop_at=None)
+        current = cwd_real
+        deepest_existing = cwd_real
+        suffix_parts = []
+        missing_seen = False
+        for part in path.parts:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            if not missing_seen and os.path.lexists(current):
+                _lstat_no_symlink(current, f"path segment '{part}' in {label}")
+                deepest_existing = current
+            else:
+                if must_exist and not os.path.lexists(current):
+                    _lstat_no_symlink(current, label)
+                missing_seen = True
+                suffix_parts.append(part)
+        if os.path.lexists(cwd_real / path):
+            _lstat_no_symlink(cwd_real / path, label)
+        real_prefix = Path(os.path.realpath(deepest_existing))
+        canonical = real_prefix.joinpath(*suffix_parts) if suffix_parts else real_prefix
+
+    if real_stop is not None:
+        if not canonical.is_relative_to(real_stop):
+            raise RegistryValidationError(f"{label} escapes trusted root {real_stop}: {canonical}")
+    return canonical
+
+
 def _check_ancestor_chain_no_symlinks(
     path: Path,
     label: str,
     must_exist: bool = True,
     stop_at: Path | None = None,
-) -> None:
-    """Reject '..' traversal and check every ancestor from stop_at/root/cwd down to path."""
-    if ".." in path.parts:
-        raise RegistryValidationError(f"Unanchored '..' traversal is forbidden in {label}: {path}")
-
-    if stop_at is not None:
-        if ".." in stop_at.parts:
-            raise RegistryValidationError(f"Unanchored '..' traversal is forbidden in trusted root for {label}: {stop_at}")
-        abs_stop = Path(os.path.abspath(stop_at))
-        abs_path = Path(os.path.abspath(path))
-        _check_ancestor_chain_no_symlinks(abs_stop, f"trusted root for {label}", must_exist=True, stop_at=None)
-        try:
-            rel = abs_path.relative_to(abs_stop)
-        except ValueError as exc:
-            raise RegistryValidationError(f"{label} escapes trusted root {stop_at}: {path}") from exc
-        current = abs_stop
-        for part in rel.parts:
-            if part in {"", "."}:
-                continue
-            current = current / part
-            if os.path.lexists(current):
-                _lstat_no_symlink(current, f"ancestor '{part}' of {label}")
-    elif path.is_absolute():
-        current = Path(path.anchor)
-        for part in path.parts[1:]:
-            if part in {"", "."}:
-                continue
-            current = current / part
-            if os.path.lexists(current):
-                _lstat_no_symlink(current, f"ancestor '{part}' of {label}")
-    else:
-        cwd = Path.cwd()
-        _check_ancestor_chain_no_symlinks(cwd, f"working directory for {label}", must_exist=True, stop_at=None)
-        current = cwd
-        for part in path.parts:
-            if part in {"", "."}:
-                continue
-            current = current / part
-            if os.path.lexists(current):
-                _lstat_no_symlink(current, f"path segment '{part}' in {label}")
-
-    if must_exist or os.path.lexists(path):
-        _lstat_no_symlink(path, label)
+) -> Path:
+    """Backward-compatible wrapper returning canonical non-symlink path."""
+    return _resolve_non_symlink_path(path, label, must_exist=must_exist, stop_at=stop_at)
 
 
 def ensure_no_symlinks_to(target: Path, anchor: Path) -> None:
     """Verify anchor and every path segment from anchor to target are non-symlinks."""
-    _lstat_no_symlink(anchor, "trusted root")
-    try:
-        rel = target.relative_to(anchor)
-    except ValueError as exc:
-        raise RegistryValidationError(f"Path escapes trusted root: {target.name}") from exc
-    if ".." in rel.parts:
-        raise RegistryValidationError(f"Path traversal escapes trusted root: {target.name}")
-    current = anchor
-    for part in rel.parts:
-        current = current / part
-        _lstat_no_symlink(current, f"path segment '{part}'")
-    real_anchor = os.path.realpath(anchor)
-    real_target = os.path.realpath(target)
-    if os.path.commonpath([real_anchor, real_target]) != real_anchor:
-        raise RegistryValidationError(f"Real path escapes trusted root: {target.name}")
+    real_anchor = _resolve_non_symlink_path(anchor, "trusted root", must_exist=True)
+    _resolve_non_symlink_path(target, target.name, must_exist=True, stop_at=real_anchor)
 
 
 def _win_final_path_for_fd(fd: int) -> Path | None:
@@ -389,26 +403,38 @@ def _win_final_path_for_fd(fd: int) -> Path | None:
 
 
 def _open_anchored_dir_fd(target_dir: Path, label: str, stop_at: Path | None = None) -> int:
-    """Open a directory descriptor walking segment-by-segment with O_NOFOLLOW on POSIX."""
-    _check_ancestor_chain_no_symlinks(target_dir, label, must_exist=True, stop_at=stop_at)
+    """Open a directory descriptor walking segment-by-segment with O_NOFOLLOW and identity checks."""
+    canonical_dir = _resolve_non_symlink_path(target_dir, label, must_exist=True, stop_at=stop_at)
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     if stop_at is not None:
-        start = stop_at
-        rel_parts = target_dir.relative_to(stop_at).parts
-    elif target_dir.is_absolute():
-        start = Path(target_dir.anchor)
-        rel_parts = target_dir.parts[1:]
+        canonical_stop = _resolve_non_symlink_path(stop_at, f"trusted root for {label}", must_exist=True)
+        start = canonical_stop
+        rel_parts = canonical_dir.relative_to(canonical_stop).parts
+    elif canonical_dir.is_absolute():
+        start = Path(canonical_dir.anchor)
+        rel_parts = canonical_dir.parts[1:]
     else:
         start = Path.cwd()
-        rel_parts = target_dir.parts
+        rel_parts = canonical_dir.parts
 
     cur_fd = -1
     try:
+        start_st = _lstat_no_symlink(start, f"anchor start of {label}")
         cur_fd = os.open(start, dir_flags)
+        cur_fst = os.fstat(cur_fd)
+        if not stat.S_ISDIR(cur_fst.st_mode) or (cur_fst.st_dev, cur_fst.st_ino) != (start_st.st_dev, start_st.st_ino):
+            raise RegistryValidationError(f"Directory anchor identity mismatch for {label}")
         for seg in rel_parts:
             if seg in {"", "."}:
                 continue
+            seg_lst = os.lstat(seg, dir_fd=cur_fd)
+            if stat.S_ISLNK(seg_lst.st_mode) or not stat.S_ISDIR(seg_lst.st_mode):
+                raise RegistryValidationError(f"Symbolic link or non-directory ancestor '{seg}' in {label}")
             next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
+            next_fst = os.fstat(next_fd)
+            if (next_fst.st_dev, next_fst.st_ino) != (seg_lst.st_dev, seg_lst.st_ino):
+                os.close(next_fd)
+                raise RegistryValidationError(f"Directory identity changed during traversal for '{seg}' in {label}")
             os.close(cur_fd)
             cur_fd = next_fd
         return cur_fd
@@ -428,44 +454,59 @@ def _open_anchored_regular_file(
     if not rel_parts or any(part in {"", ".", ".."} or "/" in part or "\\" in part for part in rel_parts):
         raise RegistryValidationError(f"Unanchored relative path for {label}")
 
-    _check_ancestor_chain_no_symlinks(anchor_dir, f"anchor for {label}", must_exist=True, stop_at=trusted_root)
-    target = anchor_dir.joinpath(*rel_parts)
-    ensure_no_symlinks_to(target, anchor_dir)
-    st = _lstat_no_symlink(target, label)
+    canonical_anchor = _resolve_non_symlink_path(anchor_dir, f"anchor for {label}", must_exist=True, stop_at=trusted_root)
+    canonical_target = _resolve_non_symlink_path(canonical_anchor.joinpath(*rel_parts), label, must_exist=True, stop_at=canonical_anchor)
+    st = _lstat_no_symlink(canonical_target, label)
     if not stat.S_ISREG(st.st_mode):
-        raise RegistryValidationError(f"{label} is not a regular file: {target.name}")
+        raise RegistryValidationError(f"{label} is not a regular file: {canonical_target.name}")
 
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
     if os.open in os.supports_dir_fd:
         cur_fd = -1
+        file_fd = -1
         try:
-            cur_fd = _open_anchored_dir_fd(anchor_dir, f"anchor for {label}", stop_at=trusted_root)
+            cur_fd = _open_anchored_dir_fd(canonical_anchor, f"anchor for {label}", stop_at=trusted_root)
             for seg in rel_parts[:-1]:
+                seg_lst = os.lstat(seg, dir_fd=cur_fd)
+                if stat.S_ISLNK(seg_lst.st_mode) or not stat.S_ISDIR(seg_lst.st_mode):
+                    raise RegistryValidationError(f"Symbolic link ancestor '{seg}' for {label}")
                 next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
+                next_fst = os.fstat(next_fd)
+                if (next_fst.st_dev, next_fst.st_ino) != (seg_lst.st_dev, seg_lst.st_ino):
+                    os.close(next_fd)
+                    raise RegistryValidationError(f"Subdirectory identity changed for '{seg}' in {label}")
                 os.close(cur_fd)
                 cur_fd = next_fd
+            leaf_st = os.lstat(rel_parts[-1], dir_fd=cur_fd)
+            if stat.S_ISLNK(leaf_st.st_mode) or not stat.S_ISREG(leaf_st.st_mode):
+                raise RegistryValidationError(f"Symbolic link or non-regular file for {label}")
             file_fd = os.open(rel_parts[-1], file_flags, dir_fd=cur_fd)
-            return file_fd
+            fst = os.fstat(file_fd)
+            if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (leaf_st.st_dev, leaf_st.st_ino) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+                raise RegistryValidationError(f"File identity changed during anchored open for {label}")
+            opened_fd = file_fd
+            file_fd = -1
+            return opened_fd
         except OSError as exc:
             raise RegistryValidationError(f"Cannot open {label}: {exc}") from exc
         finally:
+            if file_fd != -1:
+                os.close(file_fd)
             if cur_fd != -1:
                 os.close(cur_fd)
 
     file_fd = -1
     try:
-        file_fd = os.open(target, file_flags)
+        file_fd = os.open(canonical_target, file_flags)
         fst = os.fstat(file_fd)
         if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
-            raise RegistryValidationError(f"File identity changed during open for {label}: {target.name}")
-        _check_ancestor_chain_no_symlinks(target, label, must_exist=True, stop_at=trusted_root)
-        real_anchor = Path(os.path.realpath(anchor_dir))
-        real_target = Path(os.path.realpath(target))
+            raise RegistryValidationError(f"File identity changed during open for {label}: {canonical_target.name}")
+        _resolve_non_symlink_path(canonical_target, label, must_exist=True, stop_at=trusted_root)
         final_path = _win_final_path_for_fd(file_fd)
         if final_path is not None:
-            if not final_path.is_relative_to(real_anchor) or final_path != real_target:
+            if not final_path.is_relative_to(canonical_anchor) or final_path != canonical_target:
                 raise RegistryValidationError(f"Opened handle escapes anchored directory for {label}")
         opened_fd = file_fd
         file_fd = -1
@@ -585,22 +626,29 @@ def read_bounded_package(
 def read_bounded_registry_json(
     registry_path: Path,
     trusted_root: Path | None = None,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], Path, Path | None]:
     """Validate ancestor chain, open anchored regular file, enforce <= 2 MiB, and decode JSON object."""
-    _check_ancestor_chain_no_symlinks(registry_path, "registry.json", must_exist=True, stop_at=trusted_root)
-    base_dir = registry_path.parent
+    real_trusted = (
+        _resolve_non_symlink_path(trusted_root, "trusted root", must_exist=True)
+        if trusted_root is not None
+        else None
+    )
+    resolved_registry = _resolve_non_symlink_path(
+        registry_path, "registry.json", must_exist=True, stop_at=real_trusted
+    )
+    base_dir = resolved_registry.parent
     _lstat_no_symlink(base_dir, "registry directory")
     reg_fd = _open_anchored_regular_file(
-        base_dir, (registry_path.name,), "registry.json", trusted_root=trusted_root
+        base_dir, (resolved_registry.name,), "registry.json", trusted_root=real_trusted
     )
     raw_reg_bytes = _read_bounded_fd(reg_fd, MAX_REGISTRY_JSON_BYTES, "registry.json")
     try:
         raw_doc = json.loads(raw_reg_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RegistryValidationError(f"Invalid UTF-8 JSON in {registry_path.name}: {exc}") from exc
+        raise RegistryValidationError(f"Invalid UTF-8 JSON in {resolved_registry.name}: {exc}") from exc
     if not isinstance(raw_doc, dict):
         raise RegistryValidationError("Registry root must be a JSON object")
-    return raw_doc
+    return raw_doc, resolved_registry, real_trusted
 
 
 def _find_jdk_tool(name: str) -> str:
@@ -1081,8 +1129,7 @@ def validate_registry(
     trusted_root: Path | None = None,
 ) -> ValidatedRegistry:
     """Validate registry.json, paths, bounded streaming packages, cryptographic signers, and metadata."""
-    raw_doc = read_bounded_registry_json(registry_path, trusted_root=trusted_root)
-    resolved_registry = registry_path.resolve()
+    raw_doc, resolved_registry, real_trusted = read_bounded_registry_json(registry_path, trusted_root=trusted_root)
     base_dir = resolved_registry.parent
     artifacts_dir = base_dir / "artifacts"
 
@@ -1172,7 +1219,7 @@ def validate_registry(
                 artifacts_dir,
                 staged_pkg,
                 max_allowed_bytes=remaining_repo_budget,
-                trusted_root=trusted_root,
+                trusted_root=real_trusted,
             )
 
             declared_sha = entry.get("sha256")
@@ -1266,9 +1313,9 @@ def audit_governance_diff(
     anchor_changed = False
 
     if cand_present:
-        cand_doc = read_bounded_registry_json(candidate_registry, trusted_root=candidate_root)
+        cand_doc, _, _ = read_bounded_registry_json(candidate_registry, trusted_root=candidate_root)
         if base_present:
-            base_doc = read_bounded_registry_json(base_registry, trusted_root=trusted_root)
+            base_doc, _, _ = read_bounded_registry_json(base_registry, trusted_root=trusted_root)
             for key in gov_keys:
                 if base_doc.get(key) != cand_doc.get(key):
                     anchor_changed = True
@@ -1308,21 +1355,26 @@ def _validate_output_dir_anchor(
     output_root: Path | None = None,
 ) -> tuple[Path, Path, tuple[int, int]]:
     """Ensure output_dir is strictly anchored inside its non-symlink parent and never overlaps inputs."""
-    _check_ancestor_chain_no_symlinks(output_dir, "output directory", must_exist=False, stop_at=output_root)
-    if not output_dir.name or output_dir.name in {".", ".."}:
+    real_out_root = (
+        _resolve_non_symlink_path(output_root, "output root", must_exist=True)
+        if output_root is not None
+        else None
+    )
+    canonical_out = _resolve_non_symlink_path(output_dir, "output directory", must_exist=False, stop_at=real_out_root)
+    if not canonical_out.name or canonical_out.name in {".", ".."}:
         raise RegistryValidationError(f"Unsafe output directory name: {output_dir}")
     parent = output_dir.parent
     if not str(parent) or parent == output_dir:
         raise RegistryValidationError(f"Output directory must specify a non-root parent directory: {output_dir}")
 
-    _check_ancestor_chain_no_symlinks(parent, "output parent directory", must_exist=False, stop_at=output_root)
+    _resolve_non_symlink_path(parent, "output parent directory", must_exist=False, stop_at=real_out_root)
     parent.mkdir(parents=True, exist_ok=True)
     parent_st = _lstat_no_symlink(parent, "output parent directory")
     if not stat.S_ISDIR(parent_st.st_mode):
         raise RegistryValidationError(f"Output parent is not a directory: {parent}")
 
-    real_parent = Path(os.path.realpath(parent))
-    target_out = real_parent / output_dir.name
+    real_parent = _resolve_non_symlink_path(parent, "output parent directory", must_exist=True, stop_at=real_out_root)
+    target_out = real_parent / canonical_out.name
 
     if target_out == real_parent or target_out.parent != real_parent:
         raise RegistryValidationError(f"Output directory escapes specified parent: {output_dir}")
@@ -1330,13 +1382,13 @@ def _validate_output_dir_anchor(
         raise RegistryValidationError(f"Output directory escapes specified parent: {output_dir}")
 
     for protected in protected_exact_or_ancestors:
-        real_prot = Path(os.path.realpath(protected))
+        real_prot = _resolve_non_symlink_path(protected, f"protected directory {protected.name}", must_exist=False)
         if target_out == real_prot or real_prot.is_relative_to(target_out):
             raise RegistryValidationError(
                 f"Output directory {target_out} overlaps or encloses protected directory {real_prot}"
             )
     for subtree in protected_subtrees:
-        real_sub = Path(os.path.realpath(subtree))
+        real_sub = _resolve_non_symlink_path(subtree, f"protected subtree {subtree.name}", must_exist=False)
         if target_out == real_sub or real_sub.is_relative_to(target_out) or target_out.is_relative_to(real_sub):
             raise RegistryValidationError(
                 f"Output directory {target_out} overlaps protected input subtree {real_sub}"
@@ -1352,16 +1404,24 @@ def _validate_output_dir_anchor(
     return real_parent, target_out, (parent_st.st_dev, parent_st.st_ino)
 
 
-def _safe_rmtree_dir_fd(parent_fd: int, name: str) -> None:
+def _safe_rmtree_dir_fd(parent_fd: int, name: str, expected_dir_id: tuple[int, int] | None = None) -> None:
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    lst = os.lstat(name, dir_fd=parent_fd)
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISDIR(lst.st_mode):
+        raise RegistryValidationError(f"Output path is not a safe directory for --clean: {name}")
+    if expected_dir_id is not None and (lst.st_dev, lst.st_ino) != expected_dir_id:
+        raise RegistryValidationError("Output directory identity changed before --clean")
     child_fd = os.open(name, dir_flags, dir_fd=parent_fd)
     try:
+        fst = os.fstat(child_fd)
+        if (fst.st_dev, fst.st_ino) != (lst.st_dev, lst.st_ino):
+            raise RegistryValidationError(f"Directory identity changed during --clean open: {name}")
         for entry in os.listdir(child_fd):
             st = os.lstat(entry, dir_fd=child_fd)
             if stat.S_ISLNK(st.st_mode):
                 raise RegistryValidationError(f"Symbolic link inside output tree forbidden during --clean: {entry}")
             if stat.S_ISDIR(st.st_mode):
-                _safe_rmtree_dir_fd(child_fd, entry)
+                _safe_rmtree_dir_fd(child_fd, entry, (st.st_dev, st.st_ino))
             else:
                 os.unlink(entry, dir_fd=child_fd)
     finally:
@@ -1369,10 +1429,32 @@ def _safe_rmtree_dir_fd(parent_fd: int, name: str) -> None:
     os.rmdir(name, dir_fd=parent_fd)
 
 
+def _safe_rmtree_windows_anchored(dir_path: Path, expected_dir_id: tuple[int, int]) -> None:
+    st = _lstat_no_symlink(dir_path, f"output directory {dir_path.name}")
+    if not stat.S_ISDIR(st.st_mode) or (st.st_dev, st.st_ino) != expected_dir_id:
+        raise RegistryValidationError(f"Output directory identity changed during --clean: {dir_path.name}")
+    with os.scandir(dir_path) as it:
+        entries = list(it)
+    for entry in entries:
+        child_path = dir_path / entry.name
+        child_st = _lstat_no_symlink(child_path, f"output entry {entry.name}")
+        if stat.S_ISDIR(child_st.st_mode):
+            _safe_rmtree_windows_anchored(child_path, (child_st.st_dev, child_st.st_ino))
+        else:
+            os.unlink(child_path)
+    st_after = _lstat_no_symlink(dir_path, f"output directory {dir_path.name}")
+    if (st_after.st_dev, st_after.st_ino) != expected_dir_id:
+        raise RegistryValidationError(f"Output directory identity changed before rmdir: {dir_path.name}")
+    os.rmdir(dir_path)
+
+
 def _safe_rmtree_anchored(target_out: Path, real_parent: Path, expected_parent_id: tuple[int, int]) -> None:
     cur_parent_st = _lstat_no_symlink(real_parent, "output parent directory")
     if (cur_parent_st.st_dev, cur_parent_st.st_ino) != expected_parent_id:
         raise RegistryValidationError("Output parent directory identity changed before --clean")
+    out_st = _lstat_no_symlink(target_out, "output directory")
+    if not stat.S_ISDIR(out_st.st_mode):
+        raise RegistryValidationError(f"Output path is not a directory for --clean: {target_out}")
 
     if os.open in os.supports_dir_fd:
         parent_fd = _open_anchored_dir_fd(real_parent, "output parent directory")
@@ -1380,28 +1462,75 @@ def _safe_rmtree_anchored(target_out: Path, real_parent: Path, expected_parent_i
             fst = os.fstat(parent_fd)
             if (fst.st_dev, fst.st_ino) != expected_parent_id:
                 raise RegistryValidationError("Output parent descriptor mismatch before --clean")
-            st = os.lstat(target_out.name, dir_fd=parent_fd)
-            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-                raise RegistryValidationError(f"Output path is not a safe directory for --clean: {target_out}")
-            _safe_rmtree_dir_fd(parent_fd, target_out.name)
+            _safe_rmtree_dir_fd(parent_fd, target_out.name, (out_st.st_dev, out_st.st_ino))
             return
         finally:
             os.close(parent_fd)
 
-    _lstat_no_symlink(target_out, "output directory")
-    for root_dir, dirs, files in os.walk(target_out, topdown=False, followlinks=False):
-        root_path = Path(root_dir)
-        _lstat_no_symlink(root_path, "output subdirectory")
-        for fname in files:
-            fpath = root_path / fname
-            _lstat_no_symlink(fpath, f"output file {fname}")
-            os.unlink(fpath)
-        for dname in dirs:
-            dpath = root_path / dname
-            _lstat_no_symlink(dpath, f"output directory {dname}")
-            os.rmdir(dpath)
-    _lstat_no_symlink(target_out, "output directory")
-    os.rmdir(target_out)
+    _safe_rmtree_windows_anchored(target_out, (out_st.st_dev, out_st.st_ino))
+
+
+def _write_anchored_output_file_fd(
+    out_fd: int,
+    rel: Path,
+    src_file: Path,
+    expected_out_id: tuple[int, int],
+) -> None:
+    """Write src_file using fresh temp file inside verified out_fd and atomic os.replace (never O_TRUNC)."""
+    out_fst = os.fstat(out_fd)
+    if (out_fst.st_dev, out_fst.st_ino) != expected_out_id:
+        raise RegistryValidationError("Output directory descriptor mismatch during publish")
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    excl_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    cur_fd = os.dup(out_fd)
+    tmp_name = f".{rel.parts[-1]}.{os.getpid()}.stage.tmp"
+    created_tmp = False
+    try:
+        for seg in rel.parts[:-1]:
+            try:
+                seg_lst = os.lstat(seg, dir_fd=cur_fd)
+                if stat.S_ISLNK(seg_lst.st_mode) or not stat.S_ISDIR(seg_lst.st_mode):
+                    raise RegistryValidationError(f"Output subdirectory path is unsafe: {seg}")
+            except FileNotFoundError:
+                os.mkdir(seg, 0o755, dir_fd=cur_fd)
+                seg_lst = os.lstat(seg, dir_fd=cur_fd)
+            next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
+            next_fst = os.fstat(next_fd)
+            if (next_fst.st_dev, next_fst.st_ino) != (seg_lst.st_dev, seg_lst.st_ino):
+                os.close(next_fd)
+                raise RegistryValidationError(f"Output subdirectory identity changed: {seg}")
+            os.close(cur_fd)
+            cur_fd = next_fd
+
+        leaf = rel.parts[-1]
+        try:
+            leaf_st = os.lstat(leaf, dir_fd=cur_fd)
+            if stat.S_ISLNK(leaf_st.st_mode):
+                raise RegistryValidationError(f"Symbolic link is forbidden at output target: {leaf}")
+            if not stat.S_ISREG(leaf_st.st_mode):
+                raise RegistryValidationError(f"Existing output target is not a regular file: {leaf}")
+            if leaf_st.st_nlink > 1:
+                raise RegistryValidationError(f"Hard-linked output target is forbidden (st_nlink={leaf_st.st_nlink}): {leaf}")
+        except FileNotFoundError:
+            pass
+
+        tmp_fd = os.open(tmp_name, excl_flags, 0o644, dir_fd=cur_fd)
+        created_tmp = True
+        with src_file.open("rb") as fin, os.fdopen(tmp_fd, "wb") as fout:
+            while True:
+                chunk = fin.read(READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                fout.write(chunk)
+        os.replace(tmp_name, leaf, src_dir_fd=cur_fd, dst_dir_fd=cur_fd)
+        created_tmp = False
+    finally:
+        if created_tmp:
+            try:
+                os.unlink(tmp_name, dir_fd=cur_fd)
+            except OSError:
+                pass
+        os.close(cur_fd)
 
 
 def _write_anchored_output_file(
@@ -1410,36 +1539,17 @@ def _write_anchored_output_file(
     src_file: Path,
     expected_out_id: tuple[int, int],
 ) -> None:
-    """Write src_file into target_out / rel without ever following any existing symlink in target_out."""
+    """Write src_file into target_out / rel via new temp file + atomic replace (never O_TRUNC, rejects symlinks & hardlinks)."""
     cur_out_st = _lstat_no_symlink(target_out, "output directory")
     if (cur_out_st.st_dev, cur_out_st.st_ino) != expected_out_id:
         raise RegistryValidationError("Output directory identity changed during publish")
 
     if os.open in os.supports_dir_fd:
-        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        write_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        cur_fd = _open_anchored_dir_fd(target_out, "output directory")
+        out_fd = _open_anchored_dir_fd(target_out, "output directory")
         try:
-            fst = os.fstat(cur_fd)
-            if (fst.st_dev, fst.st_ino) != expected_out_id:
-                raise RegistryValidationError("Output directory descriptor mismatch during publish")
-            for seg in rel.parts[:-1]:
-                try:
-                    os.mkdir(seg, 0o755, dir_fd=cur_fd)
-                except FileExistsError:
-                    pass
-                next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
-                os.close(cur_fd)
-                cur_fd = next_fd
-            out_fd = os.open(rel.parts[-1], write_flags, 0o644, dir_fd=cur_fd)
+            _write_anchored_output_file_fd(out_fd, rel, src_file, expected_out_id)
         finally:
-            os.close(cur_fd)
-        with src_file.open("rb") as fin, os.fdopen(out_fd, "wb") as fout:
-            while True:
-                chunk = fin.read(READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                fout.write(chunk)
+            os.close(out_fd)
         return
 
     current = target_out
@@ -1457,23 +1567,41 @@ def _write_anchored_output_file(
         st = _lstat_no_symlink(dst_path, f"existing output file {dst_path.name}")
         if not stat.S_ISREG(st.st_mode):
             raise RegistryValidationError(f"Existing output target is not a regular file: {dst_path}")
-    write_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    out_fd = os.open(dst_path, write_flags, 0o644)
+        if st.st_nlink > 1:
+            raise RegistryValidationError(f"Hard-linked output target is forbidden (st_nlink={st.st_nlink}): {dst_path.name}")
+
+    excl_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    tmp_path = dst_path.with_name(f".{dst_path.name}.{os.getpid()}.stage.tmp")
+    tmp_fd = -1
+    created_tmp = False
     try:
-        final_path = _win_final_path_for_fd(out_fd)
+        tmp_fd = os.open(tmp_path, excl_flags, 0o644)
+        created_tmp = True
+        final_path = _win_final_path_for_fd(tmp_fd)
         real_out = Path(os.path.realpath(target_out))
         if final_path is not None and not final_path.is_relative_to(real_out):
-            raise RegistryValidationError(f"Output file handle escaped output directory: {dst_path.name}")
-        with src_file.open("rb") as fin, os.fdopen(out_fd, "wb") as fout:
-            out_fd = -1
+            raise RegistryValidationError(f"Output temp file handle escaped output directory: {dst_path.name}")
+        with src_file.open("rb") as fin, os.fdopen(tmp_fd, "wb") as fout:
+            tmp_fd = -1
             while True:
                 chunk = fin.read(READ_CHUNK_BYTES)
                 if not chunk:
                     break
                 fout.write(chunk)
+        cur_out_after = _lstat_no_symlink(target_out, "output directory")
+        if (cur_out_after.st_dev, cur_out_after.st_ino) != expected_out_id:
+            raise RegistryValidationError("Output directory identity changed before atomic replace")
+        if os.path.lexists(dst_path):
+            st_after = _lstat_no_symlink(dst_path, f"existing output file {dst_path.name}")
+            if not stat.S_ISREG(st_after.st_mode) or st_after.st_nlink > 1:
+                raise RegistryValidationError(f"Unsafe output target before atomic replace: {dst_path.name}")
+        os.replace(tmp_path, dst_path)
+        created_tmp = False
     finally:
-        if out_fd != -1:
-            os.close(out_fd)
+        if tmp_fd != -1:
+            os.close(tmp_fd)
+        if created_tmp and os.path.lexists(tmp_path):
+            tmp_path.unlink(missing_ok=True)
 
 
 def build_static_site(
@@ -1485,15 +1613,18 @@ def build_static_site(
     output_root: Path | None = None,
 ) -> ValidatedRegistry:
     """Validate registry fail-closed via streaming staging, then emit deterministic static site."""
-    _check_ancestor_chain_no_symlinks(registry_path, "registry.json", must_exist=True, stop_at=trusted_root)
-    resolved_registry_dir = registry_path.resolve().parent
+    real_trusted = (
+        _resolve_non_symlink_path(trusted_root, "trusted root", must_exist=True)
+        if trusted_root is not None
+        else None
+    )
+    resolved_registry = _resolve_non_symlink_path(registry_path, "registry.json", must_exist=True, stop_at=real_trusted)
+    resolved_registry_dir = resolved_registry.parent
     resolved_artifacts_dir = resolved_registry_dir / "artifacts"
     resolved_tests_dir = resolved_registry_dir / "tests"
 
     raw_web = web_dir or (Path(__file__).resolve().parent / "web")
-    _check_ancestor_chain_no_symlinks(raw_web, "web directory", must_exist=True)
-    resolved_web = raw_web.resolve()
-    _lstat_no_symlink(resolved_web, "web directory")
+    resolved_web = _resolve_non_symlink_path(raw_web, "web directory", must_exist=True)
     required_web_files = ("index.html", "style.css", "app.js")
     for asset_name in required_web_files:
         asset_path = resolved_web / asset_name
@@ -1513,7 +1644,7 @@ def build_static_site(
         stage_artifacts.mkdir(parents=True, exist_ok=True)
 
         validated = validate_registry(
-            registry_path, stage_artifacts_dir=stage_artifacts, trusted_root=trusted_root
+            resolved_registry, stage_artifacts_dir=stage_artifacts, trusted_root=real_trusted
         )
 
         for asset_name in required_web_files:
@@ -1543,35 +1674,68 @@ def build_static_site(
         if real_parent_after != real_parent or target_out_after != target_out or parent_id_after != parent_id:
             raise RegistryValidationError("Output directory anchor changed during build")
 
-        if clean and os.path.lexists(target_out):
-            _safe_rmtree_anchored(target_out, real_parent, parent_id)
-
-        if os.path.lexists(target_out):
-            out_st = _lstat_no_symlink(target_out, "output directory")
-            if not stat.S_ISDIR(out_st.st_mode):
-                raise RegistryValidationError(f"Output path exists and is not a directory: {target_out}")
+        staged_files = [src_file for src_file in sorted(stage_dir.rglob("*")) if not src_file.is_dir()]
+        if os.open in os.supports_dir_fd:
+            dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            parent_fd = _open_anchored_dir_fd(real_parent, "output parent directory")
+            out_fd = -1
+            try:
+                pfst = os.fstat(parent_fd)
+                if (pfst.st_dev, pfst.st_ino) != parent_id:
+                    raise RegistryValidationError("Output parent descriptor changed before publish")
+                if clean and os.path.lexists(target_out):
+                    cur_out_st = os.lstat(target_out.name, dir_fd=parent_fd)
+                    _safe_rmtree_dir_fd(parent_fd, target_out.name, (cur_out_st.st_dev, cur_out_st.st_ino))
+                try:
+                    cur_out_st = os.lstat(target_out.name, dir_fd=parent_fd)
+                    if stat.S_ISLNK(cur_out_st.st_mode) or not stat.S_ISDIR(cur_out_st.st_mode):
+                        raise RegistryValidationError(f"Output path exists and is not a directory: {target_out}")
+                except FileNotFoundError:
+                    os.mkdir(target_out.name, 0o755, dir_fd=parent_fd)
+                    cur_out_st = os.lstat(target_out.name, dir_fd=parent_fd)
+                out_fd = os.open(target_out.name, dir_flags, dir_fd=parent_fd)
+                out_fst = os.fstat(out_fd)
+                if (out_fst.st_dev, out_fst.st_ino) != (cur_out_st.st_dev, cur_out_st.st_ino):
+                    raise RegistryValidationError("Output directory identity mismatch on open")
+                out_id = (out_fst.st_dev, out_fst.st_ino)
+                for src_file in staged_files:
+                    _write_anchored_output_file_fd(out_fd, src_file.relative_to(stage_dir), src_file, out_id)
+            finally:
+                if out_fd != -1:
+                    os.close(out_fd)
+                os.close(parent_fd)
         else:
-            os.mkdir(target_out)
-            out_st = _lstat_no_symlink(target_out, "output directory")
+            if clean and os.path.lexists(target_out):
+                _safe_rmtree_anchored(target_out, real_parent, parent_id)
 
-        out_id = (out_st.st_dev, out_st.st_ino)
-        for src_file in sorted(stage_dir.rglob("*")):
-            if src_file.is_dir():
-                continue
-            rel = src_file.relative_to(stage_dir)
-            _write_anchored_output_file(target_out, rel, src_file, out_id)
+            if os.path.lexists(target_out):
+                out_st = _lstat_no_symlink(target_out, "output directory")
+                if not stat.S_ISDIR(out_st.st_mode):
+                    raise RegistryValidationError(f"Output path exists and is not a directory: {target_out}")
+            else:
+                os.mkdir(target_out)
+                out_st = _lstat_no_symlink(target_out, "output directory")
+
+            out_id = (out_st.st_dev, out_st.st_ino)
+            for src_file in staged_files:
+                rel = src_file.relative_to(stage_dir)
+                _write_anchored_output_file(target_out, rel, src_file, out_id)
 
     return validated
 
 
 def inspect_package_certificates(pkg_path: Path, trusted_root: Path | None = None) -> dict[str, object]:
     """Diagnostic-only inspection of package SHA-256 and CodeSigner certificates (grants NO trust)."""
-    _check_ancestor_chain_no_symlinks(pkg_path, f"package {pkg_path.name}", must_exist=True, stop_at=trusted_root)
-    resolved = pkg_path.resolve()
+    real_trusted = (
+        _resolve_non_symlink_path(trusted_root, "trusted root", must_exist=True)
+        if trusted_root is not None
+        else None
+    )
+    resolved = _resolve_non_symlink_path(pkg_path, f"package {pkg_path.name}", must_exist=True, stop_at=real_trusted)
     with tempfile.TemporaryDirectory(prefix="oriva-inspect-stage-") as tmp_dir:
         staged = Path(tmp_dir) / resolved.name
         _, pkg_sha256 = stream_bounded_package_to_file(
-            resolved, resolved.parent, staged, trusted_root=trusted_root
+            resolved, resolved.parent, staged, trusted_root=real_trusted
         )
         manifest_bytes, _, _ = inspect_zip_file(staged, resolved.name)
         report = verify_jar_cryptographic_signers(staged, resolved.name, trusted_fingerprints=None)

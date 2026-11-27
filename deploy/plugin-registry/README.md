@@ -30,7 +30,9 @@ deploy/plugin-registry/
    - `id` 与 `version` 须符合客户端落盘路径段白名单（`[A-Za-z0-9._-]+`，且不为 `.` 或 `..`）。
    - 包内 `plugin.json` 的 `sourceId` 必须与目标源 `registry.json` 的 `sourceId` 一致，且 `sourceType` 必须为 `"THIRD_PARTY"`（禁止冒用保留 ID `official` / `third-party`）。
    - 严禁在 `META-INF/` 下放置除 `MANIFEST.MF` 与配对 `*.SF` / `*.(RSA|DSA|EC)` 之外的普通文件，且 `META-INF/` 须严格大写；所有签名元数据文件（`MANIFEST.MF`、`*.SF`、`*.RSA/DSA/EC`）均不得为空（0 字节），也不允许包含不被任何负载归因的多余或损坏签名配对。
-   - **算法与证书有效期策略**：PR CI 的 Temurin JDK 21 与终端侧各自所在 Android 运行时分别执行其自身 `jdk.jar.disabledAlgorithms` 策略（不能等同于所有旧版 Android 行为完全一致）；社区签名建议使用 `RSA >= 2048` 或 `ECDSA P-256` 搭配 `SHA-256`。在离线证书钉扎模型下，自签名开发证书不因到期时间自动拒收（维护者可通过 `inspect-cert` / `keytool -printcert` 巡检时间）。
+   - **算法与证书有效期策略**：PR CI 的 Temurin JDK 21 与终端侧所在 Android 设备各自执行所在运行时的 JAR 签名验证策略（桌面 Temurin JDK 21 遵循其 `jdk.jar.disabledAlgorithms` 约束，不宣称所有旧版 Android 系统拥有完全一致的弱算法策略）；社区签名建议使用 `RSA >= 2048` 或 `ECDSA P-256` 搭配 `SHA-256`。在离线证书钉扎模型下，自签名开发证书不因到期时间自动拒收（维护者可通过 `inspect-cert` / `keytool -printcert` 巡检时间）。
+   - **双端结构边界与严格前置收录门禁**：`FormSection` 与 `StatusLine` 共享核心结构契约，但 `registry_tool.py` 作为公共目录前置收录门禁实施了比 Android 宽松 JSON 解码器更严格的策略（例如对 `switch`/`text` 字段若出现多余 `"options"`，一律强校列表长度 `<= 64` 及 `{value, label}` 结构；对 `StatusLine` 即使省略 `requiresCapability`，若提供非空 `"unavailableText"` 仍校验控制字符与 UTF-16 长度 `<= 4096`）。
+   - **安全临时目录与写入模型**：`JarSignerVerifier.java` 禁用系统临时目录回退并强制要求传入独占非符号链接临时目录参数（仅受支持通过 `registry_tool.py` 或显式隔离目录调用）；静态站输出采用新建临时文件 + 原子替换写入并禁止覆盖既有硬链接，在 Windows 无原语目录描述符（`dir_fd`）平台上依赖受保护输入/输出父目录不被并发替换。
 2. **使用作者签名证书签名（本地私钥绝不入库）**：
    ```sh
    # 生成签名证书（若已有签名密钥库可跳过）
@@ -80,9 +82,10 @@ python3 -m http.server 8080 --directory deploy/plugin-registry/dist
 ## 四、CI 自动校验与仓库保护门禁（S3）
 
 `.github/workflows/plugin-registry.yml` 固定全部 Action 到完整 40 位官方提交 SHA、禁用 `persist-credentials` 并保持最小权限（`permissions: contents: read`）：
-- **完全隔离的可信基线与 `python3 -I`**：对 `pull_request` 事件，工作流从受保护的 `github.event.pull_request.base.sha` 提取可信基线到候选工作区之外的 **`${{ runner.temp }}/trusted_verifier`**，并在 **`${{ runner.temp }}`** 下以 **`python3 -I`**（隔离模式，禁止候选仓库根目录进入 `sys.path`）运行单元测试、校验候选 `deploy/plugin-registry/registry.json` 并输出构建产物至 **`${{ runner.temp }}/plugin-registry-dist`**，绝不在候选工作区内创建 `_trusted_verifier/` 或 `dist/`，也不存在执行候选 PR 校验代码的 bootstrap 自跑退路（首次引入目录须由维护者人工审计后通过 `workflow_dispatch` / 受保护分支合入）。
+- **无 `pull_request.paths` 过滤防 Required Check 卡死**：工作流不在 `pull_request` 顶层使用 `paths:` 过滤（以免未改插件目录的常规 PR 在开启 Required Status Check 时永久卡 `Pending`）；若 PR 未改动 `deploy/plugin-registry/**` 或 `.github/workflows/plugin-registry.yml`，工作流会秒级干净跳过校验/构建并上报 `success`。
+- **完全隔离的可信基线与 `python3 -I`**：对 `pull_request` 事件，工作流从受保护的 `github.event.pull_request.base.sha` 提取可信基线到候选工作区之外的 **`${{ runner.temp }}/trusted_verifier`**，先检测基线 CLI 是否支持 `audit-governance` / `--trusted-root` / `--output-root`，并在 **`${{ runner.temp }}`** 下以 **`python3 -I`**（隔离模式，禁止候选仓库根目录进入 `sys.path`）运行单元测试、校验候选 `deploy/plugin-registry/registry.json` 并输出构建产物至 **`${{ runner.temp }}/plugin-registry-dist`**，绝不在候选工作区内创建 `_trusted_verifier/` 或 `dist/`，也不存在执行候选 PR 校验代码的 bootstrap 自跑退路。
 - **高敏感变更告警与人工审批门禁**：若 PR 修改了 `.github/workflows/plugin-registry.yml`、`registry_tool.py`、`JarSignerVerifier.java`、`web/`、`tests/` 或变更了 `trustedFingerprints`/`sourceId`/`sourceType`/`catalogFormatVersion`，工作流会在 Summary 与 Annotations 中显式发出维护者人工审批告警。
-- **首次 Bootstrap 合入与维护者豁免规则**：当首次将 `deploy/plugin-registry/` 引入 `main` 时，由于 `base.sha` 尚不存在可信校验基线，工作流会 fail-closed 报错阻断（禁止执行候选 PR 校验代码）；该首次合入须由仓库维护者（`@DzDenzel`）人工全量审计全部受保护路径后，通过维护者控制的 `workflow_dispatch` 或受保护分支合入审批放行。一旦基线文件进入 `main`，后续所有 `pull_request` 即自动恢复正常的基线隔离校验门禁。
+- **首次 Bootstrap 与旧版基线升级的 Fail-Closed 合入规则**：当首次将 `deploy/plugin-registry/` 引入 `main`、或 `base.sha` 仍为不支持 `audit-governance` / `--trusted-root` / `--output-root` 的旧版 CLI 时，工作流会明确 fail-closed 报错阻断（严禁回退执行候选 PR 代码）。**注意 GitHub 平台机制**：手动触发 `workflow_dispatch` **不能**替代或满足 `pull_request` Required Status Check；上述首次引入或跨协议版本升级 PR 须由仓库维护者（`@DzDenzel`）人工全量审计 diff 后，通过维护者授权的 Ruleset 豁免（bypass）或受保护合入放行。一旦新基线进入 `main`，后续所有 `pull_request` 自动恢复正常的绿色基线隔离校验门禁。
 - **仓库维护者必配分支保护（含 `CODEOWNERS` 边界说明）**：由于发版源码审计脚本 `android/tools/release/release.py:audit_archive` 将 `.github/` 目录严格限定在 `.github/workflows/**` 白名单内，本公仓未直接放入 `.github/CODEOWNERS`（以免触发 `Outside public boundary` 发版拦截）。启用独立开源插件站托管或部署公仓时，须在 GitHub Repository Settings → Rulesets / Branch Protection 为 `main` 开启：
   1. Require status check `validate-and-build` to pass；
   2. Require pull request reviews before merging + Require review from Code Owners（在托管仓或扩展白名单后配置 `.github/CODEOWNERS`，将以下受保护治理路径全部指向 `@DzDenzel`：`.github/workflows/plugin-registry.yml`、`deploy/plugin-registry/registry_tool.py`、`deploy/plugin-registry/JarSignerVerifier.java`、`deploy/plugin-registry/registry.json`、`deploy/plugin-registry/web/**`、`deploy/plugin-registry/tests/**`），确保新增信任锚与校验器/测试/前端修改必须由维护者显式批准。
