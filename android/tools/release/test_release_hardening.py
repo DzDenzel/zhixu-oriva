@@ -451,24 +451,44 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
             "GIT_ASKPASS": "/evil/askpass",
             "SSH_ASKPASS": "/evil/ssh_askpass",
         }
-        cleaned = r.sanitize_git_env(dirty, empty_gitconfig_path="/tmp/empty.cfg")
+        cleaned = r.sanitize_git_env(dirty, empty_gitconfig_path="/tmp/empty.cfg", empty_home_path="/tmp/empty-home")
         self.assertEqual(cleaned["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(cleaned["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(cleaned["GIT_CONFIG_GLOBAL"], "/tmp/empty.cfg")
+        self.assertEqual(cleaned["HOME"], "/tmp/empty-home")
         for forbidden in ("GIT_TRACE", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE", "GIT_SSL_NO_VERIFY", "GIT_TRACE2_PERF", "GCM_INTERACTIVE", "GIT_CREDENTIAL_HELPER", "GIT_CONFIG_PARAMETERS", "GIT_ASKPASS", "SSH_ASKPASS"):
             self.assertNotIn(forbidden, cleaned)
 
+        # Minimal env inheritance must drop unrelated secrets while keep_ssh_env isolates SSH runtime vars.
+        rich_env = {
+            **os.environ,
+            "CUSTOM_APP_TOKEN": "hidden-custom-tok",
+            "DB_PASS": "s3c",
+            "PRIVATE_KEY": "pw!9",
+            "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+        }
+        anon_cleaned = r.sanitize_git_env(rich_env, empty_gitconfig_path="/tmp/empty.cfg", empty_home_path="/tmp/empty-home", keep_ssh_env=False)
+        for dropped in ("CUSTOM_APP_TOKEN", "DB_PASS", "PRIVATE_KEY", "SSH_AUTH_SOCK"):
+            self.assertNotIn(dropped, anon_cleaned)
+        ssh_cleaned = r.sanitize_git_env(rich_env, empty_gitconfig_path="/tmp/empty.cfg", keep_ssh_env=True)
+        self.assertEqual(ssh_cleaned.get("SSH_AUTH_SOCK"), "/tmp/ssh-agent.sock")
+        for dropped in ("CUSTOM_APP_TOKEN", "DB_PASS", "PRIVATE_KEY"):
+            self.assertNotIn(dropped, ssh_cleaned)
+
         secret = "synthetic/secret+tok=999"
+        short_secret = "pw9"
         b64_auth = base64.b64encode(("x-access-token:" + secret).encode("utf8")).decode("ascii")
         pct_upper = r.urllib.parse.quote(secret, safe="")
-        pct_lower = r.re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), pct_upper) if hasattr(r, "re") else pct_upper.replace("%2F", "%2f").replace("%2B", "%2b").replace("%3D", "%3d")
+        pct_lower = pct_upper.replace("%2F", "%2f").replace("%2B", "%2b").replace("%3D", "%3d")
+        pct_mixed = pct_upper.replace("%2F", "%2f")  # mixed %2f + %2B + %3D
         log = self.root / "leak.log"
         env = os.environ.copy()
         env["CUSTOM_CHILD_SECRET"] = secret
+        env["DB_PASS"] = short_secret
         with self.assertRaises(r.ReleaseError):
             r.execute(
                 [sys.executable, "-c", (
-                    f"import sys; sys.stderr.write('raw={secret} pct1={pct_upper} pct2={pct_lower} "
+                    f"import sys; sys.stderr.write('raw={secret} short={short_secret} pct1={pct_upper} pct2={pct_lower} pct3={pct_mixed} "
                     f"Authorization: Bearer {secret} Authorization: Basic {b64_auth} "
                     f"HTTPS://tok@github.com/o/r?X-Amz-Signature=sigsecret#fragsecret "
                     f"https://github.com/o/r#onlyfrag\\n'); sys.exit(2)"
@@ -476,9 +496,10 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
                 self.root, env, log,
             )
         log_text = log.read_text(encoding="utf8")
-        for leaked in (secret, b64_auth, pct_upper, pct_lower, "sigsecret", "fragsecret", "onlyfrag", "tok@"):
+        for leaked in (secret, short_secret, b64_auth, pct_upper, pct_lower, pct_mixed, "sigsecret", "fragsecret", "onlyfrag", "tok@"):
             self.assertNotIn(leaked, log_text)
         self.assertIn("[REDACTED]", log_text)
+        self.assertIn("/tmp/ssh-agent.sock", r.redact_secrets("/tmp/ssh-agent.sock", extra_secrets=r._extract_secrets_from_env(rich_env)))
 
         # archive_source must route via controlled git runner & redact stderr/error messages
         with patch.object(r, "_run_bounded_subprocess", return_value=(False, 1, b"", f"fatal token={secret}".encode("utf8"), [])):
@@ -744,6 +765,29 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
                     t_bad, expected_size=len(payload), expected_sha256=expected_sha, opener=opener_bad, sleep_fn=lambda _: None,
                 )
             self.assertFalse(t_bad.exists())
+            self.assertFalse(t_bad.with_name("bad_cr.apk.part").exists())
+            self.assertFalse(t_bad.with_name("bad_cr.apk.part.meta.json").exists())
+
+        # 2c. Non-retryable HTTP error (e.g. 404) must fail immediately and clean pre-existing .part/.part.meta.json
+        t_404 = self.root / "missing.apk"
+        url_404 = "https://github.com/o/r/releases/download/v2.2.0/missing.apk"
+        t_404.with_name("missing.apk.part").write_bytes(payload[:split_at])
+        r.write_json(
+            t_404.with_name("missing.apk.part.meta.json"),
+            {"url": r.sanitize_url_for_log(url_404), "expectedSize": len(payload), "expectedSha256": expected_sha},
+        )
+        hits_404 = {"n": 0}
+        def _open_404(req, timeout=None):
+            hits_404["n"] += 1
+            raise urllib.error.HTTPError(url_404, 404, "Not Found", {}, io.BytesIO(b""))
+        with self.assertRaisesRegex(r.ReleaseError, "HTTP 404"):
+            r.download_asset(
+                url_404, t_404, expected_size=len(payload), expected_sha256=expected_sha,
+                opener=SimpleNamespace(open=_open_404), sleep_fn=lambda _: None,
+            )
+        self.assertEqual(hits_404["n"], 1)
+        self.assertFalse(t_404.with_name("missing.apk.part").exists())
+        self.assertFalse(t_404.with_name("missing.apk.part.meta.json").exists())
 
         # 2b. Unprovenanced or mismatched-source .part must be discarded and restarted cleanly from offset 0
         t_orphan = self.root / "orphan.apk"
@@ -861,18 +905,21 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
                 self.assertLess(elapsed, 2.2)
                 self.assertFalse(t_deadline.exists())
 
-                # Continuous trickle stream (0.15s/byte * 40 bytes = 6s) MUST be cut off at ~0.8s total_timeout!
-                t1 = time.monotonic()
-                with self.assertRaisesRegex(r.ReleaseError, "total timeout|timed out|read|closed|socket"):
-                    r.download_asset(
-                        f"http://127.0.0.1:{port}/trickle",
-                        t_trickle, expected_size=40,
-                        expected_sha256=hashlib.sha256(b"x" * 40).hexdigest().upper(),
-                        download_timeout=5, total_timeout=0.8, sleep_fn=lambda _: None,
-                    )
-                trickle_elapsed = time.monotonic() - t1
-                self.assertLess(trickle_elapsed, 2.2)
-                self.assertFalse(t_trickle.exists())
+                # Continuous trickle stream (0.15s/byte * 40 bytes = 6s) MUST be cut off repeatedly at data read stage!
+                for trial in range(3):
+                    t_trickle_run = self.root / f"trickle_{trial}.apk"
+                    t1 = time.monotonic()
+                    with self.assertRaisesRegex(r.ReleaseError, "data read"):
+                        r.download_asset(
+                            f"http://127.0.0.1:{port}/trickle",
+                            t_trickle_run, expected_size=40,
+                            expected_sha256=hashlib.sha256(b"x" * 40).hexdigest().upper(),
+                            download_timeout=5, total_timeout=0.6, sleep_fn=lambda _: None,
+                        )
+                    self.assertLess(time.monotonic() - t1, 2.0)
+                    self.assertFalse(t_trickle_run.exists())
+                    self.assertFalse(t_trickle_run.with_name(f"trickle_{trial}.apk.part").exists())
+                    self.assertFalse(t_trickle_run.with_name(f"trickle_{trial}.apk.part.meta.json").exists())
 
                 # >10 redirects must fail cleanly with Too many redirects (HTTP 302)
                 with self.assertRaisesRegex(r.ReleaseError, "HTTP 302"):
@@ -977,6 +1024,9 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
             ("http.https://github.com.sslVerify", "false", "TLS verification downgrade"),
             ("http.https://github.com.followRedirects", "true", "HTTP redirect rule"),
             ("http.https://github.com.extraHeader", "Authorization: Bearer leak", "undeclared HTTP header"),
+            ("http.cookieFile", "/tmp/evil.cookies", "cookie file"),
+            ("http.saveCookies", "true", "cookie saving"),
+            ("core.sshCommand", "ssh -o ProxyCommand=evil", "SSH command|core.sshCommand"),
         ):
             subprocess.run(["git", "config", bad_cfg_k, bad_cfg_v], cwd=self.root, check=True)
             with (
@@ -994,10 +1044,187 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
         ):
             r.verify(self.root, plan, args, {})
 
-        self.assertTrue(any(anon and "core.askPass=" in gargs and "http.sslVerify=true" in gargs and "credential.helper=" in gargs for gargs, _, anon in seen_git_args))
+        self.assertTrue(any(
+            anon and "core.askPass=" in gargs and "http.sslVerify=true" in gargs and "credential.helper=" in gargs
+            and "http.cookieFile=" in gargs and "http.saveCookies=false" in gargs
+            for gargs, _, anon in seen_git_args
+        ))
         report = json.loads(stale_report.read_text(encoding="utf8"))
         self.assertEqual(report["verifyMode"], "api-digest")
         self.assertFalse(report["downloadVerified"])
+
+    def test_r4_real_anonymous_git_ignores_netrc_and_clone_check_recreates_fresh_dir(self) -> None:
+        import http.server, threading
+
+        received_headers = []
+        class GitProbeHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                received_headers.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(404)
+                self.end_headers()
+            def log_message(self, *args): pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), GitProbeHandler)
+        port = srv.server_address[1]
+        t_srv = threading.Thread(target=srv.serve_forever, daemon=True)
+        t_srv.start()
+        try:
+            fake_home = self.root / "fake_home"
+            fake_home.mkdir()
+            (fake_home / ".netrc").write_text(f"machine 127.0.0.1 login netrcuser password netrcpass\n", encoding="utf8")
+            (fake_home / "_netrc").write_text(f"machine 127.0.0.1 login netrcuser password netrcpass\n", encoding="utf8")
+            cookie_file = fake_home / "cookies.txt"
+            cookie_file.write_text("127.0.0.1\tFALSE\t/\tFALSE\t2147483647\tsid\tsecret_cookie\n", encoding="utf8")
+            (fake_home / ".gitconfig").write_text(f"[http]\n\tcookieFile = {cookie_file.as_posix()}\n", encoding="utf8")
+
+            host_env = {**os.environ, "HOME": str(fake_home), "USERPROFILE": str(fake_home)}
+            with r.isolated_git_env(host_env, anonymous=True) as clean_env:
+                with self.assertRaises(r.ReleaseError):
+                    r._call_git(
+                        self.root,
+                        "-c", "credential.helper=", "-c", "core.askPass=",
+                        "-c", "http.cookieFile=", "-c", "http.saveCookies=false",
+                        "-c", "http.followRedirects=false", "-c", "http.sslVerify=true",
+                        "ls-remote", f"http://127.0.0.1:{port}/owner/repo.git", "refs/tags/v2.2.0",
+                        timeout=10, env=clean_env, anonymous=True,
+                    )
+            self.assertGreaterEqual(len(received_headers), 1)
+            for hdrs in received_headers:
+                self.assertNotIn("authorization", hdrs)
+                self.assertNotIn("cookie", hdrs)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            t_srv.join(timeout=1)
+
+        # verify --clone-check must remove pre-existing stale recipient-clone and run fresh anonymous clone
+        plan = r.make_plan(self.root)
+        directory = Path(plan["assets"])
+        directory.mkdir(parents=True)
+        evidence = Path(plan["evidence"])
+        evidence.mkdir(parents=True)
+        stale_clone = evidence / "recipient-clone"
+        stale_clone.mkdir()
+        (stale_clone / "TAMPERED.txt").write_text("stale", encoding="utf8")
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.root, check=True)
+        (self.root / "README.md").write_text("hello", encoding="utf8")
+        subprocess.run(["git", "add", "README.md", "android/app/build.gradle.kts"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip()
+
+        apk = f"zhixu-oriva-{plan['version']}.apk"
+        src_zip = f"zhixu-oriva-{plan['version']}-source.zip"
+        cer = "oriva-release.cer"
+        manifest = "release-manifest.json"
+        (directory / apk).write_bytes(b"apk")
+        (directory / cer).write_bytes(b"cer")
+        r.write_json(directory / manifest, dict(versionName=plan["version"], commit=commit, certificateSHA256="A" * 64))
+        r.archive_source(self.root, commit, plan["version"], directory / src_zip)
+        names = [apk, src_zip, cer, manifest]
+        (directory / "SHA256SUMS").write_text("".join(r.sha256(directory / a) + "  " + a + "\n" for a in names), encoding="utf8")
+
+        all_names = names + ["SHA256SUMS"]
+        payloads = {n: (directory / n).read_bytes() for n in all_names}
+        release_payload = {
+            "draft": False,
+            "tag_name": plan["tag"],
+            "html_url": "https://github.com/owner/repo/releases/tag/" + plan["tag"],
+            "assets": [
+                {
+                    "name": n,
+                    "size": len(payloads[n]),
+                    "digest": "sha256:" + hashlib.sha256(payloads[n]).hexdigest(),
+                    "browser_download_url": f"https://github.com/owner/repo/releases/download/{plan['tag']}/{n}",
+                }
+                for n in all_names
+            ],
+        }
+        class MetaResp:
+            def __init__(self, data: bytes): self._b = io.BytesIO(data)
+            def __enter__(self): return self._b
+            def __exit__(self, *a): pass
+
+        clone_cmds = []
+        def _fake_clone_exec(cmd, cwd, env, log_path=None, timeout=None):
+            clone_cmds.append(cmd)
+            dest = Path(cmd[-1])
+            subprocess.run(["git", "clone", "--quiet", "--config", "core.autocrlf=false", str(self.root), str(dest)], check=True)
+            return ""
+
+        def _fake_download(url, target, expected_size=None, expected_sha256=None, download_timeout=None, total_timeout=None):
+            name = url.rsplit("/", 1)[-1]
+            target.write_bytes(payloads[name])
+
+        args = SimpleNamespace(
+            repo="owner/repo", clone_check=True, verify_mode="full",
+            download_timeout=60, download_total_timeout=300, git_timeout=120,
+        )
+        with (
+            patch.object(r.urllib.request, "build_opener", return_value=SimpleNamespace(open=lambda req, timeout=None: MetaResp(json.dumps(release_payload).encode("utf8")))),
+            patch.object(r, "_call_git", side_effect=lambda *gargs, **kw: (f"{commit}\trefs/tags/{plan['tag']}" if "ls-remote" in gargs else subprocess.check_output(["git", *gargs[1:]], cwd=gargs[0], text=True).strip())),
+            patch.object(r, "_call_execute", side_effect=_fake_clone_exec),
+            patch.object(r, "download_asset", side_effect=_fake_download),
+        ):
+            r.verify(self.root, plan, args, {})
+
+        self.assertFalse((stale_clone / "TAMPERED.txt").exists())
+        self.assertEqual(len(clone_cmds), 1)
+        self.assertIn("http.cookieFile=", clone_cmds[0])
+        self.assertIn("http.saveCookies=false", clone_cmds[0])
+
+    def test_r5_slow_tls_handshake_aborted_at_total_timeout_without_part_leak(self) -> None:
+        import socket, threading
+
+        stop_evt = threading.Event()
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        srv.settimeout(0.2)
+        port = srv.getsockname()[1]
+
+        conns = []
+        def _accept_loop():
+            while not stop_evt.is_set():
+                try:
+                    c, _ = srv.accept()
+                    conns.append(c)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+        t = threading.Thread(target=_accept_loop, daemon=True)
+        t.start()
+        target = self.root / "slow_tls.apk"
+        try:
+            with patch.object(r, "require_https_url", return_value=None):
+                t0 = time.monotonic()
+                with self.assertRaisesRegex(r.ReleaseError, "TLS handshake"):
+                    r.download_asset(
+                        f"https://127.0.0.1:{port}/slow-tls.apk",
+                        target,
+                        expected_size=10,
+                        expected_sha256="A" * 64,
+                        download_timeout=10,
+                        total_timeout=0.7,
+                        sleep_fn=lambda _: None,
+                    )
+                self.assertLess(time.monotonic() - t0, 1.8)
+            self.assertFalse(target.exists())
+            self.assertFalse(target.with_name("slow_tls.apk.part").exists())
+            self.assertFalse(target.with_name("slow_tls.apk.part.meta.json").exists())
+        finally:
+            stop_evt.set()
+            srv.close()
+            for c in conns:
+                try:
+                    c.close()
+                except OSError:
+                    pass
+            t.join(timeout=1)
 
 
 if __name__ == "__main__":

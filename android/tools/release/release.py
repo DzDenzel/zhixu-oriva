@@ -32,7 +32,16 @@ CONTENT_RANGE_RE = re.compile(r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$', re.IGNORECASE)
 _REGISTERED_SECRETS: set[str] = set()
 _CONTROLLED_ASKPASS_TOKENS: dict[str, str] = {}
 _EXPLICIT_SECRET_KEYS = frozenset({'github_token', 'GITHUB_TOKEN', 'ORIVA_GIT_TOKEN', 'ORIVA_RELEASE_STOREPASS'})
-_SECRET_KEY_MARKERS = ('TOKEN', 'SECRET', 'PASSWORD', 'STOREPASS', 'KEYPASS', 'CREDENTIAL', 'API_KEY')
+_SECRET_KEY_EXACT_TOKENS = frozenset({'TOKEN', 'SECRET', 'PASSWORD', 'PASS', 'PASSWD', 'STOREPASS', 'KEYPASS', 'KEY', 'CREDENTIAL', 'CREDENTIALS', 'AUTH', 'PRIVATE_KEY', 'API_KEY'})
+_NON_SECRET_NAME_TOKENS = frozenset({'SOCK', 'SOCKET', 'DIR', 'PATH', 'HOME', 'FILE', 'PROMPT', 'HOST', 'PORT', 'REPO', 'USER'})
+_ESSENTIAL_GIT_RUNTIME_VARS = frozenset({
+    'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR',
+    'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TZ', 'MSYSTEM', 'CHERE_INVOKING',
+    'PROGRAMFILES', 'PROGRAMFILES(X86)', 'COMMONPROGRAMFILES', 'PROGRAMDATA',
+    'OS', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'APPDATA', 'LOCALAPPDATA',
+    'SYSTEMDRIVE',
+})
+_SSH_RUNTIME_VARS = frozenset({'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'GIT_SSH', 'GIT_SSH_COMMAND'})
 _WIN_CREATE_NEW_PROCESS_GROUP = 0x00000200
 _WIN_CREATE_SUSPENDED = 0x00000004
 
@@ -48,48 +57,68 @@ def sha256(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def register_secret(secret):
-    if secret and len(str(secret)) >= 4:
-        _REGISTERED_SECRETS.add(str(secret))
+    if secret is None:
+        return
+    sval = str(secret)
+    if len(sval) >= 3 and sval.lower() not in {'0', '1', 'true', 'false'}:
+        _REGISTERED_SECRETS.add(sval)
 
 
-def _extract_secrets_from_env(env_map):
+def _is_secret_env_key(key):
+    if key in _EXPLICIT_SECRET_KEYS:
+        return True
+    upper = str(key).upper()
+    parts = set(re.split(r'[^A-Z0-9]+', upper)) - {''}
+    if parts & _NON_SECRET_NAME_TOKENS:
+        return False
+    if 'PRIVATE_KEY' in upper or 'API_KEY' in upper:
+        return True
+    if parts & _SECRET_KEY_EXACT_TOKENS:
+        return True
+    return any(tok in upper for tok in ('TOKEN', 'SECRET', 'PASSWORD', 'STOREPASS', 'KEYPASS', 'CREDENTIAL'))
+
+
+def _extract_secrets_from_env(env_map, min_len=3):
     found = []
     if not env_map:
         return ()
     for key, val in env_map.items():
         if not val:
             continue
-        upper = str(key).upper()
         sval = str(val)
-        if key in _EXPLICIT_SECRET_KEYS and len(sval) >= 4:
-            found.append(sval)
-            register_secret(sval)
-        elif any(marker in upper for marker in _SECRET_KEY_MARKERS) and len(sval) >= 6:
+        if _is_secret_env_key(key) and len(sval) >= min_len and sval.lower() not in {'0', '1', 'true', 'false'}:
             found.append(sval)
             register_secret(sval)
     return tuple(found)
 
 
-def _percent_variants(val):
-    out = set()
-    for encoded in (urllib.parse.quote(val, safe=''), urllib.parse.quote_plus(val)):
-        if encoded and encoded != val:
-            out.add(encoded)
-            lowered_hex = re.sub(r'%[0-9A-F]{2}', lambda m: m.group(0).lower(), encoded)
-            out.add(lowered_hex)
-    return out
+def _mixed_percent_regex(secret):
+    if not secret or len(secret) < 3:
+        return None
+    enc = urllib.parse.quote(secret, safe='')
+    if enc == secret and '+' not in secret and ' ' not in secret:
+        return None
+    parts = []
+    for ch in secret:
+        if ch == ' ':
+            parts.append(r'(?: |\+|(?i:%20))')
+        elif ch.isalnum() or ch in '-._~':
+            parts.append(re.escape(ch))
+        else:
+            hex_b = ''.join(f'%{byte:02x}' for byte in ch.encode('utf-8'))
+            parts.append(rf'(?:{re.escape(ch)}|(?i:{re.escape(hex_b)}))')
+    return re.compile(''.join(parts))
 
 
 def _collect_active_secrets(extra_secrets=()):
     values = set(_REGISTERED_SECRETS)
     for item in extra_secrets:
         if item: values.add(str(item))
-    for item in _extract_secrets_from_env(os.environ):
+    for item in _extract_secrets_from_env(os.environ, min_len=4):
         values.add(item)
     expanded = set(values)
     for val in values:
         expanded.add(base64.b64encode(('x-access-token:' + val).encode('utf8')).decode('ascii'))
-        expanded.update(_percent_variants(val))
     return tuple(sorted((v for v in expanded if v), key=len, reverse=True))
 
 
@@ -97,8 +126,12 @@ def redact_secrets(text, extra_secrets=()):
     if not text:
         return text
     cleaned = str(text)
-    for secret in _collect_active_secrets(extra_secrets):
+    active = _collect_active_secrets(extra_secrets)
+    for secret in active:
         cleaned = cleaned.replace(secret, '[REDACTED]')
+        pat = _mixed_percent_regex(secret)
+        if pat is not None:
+            cleaned = pat.sub('[REDACTED]', cleaned)
     cleaned = re.sub(r'(?i)(Authorization\s*:\s*)(?:Bearer|Basic|token)\s+\S+', r'\1[REDACTED]', cleaned)
     cleaned = re.sub(r'(?i)((?:https?|ssh|jdbc:mysql)://)[^\s/@]+@', r'\1[REDACTED]@', cleaned)
     cleaned = re.sub(r'(?i)(https?://[^\s\'"<>?#]+)\?[^\s\'"<>#]*(?:#[^\s\'"<>]*)?', r'\1?[REDACTED]', cleaned)
@@ -106,8 +139,27 @@ def redact_secrets(text, extra_secrets=()):
     return cleaned
 
 
-def sanitize_git_env(base_env, empty_gitconfig_path=None, allow_controlled_askpass=False):
+def _apply_isolated_home_env(clean, home_dir):
+    home_str = str(home_dir)
+    clean['HOME'] = home_str
+    clean['USERPROFILE'] = home_str
+    clean['XDG_CONFIG_HOME'] = home_str
+    clean['XDG_CACHE_HOME'] = home_str
+    if os.name == 'nt':
+        drive, tail = os.path.splitdrive(home_str)
+        if drive:
+            clean['HOMEDRIVE'] = drive
+            clean['HOMEPATH'] = tail or '\\'
+    else:
+        clean.pop('HOMEDRIVE', None)
+        clean.pop('HOMEPATH', None)
+
+
+def sanitize_git_env(base_env, empty_gitconfig_path=None, empty_home_path=None, allow_controlled_askpass=False, keep_ssh_env=False):
     clean = {}
+    allowed_keys = set(_ESSENTIAL_GIT_RUNTIME_VARS)
+    if keep_ssh_env and not allow_controlled_askpass:
+        allowed_keys |= _SSH_RUNTIME_VARS
     for key, val in base_env.items():
         upper = key.upper()
         if (
@@ -116,22 +168,27 @@ def sanitize_git_env(base_env, empty_gitconfig_path=None, allow_controlled_askpa
                 'GIT_CURL_VERBOSE', 'GIT_REDACT_COOKIES', 'GIT_ASKPASS', 'SSH_ASKPASS',
                 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG',
                 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
-                'GIT_SSL_NO_VERIFY',
+                'GIT_SSL_NO_VERIFY', 'NETRC', 'CURL_CA_BUNDLE',
             }
             or upper.startswith('GCM_')
             or upper.startswith('GIT_CREDENTIAL_')
         ):
             continue
-        clean[key] = val
+        if upper in allowed_keys or key in allowed_keys:
+            clean[key] = val
     clean['GIT_TERMINAL_PROMPT'] = '0'
     clean['GIT_CONFIG_NOSYSTEM'] = '1'
     if empty_gitconfig_path is not None:
         clean['GIT_CONFIG_GLOBAL'] = str(empty_gitconfig_path)
+    if empty_home_path is not None:
+        _apply_isolated_home_env(clean, empty_home_path)
     if allow_controlled_askpass:
         candidate_askpass = base_env.get('GIT_ASKPASS')
         expected_cfg = _CONTROLLED_ASKPASS_TOKENS.get(candidate_askpass)
         if candidate_askpass and expected_cfg is not None and str(clean.get('GIT_CONFIG_GLOBAL', '')) == expected_cfg:
             clean['GIT_ASKPASS'] = candidate_askpass
+            if 'ORIVA_GIT_HOME' in base_env and empty_home_path is None:
+                _apply_isolated_home_env(clean, base_env['ORIVA_GIT_HOME'])
             for k in ('ORIVA_GIT_TOKEN', 'ORIVA_GIT_EXPECTED_HOST', 'ORIVA_GIT_EXPECTED_USER', 'ORIVA_GIT_EXPECTED_REPO', 'ORIVA_GIT_EXPECTED_PORT'):
                 if k in base_env:
                     clean[k] = base_env[k]
@@ -157,7 +214,7 @@ def _remove_temp_dir_with_diag(path_obj, label, extra_secrets=(), raise_on_failu
 
 
 @contextmanager
-def isolated_git_env(base_env=None, anonymous=False):
+def isolated_git_env(base_env=None, anonymous=False, keep_ssh_env=False):
     cfg_dir = Path(tempfile.mkdtemp(prefix='oriva-git-cfg-'))
     in_body_exception = False
     raw_env = base_env if base_env is not None else os.environ
@@ -167,8 +224,16 @@ def isolated_git_env(base_env=None, anonymous=False):
             cfg_dir.chmod(0o700)
         empty_cfg = cfg_dir / 'empty.gitconfig'
         empty_cfg.write_bytes(b'')
+        empty_home = cfg_dir / 'home'
+        empty_home.mkdir(parents=True, exist_ok=True)
         try:
-            yield sanitize_git_env(raw_env, empty_gitconfig_path=empty_cfg, allow_controlled_askpass=not anonymous)
+            yield sanitize_git_env(
+                raw_env,
+                empty_gitconfig_path=empty_cfg,
+                empty_home_path=None if (keep_ssh_env and not anonymous) else empty_home,
+                allow_controlled_askpass=not anonymous,
+                keep_ssh_env=(keep_ssh_env and not anonymous),
+            )
         except BaseException:
             in_body_exception = True
             raise
@@ -1047,8 +1112,11 @@ def git_askpass_env(base_env, token, expected_host='github.com', expected_user='
         else:
             helper_str = str(py_script)
         _CONTROLLED_ASKPASS_TOKENS[helper_str] = str(empty_cfg)
-        git_env = sanitize_git_env(base_env, empty_gitconfig_path=empty_cfg, allow_controlled_askpass=False)
+        empty_home = askpass_dir / 'home'
+        empty_home.mkdir(parents=True, exist_ok=True)
+        git_env = sanitize_git_env(base_env, empty_gitconfig_path=empty_cfg, empty_home_path=empty_home, allow_controlled_askpass=False)
         git_env['GIT_ASKPASS'] = helper_str
+        git_env['ORIVA_GIT_HOME'] = str(empty_home)
         git_env['ORIVA_GIT_TOKEN'] = token
         git_env['ORIVA_GIT_EXPECTED_HOST'] = expected_host
         git_env['ORIVA_GIT_EXPECTED_USER'] = expected_user
@@ -1095,6 +1163,13 @@ def _audit_repo_git_config(root, git_env, timeout=DEFAULT_GIT_TIMEOUT_SECONDS):
                 raise ReleaseError(f'Git HTTP redirect rule ({key}={val}) is forbidden')
         if low_key == 'http.extraheader' or (low_key.startswith('http.') and low_key.endswith('.extraheader')):
             raise ReleaseError(f'Git undeclared HTTP header ({key}) is forbidden')
+        if low_key == 'http.cookiefile' or (low_key.startswith('http.') and low_key.endswith('.cookiefile')):
+            raise ReleaseError(f'Git HTTP cookie file ({key}) is forbidden')
+        if low_key == 'http.savecookies' or (low_key.startswith('http.') and low_key.endswith('.savecookies')):
+            if val.strip().lower() not in {'false', '0', 'no', 'off'}:
+                raise ReleaseError(f'Git HTTP cookie saving ({key}={val}) is forbidden')
+        if low_key == 'core.sshcommand':
+            raise ReleaseError(f'Git repository-level core.sshCommand ({val}) is forbidden')
         if low_key.startswith('credential.') and low_key != 'credential.usehttppath' and low_key.endswith('.helper'):
             raise ReleaseError(f'Git URL-scoped credential helper ({key}) is forbidden')
 
@@ -1145,7 +1220,9 @@ def publish(root, plan, args, env):
     token = env.get('github_token') or env.get('GITHUB_TOKEN') or os.environ.get('github_token') or os.environ.get('GITHUB_TOKEN')
     register_secret(token)
 
-    with isolated_git_env(env, anonymous=True) as clean_env:
+    # Explicit SSH push mode trusts the host SSH client & agent; HTTPS push is isolated under controlled GIT_ASKPASS.
+    with isolated_git_env(env, anonymous=True) as probe_env, isolated_git_env(env, anonymous=False, keep_ssh_env=True) as ssh_env:
+        clean_env = probe_env
         remote = _call_git(root, 'remote', 'get-url', 'origin', env=clean_env, anonymous=True)
         need(remote in allowed_remotes, 'origin does not match selected public repository')
         _, effective_push_url = _verify_origin_push_urls(
@@ -1159,7 +1236,7 @@ def publish(root, plan, args, env):
 
         if push_protocol == 'ssh':
             need(is_ssh_remote and is_ssh_push, 'origin is not an SSH remote/push target; cannot use --push-protocol ssh')
-            refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=git_timeout, env=clean_env, anonymous=True))
+            refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=git_timeout, env=ssh_env, anonymous=False))
         elif push_protocol == 'https':
             push_target = https_url
             use_https_askpass = True
@@ -1167,7 +1244,7 @@ def publish(root, plan, args, env):
         else:
             if is_ssh_remote and is_ssh_push:
                 try:
-                    refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=min(SSH_PROBE_TIMEOUT_SECONDS, git_timeout), env=clean_env, anonymous=True))
+                    refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=min(SSH_PROBE_TIMEOUT_SECONDS, git_timeout), env=ssh_env, anonymous=False))
                 except (ReleaseError, subprocess.CalledProcessError, OSError):
                     print('SSH remote probe failed; falling back to HTTPS GIT_ASKPASS')
                     _verify_origin_push_urls(root, args.repo, allowed_remotes, clean_env, timeout=git_timeout, ssh_mode=False)
@@ -1192,7 +1269,7 @@ def publish(root, plan, args, env):
                 need(current_refs.get('refs/tags/'+tag+'^{}', current_refs.get('refs/tags/'+tag)) == commit, 'Release tag must point at packaged commit')
 
             git_prefix = (
-                ['git', '-c', 'credential.helper=', '-c', 'credential.useHttpPath=true', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true']
+                ['git', '-c', 'credential.helper=', '-c', 'credential.useHttpPath=true', '-c', 'core.askPass=', '-c', 'http.cookieFile=', '-c', 'http.saveCookies=false', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true']
                 if use_https_askpass else ['git']
             )
             _call_execute(git_prefix + ['push', '-u', push_target, 'main'], root, push_env, w/'git-push.log', timeout=git_timeout)
@@ -1232,12 +1309,12 @@ def publish(root, plan, args, env):
             with git_askpass_env(clean_env, token, expected_host='github.com', expected_user='x-access-token', expected_repo=args.repo) as askpass_env:
                 if refs is None:
                     refs = _parse_refs(_call_git(
-                        root, '-c', 'credential.helper=', '-c', 'credential.useHttpPath=true', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
+                        root, '-c', 'credential.helper=', '-c', 'credential.useHttpPath=true', '-c', 'core.askPass=', '-c', 'http.cookieFile=', '-c', 'http.saveCookies=false', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
                         'ls-remote', push_target, timeout=git_timeout, env=askpass_env, anonymous=False,
                     ))
                 run_git_push_flow(refs, askpass_env)
         else:
-            run_git_push_flow(refs, clean_env)
+            run_git_push_flow(refs, ssh_env)
 
 
 class _DeadlineSocketAborter:
@@ -1246,6 +1323,7 @@ class _DeadlineSocketAborter:
     def __init__(self, deadline):
         self.deadline = deadline
         self.expired = False
+        self.stage = 'DNS/TCP'
         self._lock = threading.Lock()
         self._sockets = set()
         self._timer = None
@@ -1256,6 +1334,10 @@ class _DeadlineSocketAborter:
             self._timer = threading.Timer(rem, self.abort)
             self._timer.daemon = True
             self._timer.start()
+
+    def set_stage(self, stage):
+        with self._lock:
+            self.stage = stage
 
     def track(self, sock):
         if sock is None:
@@ -1269,15 +1351,22 @@ class _DeadlineSocketAborter:
         if should_abort:
             self._close_sock(sock)
 
+    def untrack(self, sock):
+        if sock is None:
+            return
+        with self._lock:
+            self._sockets.discard(sock)
+
     @staticmethod
     def _close_sock(sock):
         try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
+            # Call base socket.shutdown directly so SSLSocket doesn't block on close_notify or raise TypeError.
+            socket.socket.shutdown(sock, socket.SHUT_RDWR)
+        except (OSError, ValueError, TypeError):
             pass
         try:
             sock.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     def abort(self):
@@ -1297,16 +1386,100 @@ class _DeadlineSocketAborter:
             self._sockets.clear()
 
 
+def _effective_conn_timeout(conn_timeout, aborter):
+    rem = aborter.deadline - time.monotonic()
+    if rem <= 0 or aborter.expired:
+        raise TimeoutError('Download total timeout exceeded')
+    if conn_timeout is None or conn_timeout is socket._GLOBAL_DEFAULT_TIMEOUT:
+        return rem
+    return max(0.001, min(float(conn_timeout), rem))
+
+
+def _resolve_addrinfo_with_deadline(host, port, timeout_seconds):
+    done = threading.Event()
+    result = [None, None]
+
+    def _worker():
+        try:
+            result[0] = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        except BaseException as exc:
+            result[1] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    if not done.wait(timeout=max(0.001, timeout_seconds)):
+        raise TimeoutError(f'DNS resolution timed out for {host}:{port}')
+    if result[1] is not None:
+        raise result[1]
+    return result[0]
+
+
+def _connect_socket_with_deadline(conn, aborter):
+    aborter.set_stage('DNS/TCP')
+    timeout_sec = _effective_conn_timeout(conn.timeout, aborter)
+    infos = _resolve_addrinfo_with_deadline(conn.host, conn.port, timeout_sec)
+    if not infos:
+        raise OSError(f'getaddrinfo returns an empty list for {conn.host}:{conn.port}')
+    last_exc = None
+    for af, socktype, proto, _, sa in infos:
+        sock = None
+        try:
+            rem = _effective_conn_timeout(conn.timeout, aborter)
+            sock = socket.socket(af, socktype, proto)
+            sock.settimeout(rem)
+            if conn.source_address:
+                sock.bind(conn.source_address)
+            aborter.track(sock)
+            sock.connect(sa)
+            conn.sock = sock
+            if conn._tunnel_host:
+                conn._tunnel()
+            return
+        except BaseException as exc:
+            last_exc = exc
+            if sock is not None:
+                aborter.untrack(sock)
+                aborter._close_sock(sock)
+    if last_exc is not None:
+        raise last_exc
+
+
 def _make_deadline_http_handlers(aborter):
     class _TrackedHTTPConnection(http.client.HTTPConnection):
         def connect(self):
-            super().connect()
-            aborter.track(self.sock)
+            _connect_socket_with_deadline(self, aborter)
 
     class _TrackedHTTPSConnection(http.client.HTTPSConnection):
         def connect(self):
-            super().connect()
-            aborter.track(self.sock)
+            _connect_socket_with_deadline(self, aborter)
+            aborter.set_stage('TLS handshake')
+            raw_sock = self.sock
+            server_hostname = self._tunnel_host if self._tunnel_host else self.host
+            try:
+                raw_sock.settimeout(_effective_conn_timeout(self.timeout, aborter))
+                ssl_sock = self._context.wrap_socket(
+                    raw_sock,
+                    server_hostname=server_hostname,
+                    do_handshake_on_connect=False,
+                )
+            except BaseException:
+                aborter.untrack(raw_sock)
+                aborter._close_sock(raw_sock)
+                self.sock = None
+                raise
+            aborter.untrack(raw_sock)
+            aborter.track(ssl_sock)
+            self.sock = ssl_sock
+            try:
+                ssl_sock.settimeout(_effective_conn_timeout(self.timeout, aborter))
+                ssl_sock.do_handshake()
+            except BaseException:
+                aborter.untrack(ssl_sock)
+                aborter._close_sock(ssl_sock)
+                self.sock = None
+                raise
 
     class _DeadlineHTTPHandler(urllib.request.HTTPHandler):
         def http_open(self, req):
@@ -1474,20 +1647,23 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
 
     max_allowed = expected_size if expected_size is not None else MAX_ASSET_DOWNLOAD_BYTES
 
+    def _cleanup_part():
+        part.unlink(missing_ok=True)
+        meta_path.unlink(missing_ok=True)
+
     try:
         for attempt in range(len(DOWNLOAD_BACKOFF_SECONDS) + 1):
             if part.exists():
                 if not _load_valid_part_meta(meta_path, expected_meta):
-                    part.unlink(missing_ok=True)
-                    meta_path.unlink(missing_ok=True)
+                    _cleanup_part()
             offset = part.stat().st_size if part.exists() else 0
             if expected_size is not None and offset >= expected_size:
-                part.unlink(missing_ok=True)
-                meta_path.unlink(missing_ok=True)
+                _cleanup_part()
                 offset = 0
 
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or aborter.expired:
+                _cleanup_part()
                 raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded before starting {target.name}')
             req_timeout = min(download_timeout, remaining)
 
@@ -1496,7 +1672,8 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
                 headers['Range'] = f'bytes={offset}-'
             req = urllib.request.Request(url, headers=headers)
 
-            stage = 'DNS/TCP'
+            cur_stage = 'DNS/TCP'
+            aborter.set_stage('DNS/TCP')
             try:
                 with opener.open(req, timeout=req_timeout) as response:
                     _set_response_socket_timeout(response, min(download_timeout, max(0.001, deadline - time.monotonic())), aborter=aborter)
@@ -1536,7 +1713,7 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
                     if mode == 'wb':
                         write_json_atomic(meta_path, expected_meta)
 
-                    stage = 'data read'
+                    aborter.set_stage('data read')
                     response_bytes_read = 0
                     read_fn = getattr(response, 'read1', None) or response.read
                     with open(part, mode) as stream:
@@ -1574,37 +1751,49 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
                 if expected_size is not None and written != expected_size:
                     raise http.client.IncompleteRead(b'', expected_size - written)
                 if expected_sha256 is not None and sha256(part).upper() != expected_sha256.upper():
-                    part.unlink(missing_ok=True)
-                    meta_path.unlink(missing_ok=True)
+                    _cleanup_part()
                     raise ReleaseError(f'Downloaded asset checksum mismatch before promotion: {target.name}')
                 if time.monotonic() > deadline or aborter.expired:
                     raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded after digest check before promotion')
                 part.replace(target)
                 meta_path.unlink(missing_ok=True)
                 return
+            except ReleaseError:
+                _cleanup_part()
+                raise
             except urllib.error.HTTPError as exc:
-                if exc.code == 416 and part.exists():
-                    part.unlink(missing_ok=True)
-                    meta_path.unlink(missing_ok=True)
+                cur_stage = aborter.stage
+                exc_code = exc.code
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+                if exc_code == 416:
+                    _cleanup_part()
                     last_error = ReleaseError(f'HTTP 416 restarting {target.name}')
-                elif exc.code in {429, 500, 502, 503, 504}:
-                    last_error = ReleaseError(f'HTTP {exc.code} during {stage} for {target.name}')
+                elif exc_code in {429, 500, 502, 503, 504}:
+                    last_error = ReleaseError(f'HTTP {exc_code} during {cur_stage} for {target.name}')
                 else:
-                    raise ReleaseError(f'Download failed for {target.name} during {stage}: HTTP {exc.code}') from None
+                    _cleanup_part()
+                    raise ReleaseError(f'Download failed for {target.name} during {cur_stage}: HTTP {exc_code}') from None
             except urllib.error.URLError as exc:
-                stage = _classify_network_stage(exc, stage)
-                last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {stage}: {exc.reason}'))
+                cur_stage = _classify_network_stage(exc, aborter.stage)
+                last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {cur_stage}: {exc.reason}'))
             except (TimeoutError, socket.timeout, http.client.IncompleteRead, ssl.SSLError, OSError) as exc:
-                if isinstance(exc, ssl.SSLError):
-                    stage = 'TLS handshake'
-                last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {stage}: {exc}'))
+                cur_stage = 'TLS handshake' if isinstance(exc, ssl.SSLError) else aborter.stage
+                last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {cur_stage}: {exc}'))
 
+            if aborter.expired or time.monotonic() >= deadline:
+                _cleanup_part()
+                raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {cur_stage}: {last_error}') from None
             if attempt >= len(DOWNLOAD_BACKOFF_SECONDS):
+                _cleanup_part()
                 raise last_error
             remaining = deadline - time.monotonic()
             delay = min(DOWNLOAD_BACKOFF_SECONDS[attempt], max(0.0, remaining))
             if delay <= 0:
-                raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {stage}: {last_error}')
+                _cleanup_part()
+                raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {cur_stage}: {last_error}') from None
             sleep_fn(delay)
     finally:
         aborter.stop()
@@ -1638,7 +1827,7 @@ def verify(root, plan, args, env):
     with isolated_git_env(env, anonymous=True) as clean_env:
         _audit_repo_git_config(root, clean_env, timeout=git_timeout)
         remote = _call_git(
-            root, '-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
+            root, '-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.cookieFile=', '-c', 'http.saveCookies=false', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
             'ls-remote', 'https://github.com/'+args.repo+'.git', 'refs/tags/'+plan['tag'], 'refs/tags/'+plan['tag']+'^{}',
             timeout=git_timeout, env=clean_env, anonymous=True,
         )
@@ -1674,13 +1863,14 @@ def verify(root, plan, args, env):
         need(source.read_bytes() == expected.read_bytes(), 'Source ZIP differs from exact Git commit')
         if args.clone_check:
             clone = w/'recipient-clone'
-            if not clone.exists():
-                _call_execute(
-                    ['git', '-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
-                     'clone', '--depth', '1', '--branch', plan['tag'], '--single-branch', '--config', 'core.autocrlf=false',
-                     'https://github.com/'+args.repo+'.git', clone],
-                    root, clean_env, w/'recipient-clone.log', timeout=git_timeout,
-                )
+            if clone.exists():
+                _remove_temp_dir_with_diag(clone, 'existing recipient-clone directory')
+            _call_execute(
+                ['git', '-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.cookieFile=', '-c', 'http.saveCookies=false', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
+                 'clone', '--depth', '1', '--branch', plan['tag'], '--single-branch', '--config', 'core.autocrlf=false',
+                 'https://github.com/'+args.repo+'.git', clone],
+                root, clean_env, w/'recipient-clone.log', timeout=git_timeout,
+            )
             need(_call_git(clone, 'rev-parse', 'HEAD', env=clean_env, anonymous=True) == m['commit'] and not _call_git(clone, 'status', '--porcelain', env=clean_env, anonymous=True), 'Recipient clone differs')
             with zipfile.ZipFile(source) as z:
                 for path in _call_git(clone, 'ls-files', env=clean_env, anonymous=True).splitlines():
