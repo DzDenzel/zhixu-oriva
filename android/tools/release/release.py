@@ -614,7 +614,7 @@ def make_plan(root, api_base_url=None, maven='mvn', npm='npm', maven_repo=None, 
         rel_parts = repo_path_obj.relative_to(root).parts
     except ValueError:
         rel_parts = ()
-    if rel_parts and rel_parts[0].lower() in {'android', 'backend', 'deploy', '.github'}:
+    if rel_parts and rel_parts[0].lower() in {'android', 'backend', 'deploy', 'web', '.github'}:
         raise ReleaseError('Maven repository path must stay outside public source directories: ' + str(repo_path_obj))
     repo_path = str(repo_path_obj)
     maven_cmd = [maven, '-B', '-ntp', '-Dmaven.repo.local=' + repo_path]
@@ -627,6 +627,9 @@ def make_plan(root, api_base_url=None, maven='mvn', npm='npm', maven_repo=None, 
         maven_cmd,
         [npm, 'ci'],
         [npm, 'run', 'verify'],
+        [npm, 'ci', '--prefer-offline', '--no-audit', '--no-fund'],
+        [npm, 'test'],
+        [npm, 'run', 'build'],
     ]
     if api_base_url: commands[0].append('-PPLANLOCK_API_BASE_URL='+api_base_url)
     return dict(
@@ -712,7 +715,7 @@ def _call_execute(args, cwd, env, logfile=None, timeout=None):
 def audit_archive(z):
     """Audit public source archive and supported PK-prefixed nested ZIPs (including directory paths)."""
     forbidden = {
-        'build', 'target', '.gradle', '.gradle-home', '.android-home', '.cxx', '.git',
+        'build', 'dist', 'target', '.gradle', '.gradle-home', '.android-home', '.cxx', '.git',
         '.secrets', '.plugin-signing', '.m2', 'node_modules', 'work', 'Obsidian', '__pycache__',
     }
     forbidden_lower = {item.lower() for item in forbidden}
@@ -788,12 +791,12 @@ def audit_archive(z):
         validate_member_rel(item.filename, rel, str(rel), orig_name=orig, is_dir=item.is_dir())
         if item.is_dir():
             need(
-                rel.as_posix() in allowed_dirs or rel.parts[0] in {'android', 'backend', 'deploy'},
+                rel.as_posix() in allowed_dirs or rel.parts[0] in {'android', 'backend', 'deploy', 'web'},
                 'Outside public boundary: ' + str(rel),
             )
             continue
         count += 1
-        need(rel.as_posix() in {'README.md','LICENSE','.gitignore'} | readme_screenshots or rel.parts[0] in {'android','backend','deploy'} or rel.parts[:2] == ('.github','workflows'), 'Outside public boundary: '+str(rel))
+        need(rel.as_posix() in {'README.md', 'LICENSE', '.gitignore', '.dockerignore'} | readme_screenshots or rel.parts[0] in {'android', 'backend', 'deploy', 'web'} or rel.parts[:2] == ('.github', 'workflows'), 'Outside public boundary: '+str(rel))
         data = z.read(item); scan(data, str(rel))
         if rel.suffix.lower() in {'.yml','.yaml'}:
             for match in re.finditer(rb'(?im)^\s*(?:password|secret|token)\s*:\s*([^\r\n#]+)', data):
@@ -984,13 +987,16 @@ def build(root, plan, args, env):
     need(re.search(r'version "21(?:\.|\")', java), 'JDK21 required')
     old = w/'build-result.json'
     if old.exists(): old.rename(w/'previous-build-result.json') if not (w/'previous-build-result.json').exists() else old.unlink()
-    labels = ['android-release-build', 'gradle-stop', 'backend-build', 'sdk-npm-ci', 'sdk-verify']
+    labels = ['android-release-build', 'gradle-stop', 'backend-build', 'sdk-npm-ci', 'sdk-verify', 'web-npm-ci', 'web-test', 'web-build']
     try: execute(plan['commands'][0], root/'android', env, w/(labels[0]+'.log'))
     finally: execute(plan['commands'][1], root/'android', env, w/(labels[1]+'.log'))
     backend_env = prepare_backend_env(env)
     execute(plan['commands'][2], root/'backend', backend_env, w/(labels[2]+'.log'))
     execute(plan['commands'][3], root/'android/tools/plugin-sdk', env, w/(labels[3]+'.log'))
     execute(plan['commands'][4], root/'android/tools/plugin-sdk', env, w/(labels[4]+'.log'))
+    execute(plan['commands'][5], root/'web', env, w/(labels[5]+'.log'))
+    execute(plan['commands'][6], root/'web', env, w/(labels[6]+'.log'))
+    execute(plan['commands'][7], root/'web', env, w/(labels[7]+'.log'))
     require_clean(root); need(git(root, 'rev-parse', 'HEAD') == commit, 'Commit changed during build')
     unsigned = root/'android/app/build/outputs/apk/release/app-release-unsigned.apk'
     write_json(w/'build-result.json', dict(commit=commit, unsignedSHA256=sha256(unsigned), commands=plan['commands'], apiBaseUrl=args.api_base_url, mavenRepo=plan['mavenRepo']))

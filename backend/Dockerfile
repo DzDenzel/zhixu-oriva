@@ -1,6 +1,17 @@
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web-build
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --prefer-offline --no-audit --no-fund
+COPY web/ ./
+RUN npm run build && \
+    test -f /web/dist/index.html && \
+    test -d /web/dist/web-assets
+
 FROM --platform=$BUILDPLATFORM maven:3.9.10-eclipse-temurin-21 AS build
 WORKDIR /src
-COPY . .
+COPY backend/ .
+COPY --from=web-build /web/dist/index.html /src/planlock-app/src/main/resources/web/index.html
+COPY --from=web-build /web/dist/web-assets/ /src/planlock-app/src/main/resources/static/web-assets/
 ARG MAVEN_MIRROR_URL=
 RUN set -eu; \
     set -- -B -ntp -DskipTests; \
@@ -117,7 +128,7 @@ RUN groupadd --gid 10001 oriva && useradd --uid 10001 --gid oriva --no-create-ho
 WORKDIR /opt/oriva
 COPY --from=build --chown=10001:10001 /src/app.jar app.jar
 COPY --from=build --chown=10001:10001 /health /opt/oriva/health
-COPY --chown=10001:10001 plugins /opt/oriva/plugins
+COPY --chown=10001:10001 backend/plugins /opt/oriva/plugins
 ENV PLANLOCK_PLUGIN_DIRECTORY=/opt/oriva/plugins \
     PLANLOCK_VERSION=$VERSION
 USER 10001:10001

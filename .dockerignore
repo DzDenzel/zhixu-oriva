@@ -1,0 +1,16 @@
+*
+!/backend/
+!/web/
+**/.git
+**/target/
+**/node_modules/
+**/dist/
+**/.vite/
+**/.env
+**/.env.*
+**/.secrets
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.key
+**/*.pem

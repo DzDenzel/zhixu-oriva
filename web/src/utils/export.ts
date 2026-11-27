@@ -103,9 +103,49 @@ function formatIcsDate(date: string): string {
   return date.replace(/-/g, '');
 }
 
+/** RFC 5545 all-day DATE DTEND is exclusive (next calendar day). */
+function formatIcsExclusiveEndDate(date: string): string {
+  const parts = date.split('-').map((part) => Number(part));
+  if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n))) {
+    return formatIcsDate(date);
+  }
+  const nextDay = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + 1));
+  const y = String(nextDay.getUTCFullYear()).padStart(4, '0');
+  const m = String(nextDay.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(nextDay.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
 function formatIcsDateTime(date: string, time: string): string {
   const cleanTime = time.replace(/:/g, '').padEnd(6, '0').slice(0, 6);
   return `${formatIcsDate(date)}T${cleanTime}`;
+}
+
+const UTF8_ENCODER = new TextEncoder();
+
+/** Fold an ICS content line at <= 75 UTF-8 octets without splitting multibyte characters. */
+function foldIcsLine(line: string): string {
+  const out: string[] = [];
+  let current = '';
+  let bytes = 0;
+  let maxBytes = 75;
+
+  for (const ch of line) {
+    const chBytes = UTF8_ENCODER.encode(ch).length;
+    if (bytes + chBytes > maxBytes && current.length > 0) {
+      out.push(current);
+      current = ` ${ch}`;
+      bytes = 1 + chBytes;
+      maxBytes = 75;
+    } else {
+      current += ch;
+      bytes += chBytes;
+    }
+  }
+  if (current.length > 0 || out.length === 0) {
+    out.push(current);
+  }
+  return out.join('\r\n');
 }
 
 export function buildSchedulesIcs(schedules: ScheduleItem[]): string {
@@ -122,7 +162,7 @@ export function buildSchedulesIcs(schedules: ScheduleItem[]): string {
     lines.push(`DTSTAMP:${nowStamp}`);
     if (s.allDay) {
       lines.push(`DTSTART;VALUE=DATE:${formatIcsDate(s.startDate)}`);
-      lines.push(`DTEND;VALUE=DATE:${formatIcsDate(s.endDate)}`);
+      lines.push(`DTEND;VALUE=DATE:${formatIcsExclusiveEndDate(s.endDate || s.startDate)}`);
     } else {
       lines.push(`DTSTART:${formatIcsDateTime(s.startDate, s.startTime || '09:00:00')}`);
       lines.push(`DTEND:${formatIcsDateTime(s.endDate, s.endTime || '10:00:00')}`);
@@ -137,7 +177,7 @@ export function buildSchedulesIcs(schedules: ScheduleItem[]): string {
     lines.push('END:VEVENT');
   }
   lines.push('END:VCALENDAR');
-  return `${lines.join('\r\n')}\r\n`;
+  return `${lines.map(foldIcsLine).join('\r\n')}\r\n`;
 }
 
 export function triggerTextDownload(filename: string, content: string, mimeType: string): void {

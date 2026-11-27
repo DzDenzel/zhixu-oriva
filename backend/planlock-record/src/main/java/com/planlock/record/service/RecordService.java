@@ -233,10 +233,39 @@ public class RecordService {
         if (value == null) {
             return "";
         }
-        if (value.indexOf(',') < 0 && value.indexOf('"') < 0 && value.indexOf('\n') < 0 && value.indexOf('\r') < 0) {
+        String safe = neutralizeCsvFormula(value);
+        if (safe.indexOf(',') < 0 && safe.indexOf('"') < 0 && safe.indexOf('\n') < 0 && safe.indexOf('\r') < 0) {
+            return safe;
+        }
+        return '"' + safe.replace("\"", "\"\"") + '"';
+    }
+
+    /** Neutralize spreadsheet formula triggers before RFC 4180 quoting so quoted cells stay inert. */
+    private static String neutralizeCsvFormula(String value) {
+        if (value.isEmpty()) {
             return value;
         }
-        return '"' + value.replace("\"", "\"\"") + '"';
+        char first = value.charAt(0);
+        if (first == '\t' || first == '\r' || isCsvFormulaTrigger(first)) {
+            return "'" + value;
+        }
+        int idx = 0;
+        while (idx < value.length()) {
+            char ch = value.charAt(idx);
+            if (!Character.isWhitespace(ch) && ch != '\u00A0') {
+                break;
+            }
+            idx++;
+        }
+        if (idx > 0 && idx < value.length() && isCsvFormulaTrigger(value.charAt(idx))) {
+            return "'" + value;
+        }
+        return value;
+    }
+
+    private static boolean isCsvFormulaTrigger(char ch) {
+        return ch == '=' || ch == '+' || ch == '-' || ch == '@'
+                || ch == '\uFF1D' || ch == '\uFF0B' || ch == '\uFF0D' || ch == '\uFF20';
     }
 
     private void requireOwnedPlan(Long userId, Long planId) {

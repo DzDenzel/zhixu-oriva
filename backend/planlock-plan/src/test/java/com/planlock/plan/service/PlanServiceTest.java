@@ -272,6 +272,30 @@ class PlanServiceTest {
         assertThat(ics).endsWith("END:VCALENDAR\r\n");
     }
 
+    @Test
+    void exportIcsNeutralizesCrAndCrlfAndFoldsLinesAt75Octets() {
+        Plan plan = samplePlan(12L, 10L);
+        String longTitle = "深度专注\r\nATTENDEE:evil\rSUMMARY:spoof-" + "聚焦".repeat(20) + "\uD83D\uDDD3\uFE0F";
+        plan.setName(longTitle);
+        plan.setType("工作\r\n状态");
+        when(planMapper.findByUserId(10L)).thenReturn(List.of(plan));
+
+        String ics = planService.exportIcs(10L);
+        String[] physicalLines = ics.split("\r\n");
+
+        for (String physical : physicalLines) {
+            assertThat(physical.getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
+                    .as("Physical ICS line exceeds 75 UTF-8 octets: %s", physical)
+                    .isLessThanOrEqualTo(75);
+        }
+
+        String unfolded = ics.replace("\r\n ", "");
+        assertThat(unfolded).doesNotContain("\r\nATTENDEE:evil");
+        assertThat(unfolded).doesNotContain("\r\nSUMMARY:spoof");
+        assertThat(unfolded).contains("SUMMARY:深度专注\\nATTENDEE:evil\\nSUMMARY:spoof-" + "聚焦".repeat(20) + "\uD83D\uDDD3\uFE0F\r\n");
+        assertThat(unfolded).contains("CATEGORIES:工作\\n状态\r\n");
+    }
+
     private static Plan samplePlan(Long id, Long userId) {
         Plan p = new Plan();
         p.setId(id);

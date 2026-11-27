@@ -2,8 +2,8 @@ services:
   backend:
     image: ${ORIVA_IMAGE:?Run the installer to create .env}
     build:
-      context: ../backend
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     ports:
       - "${ORIVA_BIND_ADDRESS:-0.0.0.0}:${ORIVA_PORT:-8080}:8080"

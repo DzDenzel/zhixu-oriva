@@ -307,6 +307,32 @@ describe('anti-injection Markdown & ICS export', () => {
     expect(ics).toContain('DESCRIPTION:第一行\\n第二行\\n第三行');
     expect(ics).toContain('END:VCALENDAR');
   });
+
+  it('uses exclusive +1 day DTEND for all-day schedules and folds >75 UTF-8 octet ICS lines', () => {
+    const longTitle = '年度计划复盘与跨端同步联调会议'.repeat(4) + '🗓️';
+    const ics = buildSchedulesIcs([
+      {
+        id: 43,
+        userId: 1,
+        title: longTitle,
+        startDate: '2026-12-31',
+        endDate: '2026-12-31',
+        allDay: true,
+        status: 1,
+        version: 1,
+      },
+    ]);
+    expect(ics).toContain('DTSTART;VALUE=DATE:20261231\r\n');
+    expect(ics).toContain('DTEND;VALUE=DATE:20270101\r\n');
+    const physicalLines = ics.split('\r\n').filter((line) => line.length > 0);
+    expect(physicalLines.length).toBeGreaterThan(8);
+    const encoder = new TextEncoder();
+    for (const line of physicalLines) {
+      expect(encoder.encode(line).length).toBeLessThanOrEqual(75);
+    }
+    const unfolded = ics.replace(/\r\n /g, '');
+    expect(unfolded).toContain(`SUMMARY:${longTitle}\r\n`);
+  });
 });
 
 describe('static CSP, zero-innerHTML, and release secret-pattern invariants (B8)', () => {

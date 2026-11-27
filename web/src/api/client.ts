@@ -248,43 +248,26 @@ export function createApiClient(options: ApiClientOptions = {}) {
     clearSession: (): ClearSessionResult => setToken(null),
 
     /**
-     * 登录：优先发送 ADR-022 D2 规定的 platform="web"。
-     * TODO(req041-integration): remove platform="windows" fallback once Package A v1.1 (9fdcda9, supporting platform="web") merges to main.
+     * 登录：使用 ADR-022 D2 规定的 platform="web" 单次提交，不再回退 "windows"（B4）。
      */
     async login(account: string, password: string): Promise<AuthResponse> {
       const deviceUid = getOrCreateDeviceUid();
       const deviceName = buildWebDeviceName();
 
-      const submit = (platform: string) =>
-        requestJson<AuthResponse>(
-          '/api/v1/auth/login',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              account: account.trim(),
-              password,
-              deviceUid,
-              deviceName,
-              platform,
-            }),
-          },
-          false,
-        );
-
-      let result: AuthResponse;
-      try {
-        result = await submit('web');
-      } catch (err) {
-        if (
-          err instanceof ApiError &&
-          err.code === ERROR_INVALID_PARAM &&
-          /platform|平台/i.test(err.message)
-        ) {
-          result = await submit('windows');
-        } else {
-          throw err;
-        }
-      }
+      const result = await requestJson<AuthResponse>(
+        '/api/v1/auth/login',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            account: account.trim(),
+            password,
+            deviceUid,
+            deviceName,
+            platform: 'web',
+          }),
+        },
+        false,
+      );
       setToken(result.token);
       if (!getToken()) {
         throw new ApiError(ERROR_UNAUTHORIZED, '服务端返回了无效、已过期或已撤销的会话令牌', 401);

@@ -414,22 +414,12 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
-  it('sends web-<UUID> deviceUid and falls back to windows platform if backend rejects web', async () => {
+  it('sends exactly one login request with platform=web and web-<UUID> deviceUid without windows fallback (B4)', async () => {
     const loginJwt = makeTestJwt(futureExpSec(), 'login-ok');
     const sentBodies: Array<Record<string, unknown>> = [];
     const mockFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
       sentBodies.push(body);
-      if (body.platform === 'web') {
-        return new Response(
-          JSON.stringify({
-            code: 1002,
-            message: 'platform 平台取值仅支持 android/ios/windows',
-            data: null,
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } },
-        );
-      }
       return new Response(
         JSON.stringify({ code: 0, message: 'ok', data: { token: loginJwt, userId: 7, deviceId: 12 } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -440,10 +430,33 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
     const auth = await api.login('owner@example.com', 'secret123');
     expect(auth.token).toBe(loginJwt);
     expect(readSessionToken()).toBe(loginJwt);
-    expect(sentBodies).toHaveLength(2);
+    expect(sentBodies).toHaveLength(1);
     expect(sentBodies[0].platform).toBe('web');
-    expect(sentBodies[1].platform).toBe('windows');
     expect(String(sentBodies[0].deviceUid)).toMatch(/^web-/);
+  });
+
+  it('does not retry with windows platform when backend rejects login with code 1002 (B4)', async () => {
+    const sentBodies: Array<Record<string, unknown>> = [];
+    const mockFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      sentBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          code: 1002,
+          message: 'platform 参数错误',
+          data: null,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+
+    const api = createApiClient({ fetchImpl: mockFetch as unknown as typeof fetch });
+    await expect(api.login('owner@example.com', 'secret123')).rejects.toMatchObject({
+      name: 'ApiError',
+      code: 1002,
+    });
+    expect(sentBodies).toHaveLength(1);
+    expect(sentBodies[0].platform).toBe('web');
   });
 
   it('clears sessionStorage token and triggers onUnauthorized on business code 1001', async () => {
