@@ -8,9 +8,12 @@
 **/.vite/
 **/.env
 **/.env.*
+**/.envrc
+**/.npmrc
 **/.secrets
 **/*.jks
 **/*.keystore
 **/*.p12
+**/*.pfx
 **/*.key
 **/*.pem

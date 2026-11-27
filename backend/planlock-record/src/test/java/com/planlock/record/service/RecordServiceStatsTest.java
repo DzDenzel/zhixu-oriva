@@ -148,7 +148,10 @@ class RecordServiceStatsTest {
                 "\uFF1D1+1",
                 "\uFF0B2",
                 "\uFF0D3",
-                "\uFF20cmd"
+                "\uFF20cmd",
+                "\u2007=1+1",
+                "\u202F@SUM(1,1)",
+                "\uFEFF+2"
         };
         List<ViolationRecord> list = new java.util.ArrayList<>();
         for (int i = 0; i < payloads.length; i++) {
@@ -178,5 +181,8 @@ class RecordServiceStatsTest {
         assertTrue(csv.contains(",'\uFF0B2,app.formula.8,"), csv);
         assertTrue(csv.contains(",'\uFF0D3,app.formula.9,"), csv);
         assertTrue(csv.contains(",'\uFF20cmd,app.formula.10,"), csv);
+        assertTrue(csv.contains(",'\u2007=1+1,app.formula.11,"), csv);
+        assertTrue(csv.contains(",\"'\u202F@SUM(1,1)\",app.formula.12,"), csv);
+        assertTrue(csv.contains(",'\uFEFF+2,app.formula.13,"), csv);
     }
 }

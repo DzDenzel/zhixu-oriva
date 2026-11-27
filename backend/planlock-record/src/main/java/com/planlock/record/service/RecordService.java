@@ -252,7 +252,7 @@ public class RecordService {
         int idx = 0;
         while (idx < value.length()) {
             char ch = value.charAt(idx);
-            if (!Character.isWhitespace(ch) && ch != '\u00A0') {
+            if (!isSkippableCsvLeadingWhitespace(ch)) {
                 break;
             }
             idx++;
@@ -261,6 +261,11 @@ public class RecordService {
             return "'" + value;
         }
         return value;
+    }
+
+    private static boolean isSkippableCsvLeadingWhitespace(char ch) {
+        // Cover ASCII whitespace, Java SPACE_SEPARATOR (e.g. U+00A0, U+2007, U+202F, U+3000), and BOM U+FEFF.
+        return Character.isWhitespace(ch) || Character.isSpaceChar(ch) || ch == '\uFEFF';
     }
 
     private static boolean isCsvFormulaTrigger(char ch) {

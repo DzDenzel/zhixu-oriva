@@ -373,12 +373,9 @@ function parseScheduleWeekdays(raw?: string | null, fallbackDate?: string): numb
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as { type?: string; weekdays?: unknown; days?: unknown };
-      const rawDays = Array.isArray(parsed.weekdays) ? parsed.weekdays : parsed.days;
-      if (parsed.type === 'weekly' && Array.isArray(rawDays)) {
-        const valid = rawDays.filter(
-          (d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 1 && d <= 7,
-        );
-        if (valid.length > 0) return Array.from(new Set(valid)).sort((a, b) => a - b);
+      if (parsed.type === 'weekly') {
+        const valid = resolveCanonicalWeeklyDays(parsed);
+        if (valid.length > 0) return valid;
       }
     } catch {
       // ignore
@@ -432,21 +429,29 @@ function parseScheduleRuleObject(raw?: string | null): Record<string, unknown> |
   }
 }
 
+function isStrictWeekdayInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 7;
+}
+
 function toPositiveWeekdayList(value: unknown): number[] {
   if (!Array.isArray(value)) return [];
   const unique = new Set<number>();
   for (const item of value) {
-    const n = Number(item);
-    if (Number.isInteger(n) && n >= 1 && n <= 7) {
-      unique.add(n);
+    if (isStrictWeekdayInt(item)) {
+      unique.add(item);
     }
   }
   return Array.from(unique).sort((a, b) => a - b);
 }
 
+function resolveCanonicalWeeklyDays(obj: { weekdays?: unknown; days?: unknown }): number[] {
+  const canonical = toPositiveWeekdayList(obj.weekdays);
+  return canonical.length > 0 ? canonical : toPositiveWeekdayList(obj.days);
+}
+
 /**
- * 无论 repeatRule 是否被界面改脏，出站日程规则若仍使用历史 days 别名（缺省/空 weekdays 或残留 days 键），
- * 均统一规范为后端 ScheduleRules.java 要求的 weekdays 键并完整保留全部非 UI 扩展字段（Astra R4 v1.5）。
+ * 无论 repeatRule 是否被界面改脏，出站日程规则若仍使用历史 days 别名或包含非严格 1..7 整数的 weekdays，
+ * 均统一规范为后端 ScheduleRules.java 要求的 weekdays 键并完整保留全部非 UI 扩展字段（Astra R4 v1.6）。
  */
 function normalizeOutboundScheduleRepeatRule(raw?: string | null): string | null {
   if (raw === null || raw === undefined || raw.trim() === '') {
@@ -461,7 +466,9 @@ function normalizeOutboundScheduleRepeatRule(raw?: string | null): string | null
     return raw;
   }
   const existingWeekdays = toPositiveWeekdayList(obj.weekdays);
-  if (existingWeekdays.length > 0 && !('days' in obj)) {
+  const rawWeekdaysAllValid =
+    Array.isArray(obj.weekdays) && obj.weekdays.length > 0 && obj.weekdays.every(isStrictWeekdayInt);
+  if (rawWeekdaysAllValid && !('days' in obj)) {
     return raw;
   }
   const legacyDays = toPositiveWeekdayList(obj.days);
@@ -546,18 +553,9 @@ function canonicalScheduleRepeatRuleSemantics(raw?: string | null): string {
       return JSON.stringify({ type: 'daily' });
     }
     if (type === 'weekly') {
-      const rawDays = Array.isArray(obj.weekdays) ? obj.weekdays : obj.days;
-      if (Array.isArray(rawDays)) {
-        const days = Array.from(
-          new Set(
-            rawDays.filter(
-              (d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 1 && d <= 7,
-            ),
-          ),
-        ).sort((a, b) => a - b);
-        if (days.length > 0) {
-          return JSON.stringify({ type: 'weekly', weekdays: days });
-        }
+      const days = resolveCanonicalWeeklyDays(obj as { weekdays?: unknown; days?: unknown });
+      if (days.length > 0) {
+        return JSON.stringify({ type: 'weekly', weekdays: days });
       }
     }
     if (type === 'monthly' && typeof obj.day === 'number' && Number.isInteger(obj.day)) {

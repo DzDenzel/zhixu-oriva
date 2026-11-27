@@ -1091,6 +1091,57 @@ describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 tru
     resetSessionGuardForTest();
   });
 
+  it('rejects non-integer boolean weekdays [true] and falls back to valid legacy days [2, 4] on clean/preserve save (R4 v1.6)', () => {
+    const legacyMixed: ScheduleItem = {
+      id: 83,
+      userId: 1,
+      title: '布尔干扰旧日程',
+      startDate: '2026-12-01',
+      endDate: '2026-12-01',
+      startTime: '09:00:00',
+      endTime: '10:00:00',
+      allDay: false,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        weekdays: [true, '3', 1.5],
+        days: [2, 4],
+        interval: 2,
+        customExt: 'strict-int',
+      }),
+      status: 1,
+      version: 1,
+    };
+
+    const form = scheduleFormFromItem(legacyMixed);
+    expect(form.repeatWeekdays).toEqual([2, 4]);
+
+    const onlyTitleEdited = withScheduleField(form, 'title', '新标题');
+    const cleanSave = buildScheduleUpsertPayload(onlyTitleEdited);
+    expect(JSON.parse(cleanSave.repeatRule ?? '{}')).toEqual({
+      type: 'weekly',
+      weekdays: [2, 4],
+      interval: 2,
+      customExt: 'strict-int',
+    });
+
+    const serverLatest: ScheduleItem = {
+      ...legacyMixed,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        weekdays: [false, 9],
+        days: [2, 4],
+        skipHolidays: true,
+      }),
+      version: 2,
+    };
+    const conflictRetry = buildScheduleUpsertPayload(onlyTitleEdited, serverLatest);
+    expect(JSON.parse(conflictRetry.repeatRule ?? '{}')).toEqual({
+      type: 'weekly',
+      weekdays: [2, 4],
+      skipHolidays: true,
+    });
+  });
+
   it('synchronously invalidates stale official view/request on click switch to third-party tab (R2 v1.2)', async () => {
     let resolveOfficialFirst!: (doc: PluginCatalogDocument) => void;
     let resolveThirdParty!: (doc: PluginCatalogDocument) => void;
