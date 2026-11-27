@@ -149,15 +149,33 @@ function buildEditedPlanRepeatRule(
   form: PlanFormState,
   baseRule?: PlanRepeatRule | null,
 ): PlanRepeatRule | null {
+  const effectiveBase = baseRule !== undefined ? baseRule : form.originalRepeatRule;
   if (form.repeatType === 'preserve-custom') {
-    return baseRule !== undefined ? clonePlanRepeatRule(baseRule) : clonePlanRepeatRule(form.originalRepeatRule);
+    return clonePlanRepeatRule(effectiveBase);
   }
+  const sameType =
+    effectiveBase !== null &&
+    effectiveBase !== undefined &&
+    typeof effectiveBase.type === 'string' &&
+    effectiveBase.type.trim().toLowerCase() === form.repeatType;
+
   if (form.repeatType === 'weekly') {
+    const weekdays = form.weekdays.length
+      ? Array.from(new Set(form.weekdays)).sort((a, b) => a - b)
+      : [1, 2, 3, 4, 5];
+    if (sameType && effectiveBase) {
+      return {
+        ...clonePlanRepeatRule(effectiveBase)!,
+        type: 'weekly',
+        weekdays,
+      };
+    }
+    return { type: 'weekly', weekdays };
+  }
+  if (sameType && effectiveBase) {
     return {
-      type: 'weekly',
-      weekdays: form.weekdays.length
-        ? Array.from(new Set(form.weekdays)).sort((a, b) => a - b)
-        : [1, 2, 3, 4, 5],
+      ...clonePlanRepeatRule(effectiveBase)!,
+      type: form.repeatType,
     };
   }
   return { type: form.repeatType };
@@ -354,9 +372,10 @@ export function emptyScheduleForm(): ScheduleFormState {
 function parseScheduleWeekdays(raw?: string | null, fallbackDate?: string): number[] {
   if (raw) {
     try {
-      const parsed = JSON.parse(raw) as { type?: string; weekdays?: unknown };
-      if (parsed.type === 'weekly' && Array.isArray(parsed.weekdays)) {
-        const valid = parsed.weekdays.filter(
+      const parsed = JSON.parse(raw) as { type?: string; weekdays?: unknown; days?: unknown };
+      const rawDays = Array.isArray(parsed.weekdays) ? parsed.weekdays : parsed.days;
+      if (parsed.type === 'weekly' && Array.isArray(rawDays)) {
+        const valid = rawDays.filter(
           (d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 1 && d <= 7,
         );
         if (valid.length > 0) return Array.from(new Set(valid)).sort((a, b) => a - b);
@@ -402,26 +421,72 @@ export function scheduleFormFromItem(item: ScheduleItem): ScheduleFormState {
   };
 }
 
+function parseScheduleRuleObject(raw?: string | null): Record<string, unknown> | null {
+  if (!raw || !raw.trim()) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 构建编辑后的日程重复规则（Astra R4 v1.3）：
+ * - 切为 none 返回 null；切为不同 type 时按新类型洁净契约生成（不残留旧类型专属键）；
+ * - 保持相同 type（如修改 weekly 曜日或同类型刷新）时，以目标基底解析出的对象（普通保存用原始规则，
+ *   1409 冲突重试用 serverLatest.repeatRule）做浅拷贝保留全部服务端扩展字段（如 interval/endDate/tz/customExt），
+ *   仅覆盖 UI 所拥有的字段。
+ */
 function buildEditedScheduleRepeatRule(
   form: ScheduleFormState,
   baseRule?: string | null,
 ): string | null {
+  const effectiveBaseRaw = baseRule !== undefined ? baseRule : form.originalRepeatRule;
   if (form.repeatMode === 'preserve') {
-    return baseRule !== undefined ? baseRule : form.originalRepeatRule;
+    return effectiveBaseRaw ?? null;
   }
   if (form.repeatMode === 'none') return null;
+
+  const baseObj = parseScheduleRuleObject(effectiveBaseRaw);
+  const sameType = Boolean(
+    baseObj &&
+      typeof baseObj.type === 'string' &&
+      baseObj.type.trim().toLowerCase() === form.repeatMode,
+  );
   const parts = form.startDate.split('-').map((n) => Number(n));
   const month = parts[1] || 1;
   const day = parts[2] || 1;
-  if (form.repeatMode === 'daily') return JSON.stringify({ type: 'daily' });
+
+  if (form.repeatMode === 'daily') {
+    return JSON.stringify(sameType && baseObj ? { ...baseObj, type: 'daily' } : { type: 'daily' });
+  }
   if (form.repeatMode === 'weekly') {
     const days = form.repeatWeekdays.length
       ? Array.from(new Set(form.repeatWeekdays)).sort((a, b) => a - b)
       : parseScheduleWeekdays(null, form.startDate);
+    if (sameType && baseObj) {
+      // 保留扩展字段；若基底同时用 days 别名且无 weekdays，仅覆盖实际存在的周几键
+      const usesDaysAlias = !Array.isArray(baseObj.weekdays) && Array.isArray(baseObj.days);
+      return JSON.stringify(
+        usesDaysAlias
+          ? { ...baseObj, type: 'weekly', days }
+          : { ...baseObj, type: 'weekly', weekdays: days },
+      );
+    }
     return JSON.stringify({ type: 'weekly', weekdays: days });
   }
-  if (form.repeatMode === 'monthly') return JSON.stringify({ type: 'monthly', day });
-  return JSON.stringify({ type: 'yearly', month, day });
+  if (form.repeatMode === 'monthly') {
+    return JSON.stringify(
+      sameType && baseObj ? { ...baseObj, type: 'monthly', day } : { type: 'monthly', day },
+    );
+  }
+  return JSON.stringify(
+    sameType && baseObj
+      ? { ...baseObj, type: 'yearly', month, day }
+      : { type: 'yearly', month, day },
+  );
 }
 
 /**
@@ -442,16 +507,19 @@ function canonicalScheduleRepeatRuleSemantics(raw?: string | null): string {
     if (type === 'daily') {
       return JSON.stringify({ type: 'daily' });
     }
-    if (type === 'weekly' && Array.isArray(obj.weekdays)) {
-      const days = Array.from(
-        new Set(
-          obj.weekdays.filter(
-            (d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 1 && d <= 7,
+    if (type === 'weekly') {
+      const rawDays = Array.isArray(obj.weekdays) ? obj.weekdays : obj.days;
+      if (Array.isArray(rawDays)) {
+        const days = Array.from(
+          new Set(
+            rawDays.filter(
+              (d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 1 && d <= 7,
+            ),
           ),
-        ),
-      ).sort((a, b) => a - b);
-      if (days.length > 0) {
-        return JSON.stringify({ type: 'weekly', weekdays: days });
+        ).sort((a, b) => a - b);
+        if (days.length > 0) {
+          return JSON.stringify({ type: 'weekly', weekdays: days });
+        }
       }
     }
     if (type === 'monthly' && typeof obj.day === 'number' && Number.isInteger(obj.day)) {

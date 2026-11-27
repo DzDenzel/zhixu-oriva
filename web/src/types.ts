@@ -41,11 +41,12 @@ export interface DeviceItem {
   online: boolean | null;
 }
 
-/** 计划重复规则（对应 RepeatRule） */
+/** 计划重复规则（对应 RepeatRule，透传服务端扩展字段） */
 export interface PlanRepeatRule {
   type: 'daily' | 'weekly' | 'once' | 'custom' | string;
   weekdays?: number[] | null;
   dates?: string[] | null;
+  [key: string]: unknown;
 }
 
 /** 提醒方式（对应 RemindMethods） */

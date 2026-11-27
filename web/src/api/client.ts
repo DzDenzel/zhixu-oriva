@@ -89,13 +89,14 @@ export function createApiClient(options: ApiClientOptions = {}) {
   }
 
   function setToken(token: string | null): ClearSessionResult {
+    const previousToken = memoryToken;
     sessionGeneration += 1;
     memoryToken = token;
     if (token) {
       writeSessionToken(token);
       return { storageCleared: true, revocationPersisted: false };
     }
-    return clearSessionToken();
+    return clearSessionToken(previousToken ?? undefined);
   }
 
   function assertGeneration(requestGen: number): void {

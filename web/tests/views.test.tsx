@@ -305,6 +305,163 @@ describe('B6 & B7 payload fidelity: custom dates, multi-weekday, strategy 1409 &
     expect(mergedPartialTime.startTime).toBe('13:45:00');
     expect(mergedPartialTime.endTime).toBe('16:00:00');
   });
+
+  it('preserves server extension fields when actively editing same-type repeatRule on ordinary save & 1409 retry, and drops them cleanly on type switch/none (R4 v1.3)', () => {
+    // 1) Schedule weekly rule with extension fields (interval, customExt, tz)
+    const schedOrig: ScheduleItem = {
+      id: 61,
+      userId: 1,
+      title: '英语听读',
+      startDate: '2026-12-01',
+      endDate: '2026-12-01',
+      startTime: '08:00:00',
+      endTime: '09:00:00',
+      allDay: false,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        weekdays: [1, 3],
+        interval: 2,
+        customExt: 'mobile-v1',
+      }),
+      status: 1,
+      version: 2,
+    };
+
+    // UI edits weekdays from [1, 3] -> [1, 3, 5]
+    let schedForm = withScheduleField(scheduleFormFromItem(schedOrig), 'repeatMode', 'weekly', 'repeatRule');
+    schedForm = withScheduleField(schedForm, 'repeatWeekdays', [1, 3, 5], 'repeatRule');
+    expect(schedForm.dirtyFields.has('repeatRule')).toBe(true);
+
+    // Ordinary save MUST preserve interval=2 and customExt='mobile-v1' alongside new weekdays [1,3,5]
+    const ordinaryRule = JSON.parse(buildScheduleUpsertPayload(schedForm).repeatRule ?? '{}');
+    expect(ordinaryRule).toEqual({
+      type: 'weekly',
+      weekdays: [1, 3, 5],
+      interval: 2,
+      customExt: 'mobile-v1',
+    });
+
+    // 1409 conflict: mobile concurrently updated customExt -> 'mobile-v2' and added skipHolidays: true
+    const serverLatestSched: ScheduleItem = {
+      ...schedOrig,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        weekdays: [1, 3],
+        interval: 2,
+        customExt: 'mobile-v2',
+        skipHolidays: true,
+      }),
+      version: 3,
+    };
+    const mergedConflictRule = JSON.parse(
+      buildScheduleUpsertPayload(schedForm, serverLatestSched).repeatRule ?? '{}',
+    );
+    expect(mergedConflictRule).toEqual({
+      type: 'weekly',
+      weekdays: [1, 3, 5],
+      interval: 2,
+      customExt: 'mobile-v2',
+      skipHolidays: true,
+    });
+
+    // Also verify days-alias weekly rule preserves extension fields and updates days key
+    const schedDaysAlias: ScheduleItem = {
+      ...schedOrig,
+      id: 62,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        days: [1, 3],
+        interval: 2,
+        customExt: 'mobile-v1',
+      }),
+    };
+    let aliasForm = withScheduleField(scheduleFormFromItem(schedDaysAlias), 'repeatMode', 'weekly', 'repeatRule');
+    aliasForm = withScheduleField(aliasForm, 'repeatWeekdays', [1, 3, 5], 'repeatRule');
+    expect(JSON.parse(buildScheduleUpsertPayload(aliasForm).repeatRule ?? '{}')).toEqual({
+      type: 'weekly',
+      days: [1, 3, 5],
+      interval: 2,
+      customExt: 'mobile-v1',
+    });
+
+    // Switching schedule rule to daily or none produces clean new-type contract (no leftover weekly/ext keys)
+    const dailyForm = withScheduleField(schedForm, 'repeatMode', 'daily', 'repeatRule');
+    expect(JSON.parse(buildScheduleUpsertPayload(dailyForm, serverLatestSched).repeatRule ?? '{}')).toEqual({
+      type: 'daily',
+    });
+    const noneForm = withScheduleField(schedForm, 'repeatMode', 'none', 'repeatRule');
+    expect(buildScheduleUpsertPayload(noneForm, serverLatestSched).repeatRule).toBeNull();
+
+    // 2) Plan weekly & custom rules with extension fields
+    const planOrig: PlanItem = {
+      id: 71,
+      userId: 1,
+      name: '算法训练',
+      type: '学习',
+      startTime: '20:00:00',
+      endTime: '21:30:00',
+      repeatRule: {
+        type: 'weekly',
+        weekdays: [1, 3],
+        interval: 2,
+        customExt: 'mobile-v1',
+      },
+      remindAdvanceMin: 10,
+      status: 1,
+      version: 4,
+    };
+    const planEditedWeekly = withPlanField(planFormFromItem(planOrig), 'weekdays', [1, 3, 5], 'repeatRule');
+    expect(buildPlanUpsertPayload(planEditedWeekly).repeatRule).toEqual({
+      type: 'weekly',
+      weekdays: [1, 3, 5],
+      interval: 2,
+      customExt: 'mobile-v1',
+    });
+
+    const serverLatestPlan: PlanItem = {
+      ...planOrig,
+      repeatRule: {
+        type: 'weekly',
+        weekdays: [1, 3],
+        interval: 2,
+        customExt: 'mobile-v2',
+        endDate: '2026-12-31',
+      },
+      version: 5,
+    };
+    expect(buildPlanUpsertPayload(planEditedWeekly, serverLatestPlan).repeatRule).toEqual({
+      type: 'weekly',
+      weekdays: [1, 3, 5],
+      interval: 2,
+      customExt: 'mobile-v2',
+      endDate: '2026-12-31',
+    });
+
+    // Switching Plan from weekly -> daily drops old weekly & extension keys cleanly
+    const planSwitchedDaily = withPlanField(planEditedWeekly, 'repeatType', 'daily', 'repeatRule');
+    expect(buildPlanUpsertPayload(planSwitchedDaily, serverLatestPlan).repeatRule).toEqual({
+      type: 'daily',
+    });
+
+    // Plan custom rule with extension fields preserved intact on ordinary save and 1409 retry
+    const customPlan: PlanItem = {
+      ...planOrig,
+      id: 72,
+      repeatRule: {
+        type: 'custom',
+        dates: ['2026-12-01', '2026-12-03'],
+        interval: 1,
+        customExt: 'mobile-custom-v1',
+      },
+    };
+    const customRenamed = withPlanField(planFormFromItem(customPlan), 'name', '算法冲刺', 'name');
+    expect(buildPlanUpsertPayload(customRenamed).repeatRule).toEqual({
+      type: 'custom',
+      dates: ['2026-12-01', '2026-12-03'],
+      interval: 1,
+      customExt: 'mobile-custom-v1',
+    });
+  });
 });
 
 describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 trust copy', () => {
