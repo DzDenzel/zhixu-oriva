@@ -506,6 +506,22 @@ class AuthServiceTest {
         assertThat(AuthService.maskAccount(null, "138\u00A000138000")).isEqualTo("***");
         assertThat(AuthService.maskAccount(null, "not-a-phone")).isEqualTo("***");
         assertThat(AuthService.maskAccount(null, "138\u000012345678")).isEqualTo("***");
+        // R4: Leading/trailing ASCII control chars (\u0000/\t/\n/\r) are detected BEFORE outer ASCII space stripping -> "***".
+        assertThat(AuthService.maskAccount("\u0000alice@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("alice@example.com\u0000", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("\talice@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("alice@example.com\n", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("\r\nalice@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("\t\n", "13800138000")).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "\u000013800138000")).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "13800138000\u0000")).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "\t13800138000\n")).isEqualTo("***");
+        assertThat(AuthService.maskAccount("\u00A0alice@example.com", null)).isEqualTo("***");
+        // Outer ordinary ASCII spaces (' ') are tolerated and stripped cleanly, while inner spaces fail closed to "***".
+        assertThat(AuthService.maskAccount("  alice@example.com  ", null)).isEqualTo("al***e@example.com");
+        assertThat(AuthService.maskAccount(null, "  13800138000  ")).isEqualTo("138****8000");
+        assertThat(AuthService.maskAccount("al ice@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "138 00138000")).isEqualTo("***");
 
         // LoginRequest platform validation accepts web alongside android/ios/windows.
         try (var factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {

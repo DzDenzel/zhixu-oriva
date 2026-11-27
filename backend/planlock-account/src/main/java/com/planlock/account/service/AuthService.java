@@ -113,18 +113,33 @@ public class AuthService {
                 .build();
     }
 
+    /**
+     * 账号展示脱敏（REQ-041 R4）：
+     * <ol>
+     *   <li>先扫描原始未裁剪字符串：凡包含任意控制字符（含首尾 {@code \u0000}、{@code \t}、{@code \r}、{@code \n}）、
+     *       Unicode 格式控制符（{@code \p{Cf}}）、不换行空格或非 ASCII 空白，立即整体掩码为 {@code "***"}；</li>
+     *   <li>仅兼容剥离外层常规普通 ASCII 空格（{@code ' '}，U+0020），避免 {@link String#trim()} 误吞 {@code <= U+0020} 控制字符；</li>
+     *   <li>主体内部残留普通空格或格式畸形时同样整体回退为 {@code "***"}。</li>
+     * </ol>
+     */
     static String maskAccount(String email, String phone) {
-        if (email != null && !email.isBlank()) {
-            if (containsForbiddenInvisibleOrSpace(email.trim())) {
+        if (email != null && !email.isEmpty()) {
+            if (containsForbiddenRawControlOrNonAsciiSpace(email)) {
                 return "***";
             }
-            return maskEmail(email.trim());
+            String stripped = stripOuterAsciiSpaces(email);
+            if (!stripped.isEmpty()) {
+                return maskEmail(stripped);
+            }
         }
-        if (phone != null && !phone.isBlank()) {
-            if (containsForbiddenInvisibleOrSpace(phone.trim())) {
+        if (phone != null && !phone.isEmpty()) {
+            if (containsForbiddenRawControlOrNonAsciiSpace(phone)) {
                 return "***";
             }
-            return maskPhone(phone.trim());
+            String stripped = stripOuterAsciiSpaces(phone);
+            if (!stripped.isEmpty()) {
+                return maskPhone(stripped);
+            }
         }
         return null;
     }
@@ -179,20 +194,43 @@ public class AuthService {
         return digits.substring(0, 3) + "****" + digits.substring(digitLen - 4);
     }
 
-    private static boolean containsForbiddenInvisibleOrSpace(String value) {
+    private static boolean containsForbiddenRawControlOrNonAsciiSpace(String value) {
         return value.codePoints().anyMatch(cp -> {
-            if (Character.isISOControl(cp) || Character.isWhitespace(cp) || Character.isSpaceChar(cp)) {
-                return true;
+            if (cp == ' ') {
+                return false;
             }
-            int type = Character.getType(cp);
-            return type == Character.FORMAT
-                    || type == Character.CONTROL
-                    || type == Character.LINE_SEPARATOR
-                    || type == Character.PARAGRAPH_SEPARATOR
-                    || type == Character.SURROGATE
-                    || type == Character.PRIVATE_USE
-                    || type == Character.UNASSIGNED;
+            return isForbiddenCodePoint(cp);
         });
+    }
+
+    private static String stripOuterAsciiSpaces(String value) {
+        int start = 0;
+        int end = value.length();
+        while (start < end && value.charAt(start) == ' ') {
+            start++;
+        }
+        while (end > start && value.charAt(end - 1) == ' ') {
+            end--;
+        }
+        return value.substring(start, end);
+    }
+
+    private static boolean containsForbiddenInvisibleOrSpace(String value) {
+        return value.codePoints().anyMatch(AuthService::isForbiddenCodePoint);
+    }
+
+    private static boolean isForbiddenCodePoint(int cp) {
+        if (Character.isISOControl(cp) || Character.isWhitespace(cp) || Character.isSpaceChar(cp)) {
+            return true;
+        }
+        int type = Character.getType(cp);
+        return type == Character.FORMAT
+                || type == Character.CONTROL
+                || type == Character.LINE_SEPARATOR
+                || type == Character.PARAGRAPH_SEPARATOR
+                || type == Character.SURROGATE
+                || type == Character.PRIVATE_USE
+                || type == Character.UNASSIGNED;
     }
 
     private static boolean isSafeEmailDomain(String domain) {

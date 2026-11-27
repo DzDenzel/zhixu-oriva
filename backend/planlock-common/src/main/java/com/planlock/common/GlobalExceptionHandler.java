@@ -65,17 +65,17 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler({NoHandlerFoundException.class, NoResourceFoundException.class})
-    public ResponseEntity<ApiResponse<Void>> handleNotFound(Exception e, HttpServletRequest request) {
+    public ResponseEntity<?> handleNotFound(Exception e, HttpServletRequest request) {
         boolean apiPath = isApiUri(request);
         log.debug("resource not found: apiPath={}, exception={}, path={}", apiPath, e.getClass().getSimpleName(), currentPath());
         if (apiPath) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .cacheControl(CacheControl.noStore())
-                    .header("X-Content-Type-Options", "nosniff")
-                    .body(ApiResponse.error(ErrorCode.NOT_FOUND.getCode(), ErrorCode.NOT_FOUND.getDefaultMessage()));
+            return jsonResponse(HttpStatus.NOT_FOUND, ErrorCode.NOT_FOUND.getCode(), ErrorCode.NOT_FOUND.getDefaultMessage());
         }
-        return jsonResponse(HttpStatus.NOT_FOUND, ErrorCode.NOT_FOUND.getCode(), ErrorCode.NOT_FOUND.getDefaultMessage());
+        // REQ-041 R2a：非 /api/** 缺页与缺失静态资源返回约定普通 HTTP 404（不包装为 ApiResponse 1003 JSON 信封）
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .cacheControl(CacheControl.noStore())
+                .header("X-Content-Type-Options", "nosniff")
+                .build();
     }
 
     @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)

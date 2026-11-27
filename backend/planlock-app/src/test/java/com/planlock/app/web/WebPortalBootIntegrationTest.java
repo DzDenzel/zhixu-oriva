@@ -9,6 +9,7 @@ import com.planlock.common.auth.JwtUtil;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -19,6 +20,8 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -27,6 +30,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import javax.sql.DataSource;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,7 +45,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -74,6 +81,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "planlock.jwt.expire-minutes=60"
 })
 class WebPortalBootIntegrationTest {
+
+    @TempDir
+    static Path tempPluginsDir;
+
+    @DynamicPropertySource
+    static void registerPluginDir(DynamicPropertyRegistry registry) throws Exception {
+        Path officialDir = Files.createDirectories(tempPluginsDir.resolve("official"));
+        Files.writeString(officialDir.resolve("sample-1.0.0.plp"), "signed-artifact-bytes", StandardCharsets.UTF_8);
+        registry.add("planlock.plugins.directory", () -> tempPluginsDir.toAbsolutePath().toString());
+    }
 
     @TestConfiguration
     static class MockDataSourceConfig {
@@ -186,7 +203,7 @@ class WebPortalBootIntegrationTest {
             }
         }
 
-        // Unauthenticated JSON body requests to non-v1 or plugin unknown routes hit JsonBodyLimitFilter -> JSON 1001.
+        // R1a: Unauthenticated JSON body requests to non-v1 or plugin unknown routes return JSON 1001 + no-store + nosniff.
         for (String path : List.of("/api/v1/not-exists", "/api/unknown", "/api/v1/plugins/unknown")) {
             mvc.perform(post(path)
                             .contentType(MediaType.APPLICATION_JSON)
@@ -194,8 +211,39 @@ class WebPortalBootIntegrationTest {
                             .content("{\"probe\":true}"))
                     .andExpect(status().isOk())
                     .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(header().string("X-Content-Type-Options", "nosniff"))
                     .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()));
         }
+
+        // R1b: Unauthenticated non-JSON cross-method requests on protected endpoints are intercepted BEFORE 405 dispatch -> 200 JSON 1001 + no-store.
+        for (var req : List.of(
+                post("/api/v1/me"),
+                delete("/api/v1/me"),
+                put("/api/v1/me"),
+                patch("/api/v1/me"),
+                options("/api/v1/me"),
+                delete("/api/v1/not-exists"),
+                post("/api/unknown"),
+                delete("/api/v1/plugins/catalog/other"))) {
+            mvc.perform(req.header("Accept", "text/html"))
+                    .andExpect(status().isOk())
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                    .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()));
+        }
+
+        // R1b: Public artifact download existing -> 200 octet-stream, missing -> empty 404 (documented public artifact policy).
+        mvc.perform(get("/api/v1/plugins/artifacts/official/sample-1.0.0.plp"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_OCTET_STREAM))
+                .andExpect(content().string("signed-artifact-bytes"));
+        var missingArtifact = mvc.perform(get("/api/v1/plugins/artifacts/official/missing-artifact.plp"))
+                .andExpect(status().isNotFound())
+                .andReturn()
+                .getResponse();
+        assertThat(missingArtifact.getContentAsString(StandardCharsets.UTF_8)).isEmpty();
     }
 
     @Test
@@ -243,11 +291,14 @@ class WebPortalBootIntegrationTest {
                 .getResponse();
         assertThat(meOptions.getHeader("Allow")).contains("GET");
 
-        // R2: Authenticated unknown /api/** (v1, non-v1, unknown plugin paths) return deterministic 404 JSON 1003 + no-store.
+        // R2 & R2b: Authenticated unknown /api/** AND unsupported plugin catalog source return deterministic 404 JSON 1003 + no-store (never 500).
         for (String path : List.of(
                 "/api/v1/not-exists",
                 "/api/v1/me/unknown",
                 "/api/v1/plugins/unknown",
+                "/api/v1/plugins/catalog/other",
+                "/api/v1/plugins/catalog/unknown",
+                "/api/v1/plugins/catalog/official/extra",
                 "/api/unknown")) {
             for (String accept : accepts) {
                 var req = get(path).header("Authorization", "Bearer " + token);
@@ -263,6 +314,23 @@ class WebPortalBootIntegrationTest {
                         .andReturn()
                         .getResponse();
                 assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("<html", "<!doctype");
+            }
+        }
+
+        // R2a: Non-API missing pages & missing static assets return plain HTTP 404 + no-store + nosniff (NO ApiResponse 1003 JSON envelope).
+        for (String nonApiMissing : List.of("/no-such-page", "/setup-assets/missing.css")) {
+            for (String accept : List.of("", "text/html", "text/css", "application/json", "*/*")) {
+                var req = get(nonApiMissing);
+                if (!accept.isEmpty()) {
+                    req = req.header("Accept", accept);
+                }
+                var res = mvc.perform(req)
+                        .andExpect(status().isNotFound())
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                        .andReturn()
+                        .getResponse();
+                assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("\"code\":1003", "\"code\": 1003");
             }
         }
     }
@@ -287,9 +355,21 @@ class WebPortalBootIntegrationTest {
                     .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
         }
 
-        // Pending: HTML / text/* / */* / mixed q>0 accept HTML.
+        // Pending: HTML / text/* / */* / mixed q>0 / parameterized specificity overrides & RFC 9110 valid q=1. accept HTML.
         deploymentRow.put("initialized", false);
-        for (String accept : List.of("", "text/html", "text/*", "*/*", "application/json;q=0.9, text/html;q=0.5")) {
+        for (String accept : List.of(
+                "",
+                "text/html",
+                "text/html;charset=utf-8",
+                "text/html;charset=\"utf-8\"",
+                "text/html;q=1.",
+                "text/html;q=0, text/html;charset=utf-8;q=0.8",
+                "text/html;charset=iso-8859-1;q=0, text/html;q=0.8",
+                "text/*;q=0, text/*;charset=utf-8;q=0.8",
+                "*/*;q=0, */*;charset=utf-8;q=0.8",
+                "text/*",
+                "*/*",
+                "application/json;q=0.9, text/html;q=0.5")) {
             var req = get("/setup");
             if (!accept.isEmpty()) {
                 req = req.header("Accept", accept);
@@ -300,13 +380,22 @@ class WebPortalBootIntegrationTest {
                     .andExpect(header().string("Cache-Control", "no-store"));
         }
 
-        // R3: Explicit q=0 on text/html or text/* MUST NOT be overridden by broader */*, plus invalid q & JSON-only -> 406.
+        // R3: More specific parameterized q=0, non-matching wildcard params, RFC 9110 q=0., invalid q & JSON-only -> 406.
         for (String rejectedAccept : List.of(
                 "application/json",
                 "text/html;q=0, */*;q=0.8",
                 "text/*;q=0, */*;q=0.9",
+                "text/html;charset=utf-8;q=0, text/html;q=0.9",
+                "text/*;charset=utf-8;q=0, text/*;q=0.8",
+                "*/*;charset=utf-8;q=0, */*;q=0.8",
+                "text/html;charset=iso-8859-1",
+                "text/*;charset=iso-8859-1",
+                "*/*;foo=bar",
                 "text/html;q=0",
+                "text/html;q=0.",
+                "text/html;q=0., */*;q=0.8",
                 "text/html;q=1.5",
+                "text/html;q=0.1234",
                 "text/html;q=abc",
                 "invalid-media-type")) {
             mvc.perform(get("/setup").header("Accept", rejectedAccept))
@@ -315,13 +404,25 @@ class WebPortalBootIntegrationTest {
                     .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
         }
 
-        // R3: Duplicate Accept headers where exact text/html;q=0 conflicts with */* -> 406.
+        // R3: Duplicate Accept headers (both exact conflict -> 406, and more specific charset=utf-8 winning -> 200).
         mvc.perform(get("/setup")
                         .header("Accept", "text/html;q=0")
                         .header("Accept", "*/*"))
                 .andExpect(status().isNotAcceptable())
                 .andExpect(header().string("Cache-Control", "no-store"))
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
+        mvc.perform(get("/setup")
+                        .header("Accept", "text/html;charset=utf-8;q=0")
+                        .header("Accept", "text/html;q=0.9"))
+                .andExpect(status().isNotAcceptable())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
+        mvc.perform(get("/setup")
+                        .header("Accept", "text/html;q=0")
+                        .header("Accept", "text/html;charset=utf-8;q=0.6"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_HTML))
+                .andExpect(header().string("Cache-Control", "no-store"));
 
         // Portal explicit route with JSON-only Accept gets 406 JSON (never 500).
         deploymentRow.put("initialized", true);

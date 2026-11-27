@@ -385,6 +385,8 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
 
     private static void writeSafeJsonError(HttpServletResponse response, String body) throws IOException {
         response.setStatus(HttpServletResponse.SC_OK);
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("X-Content-Type-Options", "nosniff");
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
         response.getWriter().write(body);

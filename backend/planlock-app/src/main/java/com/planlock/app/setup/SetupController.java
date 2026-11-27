@@ -69,11 +69,14 @@ public class SetupController {
                 .body(Map.of("message","请求格式无效，请检查输入"));
     }
     /**
-     * 按 RFC 9110 §12.5.1 媒体类型最具体匹配优先级评估是否接受 {@code text/html}（REQ-041 R3）：
+     * 按 RFC 9110 §12.5.1 / §12.4.2 媒体类型与表示参数最具体匹配优先级评估是否接受 {@code text/html; charset=utf-8}（REQ-041 R3）：
      * <ul>
-     *   <li>精确匹配 {@code text/html}（Tier 3）优先于 {@code text/*}（Tier 2），{@code text/*} 优先于 {@code *&#47;*}（Tier 1）；</li>
-     *   <li>{@code text/html;q=0, *&#47;*;q=0.8} 或重复 Accept 头中显式 {@code q=0} 均禁止被通配掩盖；</li>
-     *   <li>任意无效语法或越界 {@code q} 权重均按 406 拒绝。</li>
+     *   <li>所有匹配层级均参与参数校验：{@code text/html}（基准 30）&gt; {@code text/*}（基准 20）&gt; {@code *&#47;*}（基准 10），
+     *       同层带有效表示参数（如 {@code charset=utf-8}）优先于无参同级范围（+1）；携带与 UTF-8 HTML 表示不符的参数则视为不匹配；</li>
+     *   <li>{@code text/html;q=0, *&#47;*;q=0.8}、{@code text/html;charset=utf-8;q=0, text/html;q=0.9} 或重复 Accept 头中同级显式 {@code q=0}
+     *       均禁止被较宽泛范围掩盖；</li>
+     *   <li>严格遵循 RFC 9110 §12.4.2 {@code qvalue = ("0" ["." 0*3DIGIT]) / ("1" ["." 0*3("0")])}，允许 {@code q=0.} / {@code q=1.}，
+     *       拒绝 {@code q=1.5} / {@code q=0.1234} / {@code q=abc} 等非法权重。</li>
      * </ul>
      */
     static boolean acceptsHtml(List<String> acceptHeaders) {
@@ -81,9 +84,9 @@ public class SetupController {
             return true;
         }
         boolean hasNonBlankHeader = false;
-        int bestTier = 0;
-        double bestQualityAtTier = 0.0;
-        boolean explicitZeroAtBestTier = false;
+        int bestSpecificity = 0;
+        double bestQualityAtBest = 0.0;
+        boolean explicitZeroAtBest = false;
 
         for (String header : acceptHeaders) {
             if (header == null || header.isBlank()) {
@@ -104,20 +107,20 @@ public class SetupController {
                 if (q == null) {
                     return false;
                 }
-                int tier = htmlMatchTier(mt);
-                if (tier == 0) {
+                int specificity = htmlMatchSpecificity(mt);
+                if (specificity == 0) {
                     continue;
                 }
-                if (tier > bestTier) {
-                    bestTier = tier;
-                    bestQualityAtTier = q;
-                    explicitZeroAtBestTier = (q == 0.0);
-                } else if (tier == bestTier) {
+                if (specificity > bestSpecificity) {
+                    bestSpecificity = specificity;
+                    bestQualityAtBest = q;
+                    explicitZeroAtBest = (q == 0.0);
+                } else if (specificity == bestSpecificity) {
                     if (q == 0.0) {
-                        explicitZeroAtBestTier = true;
+                        explicitZeroAtBest = true;
                     }
-                    if (q > bestQualityAtTier) {
-                        bestQualityAtTier = q;
+                    if (q > bestQualityAtBest) {
+                        bestQualityAtBest = q;
                     }
                 }
             }
@@ -125,31 +128,54 @@ public class SetupController {
         if (!hasNonBlankHeader) {
             return true;
         }
-        return bestTier > 0 && !explicitZeroAtBestTier && bestQualityAtTier > 0.0;
+        return bestSpecificity > 0 && !explicitZeroAtBest && bestQualityAtBest > 0.0;
     }
 
-    private static int htmlMatchTier(MediaType mt) {
+    private static int htmlMatchSpecificity(MediaType mt) {
         String type = mt.getType();
         String subtype = mt.getSubtype();
+        int baseTier;
         if ("text".equalsIgnoreCase(type) && "html".equalsIgnoreCase(subtype)) {
-            String charset = mt.getParameter("charset");
-            if (charset != null && !"utf-8".equalsIgnoreCase(charset.trim())) {
-                return 0;
+            baseTier = 3;
+        } else if ("text".equalsIgnoreCase(type) && mt.isWildcardSubtype()) {
+            baseTier = 2;
+        } else if (mt.isWildcardType() && mt.isWildcardSubtype()) {
+            baseTier = 1;
+        } else {
+            return 0;
+        }
+
+        // RFC 9110 §12.5.1：q 之前的参数均为媒体范围参数，须与实际表示 text/html; charset=utf-8 兼容；
+        // q 之后的 accept-ext 参数不参与媒体范围匹配。
+        int matchedParams = 0;
+        for (Map.Entry<String, String> entry : mt.getParameters().entrySet()) {
+            String key = entry.getKey();
+            if ("q".equalsIgnoreCase(key)) {
+                break;
             }
-            for (String paramKey : mt.getParameters().keySet()) {
-                if (!"q".equalsIgnoreCase(paramKey) && !"charset".equalsIgnoreCase(paramKey)) {
+            if ("charset".equalsIgnoreCase(key)) {
+                String normalizedCharset = unquoteParam(entry.getValue());
+                if (!"utf-8".equalsIgnoreCase(normalizedCharset)) {
                     return 0;
                 }
+                matchedParams++;
+            } else {
+                // 实际 UTF-8 HTML 表示仅声明 charset=utf-8，不具备其他媒体范围参数
+                return 0;
             }
-            return 3;
         }
-        if ("text".equalsIgnoreCase(type) && mt.isWildcardSubtype()) {
-            return 2;
+        return baseTier * 10 + matchedParams;
+    }
+
+    private static String unquoteParam(String raw) {
+        if (raw == null) {
+            return "";
         }
-        if (mt.isWildcardType() && mt.isWildcardSubtype()) {
-            return 1;
+        String trimmed = raw.trim();
+        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            return trimmed.substring(1, trimmed.length() - 1).trim();
         }
-        return 0;
+        return trimmed;
     }
 
     private static Double parseStrictQuality(MediaType mt) {
@@ -157,7 +183,7 @@ public class SetupController {
         if (rawQ == null) {
             return 1.0;
         }
-        if (!rawQ.matches("(?:0(?:\\.[0-9]{1,3})?|1(?:\\.0{1,3})?)")) {
+        if (!rawQ.matches("(?:0(?:\\.[0-9]{0,3})?|1(?:\\.0{0,3})?)")) {
             return null;
         }
         try {
