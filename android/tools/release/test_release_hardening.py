@@ -101,6 +101,60 @@ class T1MavenAndArchiveTests(unittest.TestCase):
                 with self.assertRaises(r.ReleaseError, msg=nested_entry):
                     r.audit_archive(z)
 
+        # Malicious directory entries (outer & nested) must be rejected before is_dir() skip
+        for bad_dir in (
+            "zhixu-oriva-2.2.0/../bad/",
+            "zhixu-oriva-2.2.0/android/build/",
+            "zhixu-oriva-2.2.0/sub\\dir/",
+            "/abs/",
+            "C:/Windows/",
+        ):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                z.writestr(bad_dir.replace("\\", "/"), b"")
+                z.writestr("zhixu-oriva-2.2.0/README.md", b"ok")
+            raw = buf.getvalue()
+            if "\\" in bad_dir:
+                raw = raw.replace(bad_dir.replace("\\", "/").encode("ascii"), bad_dir.encode("ascii"))
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                with self.assertRaises(r.ReleaseError, msg=bad_dir):
+                    r.audit_archive(z)
+
+        for bad_nested_dir in ("../bad/", "sub\\dir/", "/abs/", "build/"):
+            inner = io.BytesIO()
+            with zipfile.ZipFile(inner, "w") as iz:
+                iz.writestr(bad_nested_dir.replace("\\", "/"), b"")
+            inner_bytes = inner.getvalue()
+            if "\\" in bad_nested_dir:
+                inner_bytes = inner_bytes.replace(bad_nested_dir.replace("\\", "/").encode("ascii"), bad_nested_dir.encode("ascii"))
+            outer = io.BytesIO()
+            with zipfile.ZipFile(outer, "w") as oz:
+                oz.writestr("zhixu-oriva-2.2.0/deploy/nested-dir.zip", inner_bytes)
+            with zipfile.ZipFile(io.BytesIO(outer.getvalue())) as z:
+                with self.assertRaises(r.ReleaseError, msg=bad_nested_dir):
+                    r.audit_archive(z)
+
+        # Valid directory entries inside public boundary + nested ZIP must be allowed and files counted accurately
+        valid_buf = io.BytesIO()
+        inner_ok = io.BytesIO()
+        with zipfile.ZipFile(inner_ok, "w") as iz:
+            iz.writestr("ok-dir/", b"")
+            iz.writestr("ok-dir/plugin.json", b"{}")
+        with zipfile.ZipFile(valid_buf, "w") as z:
+            for d in (
+                "zhixu-oriva-2.2.0/",
+                "zhixu-oriva-2.2.0/docs/",
+                "zhixu-oriva-2.2.0/docs/screenshots/",
+                "zhixu-oriva-2.2.0/.github/",
+                "zhixu-oriva-2.2.0/.github/workflows/",
+                "zhixu-oriva-2.2.0/android/",
+            ):
+                z.writestr(d, b"")
+            z.writestr("zhixu-oriva-2.2.0/docs/screenshots/today-ink.png", b"PNG")
+            z.writestr("zhixu-oriva-2.2.0/deploy/ok.zip", inner_ok.getvalue())
+        with zipfile.ZipFile(io.BytesIO(valid_buf.getvalue())) as z:
+            self.assertEqual(r.audit_archive(z), 2)
+
 
 class R1R2R3PublishAndProcessTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -195,6 +249,31 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
                 r.publish(self.root, plan, args, os.environ.copy())
         self.git("config", "--unset", "url.https://evil.example.org/.insteadOf")
 
+        # 6. Missing origin must hard fail (no silent fallback)
+        self.git("remote", "remove", "origin")
+        with self.assertRaises(r.ReleaseError):
+            r.publish(self.root, plan, args, os.environ.copy())
+
+        # 7. Mixed SSH fetch + HTTPS pushurl forbidden in explicit SSH mode
+        self.git("remote", "add", "origin", "git@github.com:owner/repo.git")
+        self.git("remote", "set-url", "--push", "origin", "https://github.com/owner/repo.git")
+        ssh_args = SimpleNamespace(repo="owner/repo", notes=str(notes), push_protocol="ssh", git_timeout=120, upload_timeout=900)
+        with self.assertRaisesRegex(r.ReleaseError, "forbids non-SSH push URL"):
+            r.publish(self.root, plan, ssh_args, os.environ.copy())
+
+        # 8. URL-specific http.<url>.* priority overrides must be rejected cleanly
+        self.git("remote", "set-url", "--push", "origin", "https://github.com/owner/repo.git")
+        for cfg_key, cfg_val, err_pat in (
+            ("http.https://github.com.sslVerify", "false", "TLS verification downgrade"),
+            ("http.https://github.com.followRedirects", "true", "HTTP redirect rule"),
+            ("http.https://github.com.extraHeader", "Authorization: Bearer leak", "undeclared HTTP header"),
+            ("credential.https://github.com.helper", "store", "credential helper"),
+        ):
+            self.git("config", cfg_key, cfg_val)
+            with self.assertRaisesRegex(r.ReleaseError, err_pat, msg=cfg_key):
+                r.publish(self.root, plan, args, os.environ.copy())
+            self.git("config", "--unset", cfg_key)
+
     def _find_posix_sh(self) -> str:
         if os.name != "nt":
             return "/bin/sh"
@@ -230,26 +309,29 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
                     self.assertTrue(sh_raw.startswith(b"#!/bin/sh\n"))
                     self.assertNotIn(b"\r\n", sh_raw)
                     sh_exe = self._find_posix_sh()
-                    u = subprocess.check_output([sh_exe, str(helper), "Username for 'https://github.com': "], env=git_env, text=True).strip()
-                    p = subprocess.check_output([sh_exe, str(helper), "Password for 'https://x-access-token@github.com': "], env=git_env, text=True).strip()
-                    p_repo = subprocess.check_output([sh_exe, str(helper), "Password for 'https://github.com/owner/repo.git': "], env=git_env, text=True).strip()
+                    u = subprocess.check_output([sh_exe, str(helper), "Username for 'https://github.com/owner/repo.git': "], env=git_env, text=True).strip()
+                    p = subprocess.check_output([sh_exe, str(helper), "Password for 'https://x-access-token@github.com/owner/repo.git': "], env=git_env, text=True).strip()
+                    p_repo = subprocess.check_output([sh_exe, str(helper), "Password for 'https://github.com/owner/repo': "], env=git_env, text=True).strip()
                 else:
-                    u = subprocess.check_output([str(helper), "Username for 'https://github.com': "], env=git_env, text=True).strip()
-                    p = subprocess.check_output([str(helper), "Password for 'https://x-access-token@github.com': "], env=git_env, text=True).strip()
-                    p_repo = subprocess.check_output([str(helper), "Password for 'https://github.com/owner/repo.git': "], env=git_env, text=True).strip()
+                    u = subprocess.check_output([str(helper), "Username for 'https://github.com/owner/repo.git': "], env=git_env, text=True).strip()
+                    p = subprocess.check_output([str(helper), "Password for 'https://x-access-token@github.com/owner/repo.git': "], env=git_env, text=True).strip()
+                    p_repo = subprocess.check_output([str(helper), "Password for 'https://github.com/owner/repo': "], env=git_env, text=True).strip()
                 self.assertEqual(u, "x-access-token")
                 self.assertEqual(p, token_val)
                 self.assertEqual(p_repo, token_val)
 
-                # Non-target hosts, HTTP, custom ports, wrong repo path, wrong user, trailing text, and unknown prompts must FAIL
+                # Non-target hosts, bare root '/', empty path, HTTP, custom ports, wrong repo path, wrong user, trailing text must FAIL
                 for bad_prompt in (
-                    "Username for 'https://evil.example.org': ",
-                    "Password for 'http://x-access-token@github.com': ",
-                    "Password for 'https://x-access-token@github.com:8443': ",
-                    "Password for 'https://other-user@github.com': ",
+                    "Username for 'https://github.com': ",
+                    "Password for 'https://x-access-token@github.com': ",
+                    "Password for 'https://x-access-token@github.com/': ",
+                    "Username for 'https://evil.example.org/owner/repo.git': ",
+                    "Password for 'http://x-access-token@github.com/owner/repo.git': ",
+                    "Password for 'https://x-access-token@github.com:8443/owner/repo.git': ",
+                    "Password for 'https://other-user@github.com/owner/repo.git': ",
                     "Password for 'https://x-access-token@github.com/other/repo.git': ",
-                    "Username for 'https://github.com' extra",
-                    "Password for 'https://x-access-token@github.com?x=1': ",
+                    "Username for 'https://github.com/owner/repo.git' extra",
+                    "Password for 'https://x-access-token@github.com/owner/repo.git?x=1': ",
                     "Enter passphrase for key: ",
                 ):
                     proc = subprocess.run([sys.executable, str(py_file), bad_prompt], env=git_env, capture_output=True, text=True)
@@ -257,10 +339,99 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
 
             self.assertFalse((special_base / "ak").exists())
 
+        # Real git process over TLS + useHttpPath triggers generated GIT_ASKPASS (and anonymous=True strips it!)
+        import http.server, ssl as _ssl, threading
+        sh_path = Path(self._find_posix_sh()).resolve()
+        openssl_candidates = [
+            sh_path.with_name("openssl.exe" if os.name == "nt" else "openssl"),
+            sh_path.parents[1] / "usr" / "bin" / ("openssl.exe" if os.name == "nt" else "openssl"),
+            sh_path.parents[1] / "mingw64" / "bin" / ("openssl.exe" if os.name == "nt" else "openssl"),
+        ]
+        found_which = r.shutil.which("openssl")
+        if found_which:
+            openssl_candidates.append(Path(found_which))
+        openssl_bin = next((c for c in openssl_candidates if c.is_file()), None)
+        if openssl_bin is None:
+            self.fail(f"Expected openssl binary near {sh_path}")
+        cert_pem = self.root / "local-https.crt"
+        key_pem = self.root / "local-https.key"
+        subprocess.run(
+            [
+                str(openssl_bin), "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+                "-keyout", str(key_pem), "-out", str(cert_pem),
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20,
+        )
+
+        auth_seen = []
+        class RealGitAuthServer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                auth = self.headers.get("Authorization")
+                if auth:
+                    auth_seen.append((self.path, auth))
+                    self.send_response(403)
+                    self.end_headers()
+                else:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="Git"')
+                    self.end_headers()
+            def log_message(self, *args): pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RealGitAuthServer)
+        ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
+        srv.socket = ssl_ctx.wrap_socket(srv.socket, server_side=True)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            with r.git_askpass_env(
+                os.environ.copy(), token_val, expected_host="127.0.0.1", expected_user="x-access-token", expected_repo="owner/repo", expected_port=port,
+            ) as ask_env:
+                # 1. release.git with anonymous=False preserves controlled GIT_ASKPASS and sends token only for /owner/repo.git
+                with self.assertRaises(r.ReleaseError):
+                    r.git(
+                        self.root,
+                        "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
+                        "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
+                        "ls-remote", f"https://127.0.0.1:{port}/owner/repo.git",
+                        timeout=15, env=ask_env, anonymous=False,
+                    )
+                self.assertEqual(len(auth_seen), 1)
+                self.assertTrue(auth_seen[0][0].startswith("/owner/repo.git/"))
+                expected_basic = "Basic " + base64.b64encode(f"x-access-token:{token_val}".encode("utf8")).decode("ascii")
+                self.assertEqual(auth_seen[0][1], expected_basic)
+
+                # 2. Mismatched repo path is blocked by askpass BEFORE sending token
+                auth_seen.clear()
+                with self.assertRaises(r.ReleaseError):
+                    r.git(
+                        self.root,
+                        "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
+                        "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
+                        "ls-remote", f"https://127.0.0.1:{port}/other/repo.git",
+                        timeout=15, env=ask_env, anonymous=False,
+                    )
+                self.assertEqual(auth_seen, [])
+
+                # 3. anonymous=True strips controlled GIT_ASKPASS and sends no credentials
+                with self.assertRaises(r.ReleaseError):
+                    r.git(
+                        self.root,
+                        "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
+                        "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
+                        "ls-remote", f"https://127.0.0.1:{port}/owner/repo.git",
+                        timeout=15, env=ask_env, anonymous=True,
+                    )
+                self.assertEqual(auth_seen, [])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
         # Cleanup failure must surface visibly AND redact token
         with patch.object(r.shutil, "rmtree", side_effect=PermissionError(f"locked {token_val}")):
             with self.assertRaises(r.ReleaseError) as ctx:
-                with r.git_askpass_env(os.environ.copy(), token_val):
+                with r.git_askpass_env(os.environ.copy(), token_val, expected_repo="owner/repo"):
                     pass
             self.assertIn("Failed to remove temporary GIT_ASKPASS", str(ctx.exception))
             self.assertNotIn(token_val, str(ctx.exception))
@@ -281,31 +452,48 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
             "SSH_ASKPASS": "/evil/ssh_askpass",
         }
         cleaned = r.sanitize_git_env(dirty, empty_gitconfig_path="/tmp/empty.cfg")
-        self.assertEqual(cleaned["GIT_TRACE"], "0")
-        self.assertEqual(cleaned["GIT_TRACE_CURL"], "0")
-        self.assertEqual(cleaned["GIT_CURL_VERBOSE"], "0")
         self.assertEqual(cleaned["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(cleaned["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(cleaned["GIT_CONFIG_GLOBAL"], "/tmp/empty.cfg")
-        for forbidden in ("GIT_SSL_NO_VERIFY", "GIT_TRACE2_PERF", "GCM_INTERACTIVE", "GIT_CREDENTIAL_HELPER", "GIT_CONFIG_PARAMETERS", "GIT_ASKPASS", "SSH_ASKPASS"):
+        for forbidden in ("GIT_TRACE", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE", "GIT_SSL_NO_VERIFY", "GIT_TRACE2_PERF", "GCM_INTERACTIVE", "GIT_CREDENTIAL_HELPER", "GIT_CONFIG_PARAMETERS", "GIT_ASKPASS", "SSH_ASKPASS"):
             self.assertNotIn(forbidden, cleaned)
 
-        secret = "synthetic-secret-token-999"
+        secret = "synthetic/secret+tok=999"
         b64_auth = base64.b64encode(("x-access-token:" + secret).encode("utf8")).decode("ascii")
+        pct_upper = r.urllib.parse.quote(secret, safe="")
+        pct_lower = r.re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), pct_upper) if hasattr(r, "re") else pct_upper.replace("%2F", "%2f").replace("%2B", "%2b").replace("%3D", "%3d")
         log = self.root / "leak.log"
         env = os.environ.copy()
-        env["ORIVA_GIT_TOKEN"] = secret
+        env["CUSTOM_CHILD_SECRET"] = secret
         with self.assertRaises(r.ReleaseError):
             r.execute(
-                [sys.executable, "-c", f"import sys; sys.stderr.write('tok={secret} Authorization: Basic {b64_auth} https://tok@github.com/o/r?X-Amz-Signature=sigsecret\\n'); sys.exit(2)"],
+                [sys.executable, "-c", (
+                    f"import sys; sys.stderr.write('raw={secret} pct1={pct_upper} pct2={pct_lower} "
+                    f"Authorization: Bearer {secret} Authorization: Basic {b64_auth} "
+                    f"HTTPS://tok@github.com/o/r?X-Amz-Signature=sigsecret#fragsecret "
+                    f"https://github.com/o/r#onlyfrag\\n'); sys.exit(2)"
+                )],
                 self.root, env, log,
             )
         log_text = log.read_text(encoding="utf8")
-        self.assertNotIn(secret, log_text)
-        self.assertNotIn(b64_auth, log_text)
-        self.assertNotIn("sigsecret", log_text)
-        self.assertNotIn("tok@", log_text)
+        for leaked in (secret, b64_auth, pct_upper, pct_lower, "sigsecret", "fragsecret", "onlyfrag", "tok@"):
+            self.assertNotIn(leaked, log_text)
         self.assertIn("[REDACTED]", log_text)
+
+        # archive_source must route via controlled git runner & redact stderr/error messages
+        with patch.object(r, "_run_bounded_subprocess", return_value=(False, 1, b"", f"fatal token={secret}".encode("utf8"), [])):
+            with self.assertRaises(r.ReleaseError) as arch_ctx:
+                with patch.dict(os.environ, {"CUSTOM_CHILD_SECRET": secret}):
+                    r.archive_source(self.root, "HEAD", "2.2.0", self.root / "out.zip")
+            self.assertNotIn(secret, str(arch_ctx.exception))
+
+        # isolated_git_env cleanup failure must surface diagnostic visibly (not ignore_errors=True)
+        with patch.object(r.shutil, "rmtree", side_effect=PermissionError(f"locked {secret}")):
+            with self.assertRaises(r.ReleaseError) as iso_ctx:
+                with r.isolated_git_env({"ORIVA_GIT_TOKEN": secret}):
+                    pass
+            self.assertIn("Failed to remove temporary isolated Git config", str(iso_ctx.exception))
+            self.assertNotIn(secret, str(iso_ctx.exception))
 
     @unittest.skipUnless(r.os.name == "nt", "Windows CMD delayed expansion guard")
     def test_r3_windows_batch_disables_delayed_expansion_for_bang_paths(self) -> None:
@@ -345,21 +533,37 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 os.kill(child_pid, 0)
 
-        # Verify termination diagnostic warning is surfaced (never silently swallowed) when tree termination fails
+        # Verify termination failure + exited parent + pipe-holding grandchild combination does NOT deadlock on close()
         diag_log = self.root / "tree-diag.log"
-        if os.name == "nt":
-            with patch.object(r, "_create_windows_job_for_process", return_value=(None, "simulated-job-attach-failure")):
-                with patch.object(r.subprocess, "run", side_effect=OSError("simulated taskkill failure")):
+        surv_pid_file = self.root / "survivor.pid"
+        surv_code = (
+            "import subprocess, sys\n"
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])\n"
+            f"open({json.dumps(str(surv_pid_file))}, 'w').write(str(p.pid))\n"
+        )
+        t_combo0 = time.monotonic()
+        try:
+            with patch.object(r, "_terminate_process_tree", return_value=["simulated tree termination failure"]):
+                with patch.object(r, "PIPE_DRAIN_TIMEOUT_SECONDS", 0.3):
                     with self.assertRaisesRegex(r.ReleaseError, "timed out"):
-                        r.execute([sys.executable, "-c", "import time; time.sleep(5)"], self.root, env, diag_log, timeout=0.3)
-            self.assertIn("TREE_CLEANUP_DIAG", diag_log.read_text(encoding="utf8"))
-        else:
-            with patch.object(r.os, "killpg", side_effect=PermissionError("simulated EPERM")):
-                with self.assertRaisesRegex(r.ReleaseError, "timed out"):
-                    r.execute([sys.executable, "-c", "import time; time.sleep(5)"], self.root, env, diag_log, timeout=0.3)
-            self.assertIn("TREE_CLEANUP_DIAG", diag_log.read_text(encoding="utf8"))
+                        r.execute([sys.executable, "-c", surv_code], self.root, env, diag_log, timeout=0.3)
+            self.assertLess(time.monotonic() - t_combo0, 4.0)
+            diag_text = diag_log.read_text(encoding="utf8")
+            self.assertIn("TREE_CLEANUP_DIAG", diag_text)
+            self.assertIn("detached daemon pipe reader", diag_text)
+        finally:
+            if surv_pid_file.exists():
+                surv_pid = int(surv_pid_file.read_text(encoding="utf8"))
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/PID", str(surv_pid)], capture_output=True)
+                else:
+                    try:
+                        os.kill(surv_pid, 9)
+                    except OSError:
+                        pass
 
     def test_r1_publish_https_origin_routes_via_askpass_and_disables_redirects(self) -> None:
+        self.git("remote", "add", "origin", "https://github.com/owner/repo.git")
         plan = r.make_plan(self.root)
         head, notes = self._prepare_packaged_assets(plan)
         secret_token = "synthetic-release-token-secret"
@@ -368,12 +572,15 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
 
         original_git = r.git
 
-        def fake_git(root, *items, timeout=None, env=None):
+        def fake_git(root, *items, timeout=None, env=None, anonymous=False):
             if items == ("remote", "get-url", "origin"):
                 return "https://github.com/owner/repo.git"
             if "ls-remote" in items:
+                self.assertFalse(anonymous)
                 self.assertIn("http.followRedirects=false", items)
-                self.assertIn("GIT_ASKPASS", env or {})
+                self.assertIn("credential.useHttpPath=true", items)
+                cleaned = r.sanitize_git_env(env or {}, empty_gitconfig_path=env.get("GIT_CONFIG_GLOBAL"), allow_controlled_askpass=True)
+                self.assertIn("GIT_ASKPASS", cleaned)
                 return ""
             return original_git(root, *items)
 
@@ -384,6 +591,7 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
             elif "push" in cmd:
                 self.assertIn("http.followRedirects=false", cmd)
                 self.assertIn("credential.helper=", cmd)
+                self.assertIn("credential.useHttpPath=true", cmd)
                 self.assertIn("https://github.com/owner/repo.git", cmd)
                 self.assertIn("GIT_ASKPASS", exec_env)
             return ""
@@ -422,6 +630,9 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
             r.publish(self.root, plan, args, os.environ.copy())
 
         self.assertTrue(any("http.followRedirects=false" in c for c in seen_cmds))
+        pub_evidence = json.loads((Path(plan["evidence"]) / "github-published-release.json").read_text(encoding="utf8"))
+        self.assertEqual(set(pub_evidence.keys()), {"id", "tag_name", "target_commitish", "draft", "html_url", "assets"})
+        self.assertNotIn("upload_url", pub_evidence)
 
 
 class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
@@ -520,14 +731,35 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
             ({"Content-Range": f"bytes {split_at}-{len(payload)-1}/{len(payload)}"}, [payload[split_at:-10]]),
         ):
             t_bad = self.root / "bad_cr.apk"
+            bad_url = "https://github.com/o/r/releases/download/v2.2.0/bad_cr.apk"
             t_bad.with_name("bad_cr.apk.part").write_bytes(payload[:split_at])
+            r.write_json(
+                t_bad.with_name("bad_cr.apk.part.meta.json"),
+                {"url": r.sanitize_url_for_log(bad_url), "expectedSize": len(payload), "expectedSha256": expected_sha},
+            )
             opener_bad = SimpleNamespace(open=lambda req, timeout=None, h=bad_hdr, c=body_chunks: Resp(206, c, h))
             with self.assertRaises(r.ReleaseError):
                 r.download_asset(
-                    "https://github.com/o/r/releases/download/v2.2.0/bad_cr.apk",
+                    bad_url,
                     t_bad, expected_size=len(payload), expected_sha256=expected_sha, opener=opener_bad, sleep_fn=lambda _: None,
                 )
             self.assertFalse(t_bad.exists())
+
+        # 2b. Unprovenanced or mismatched-source .part must be discarded and restarted cleanly from offset 0
+        t_orphan = self.root / "orphan.apk"
+        t_orphan.with_name("orphan.apk.part").write_bytes(payload[:split_at])
+        seen_orphan_ranges = []
+        def _open_orphan(req, timeout=None):
+            seen_orphan_ranges.append(req.headers.get("Range"))
+            return Resp(200, [payload], {"Content-Length": str(len(payload))})
+        r.download_asset(
+            "https://github.com/o/r/releases/download/v2.2.0/orphan.apk",
+            t_orphan, expected_size=len(payload), expected_sha256=expected_sha,
+            opener=SimpleNamespace(open=_open_orphan), sleep_fn=lambda _: None,
+        )
+        self.assertEqual(seen_orphan_ranges, [None])
+        self.assertEqual(t_orphan.read_bytes(), payload)
+        self.assertFalse(t_orphan.with_name("orphan.apk.part.meta.json").exists())
 
         # 3. Short EOF and oversized stream must NOT promote .part
         t_short = self.root / "short.apk"
@@ -563,10 +795,12 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
         self.assertEqual(remote_hits["n"], 1)
         self.assertEqual(t_stale.read_bytes(), payload)
 
-        # 5. Real multi-hop redirect + blocking socket read shares total_timeout=1.0 deadline and interrupts during read()
+        # 5. Real multi-hop redirect + blocking socket read AND continuous trickle stream + MAX_REDIRECTS > 10 enforcement
         import http.server, threading
+        visited_paths = []
         class RedirectThenStallHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                visited_paths.append(self.path)
                 if self.path == "/hop1":
                     time.sleep(0.35)
                     self.send_response(302)
@@ -577,6 +811,25 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
                     self.send_response(302)
                     self.send_header("Location", "/final?X-Amz-Signature=ok")
                     self.end_headers()
+                elif self.path.startswith("/chain/"):
+                    hop_n = int(self.path.split("/")[-1])
+                    if hop_n <= 12:
+                        self.send_response(302)
+                        self.send_header("Location", f"/chain/{hop_n + 1}")
+                        self.end_headers()
+                    else:
+                        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+                elif self.path == "/trickle":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "40")
+                    self.end_headers()
+                    for _ in range(40):
+                        try:
+                            self.wfile.write(b"x")
+                            self.wfile.flush()
+                            time.sleep(0.15)
+                        except OSError:
+                            break
                 else:
                     self.send_response(200)
                     self.send_header("Content-Length", "10")
@@ -591,10 +844,12 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
         t_srv = threading.Thread(target=httpd.serve_forever, daemon=True)
         t_srv.start()
         t_deadline = self.root / "deadline.apk"
+        t_trickle = self.root / "trickle.apk"
+        t_redir = self.root / "toomany.apk"
         try:
             with patch.object(r, "require_https_url", return_value=None):
                 t0 = time.monotonic()
-                with self.assertRaises(r.ReleaseError):
+                with self.assertRaisesRegex(r.ReleaseError, "data read"):
                     r.download_asset(
                         f"http://127.0.0.1:{port}/hop1",
                         t_deadline, expected_size=10,
@@ -602,8 +857,31 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
                         download_timeout=5, total_timeout=1.0, sleep_fn=lambda _: None,
                     )
                 elapsed = time.monotonic() - t0
-            self.assertLess(elapsed, 2.2)
-            self.assertFalse(t_deadline.exists())
+                self.assertIn("/final?X-Amz-Signature=ok", visited_paths)
+                self.assertLess(elapsed, 2.2)
+                self.assertFalse(t_deadline.exists())
+
+                # Continuous trickle stream (0.15s/byte * 40 bytes = 6s) MUST be cut off at ~0.8s total_timeout!
+                t1 = time.monotonic()
+                with self.assertRaisesRegex(r.ReleaseError, "total timeout|timed out|read|closed|socket"):
+                    r.download_asset(
+                        f"http://127.0.0.1:{port}/trickle",
+                        t_trickle, expected_size=40,
+                        expected_sha256=hashlib.sha256(b"x" * 40).hexdigest().upper(),
+                        download_timeout=5, total_timeout=0.8, sleep_fn=lambda _: None,
+                    )
+                trickle_elapsed = time.monotonic() - t1
+                self.assertLess(trickle_elapsed, 2.2)
+                self.assertFalse(t_trickle.exists())
+
+                # >10 redirects must fail cleanly with Too many redirects (HTTP 302)
+                with self.assertRaisesRegex(r.ReleaseError, "HTTP 302"):
+                    r.download_asset(
+                        f"http://127.0.0.1:{port}/chain/1",
+                        t_redir, expected_size=2,
+                        expected_sha256=hashlib.sha256(b"ok").hexdigest().upper(),
+                        download_timeout=5, total_timeout=5.0, sleep_fn=lambda _: None,
+                    )
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -688,9 +966,27 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
             def __exit__(self, *a): pass
 
         seen_git_args: list[tuple] = []
-        def _checking_git(root, *gargs, timeout=None, env=None):
-            seen_git_args.append((gargs, env))
+        def _checking_git(root, *gargs, timeout=None, env=None, anonymous=False):
+            seen_git_args.append((gargs, env, anonymous))
             return f"{commit}\trefs/tags/{plan['tag']}"
+
+        # Local .git/config rewrites or extraHeader must fail verify() BEFORE anonymous ls-remote runs!
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for bad_cfg_k, bad_cfg_v, pat in (
+            ("url.https://evil.example.org/.insteadOf", "https://github.com/", "rewrite rule"),
+            ("http.https://github.com.sslVerify", "false", "TLS verification downgrade"),
+            ("http.https://github.com.followRedirects", "true", "HTTP redirect rule"),
+            ("http.https://github.com.extraHeader", "Authorization: Bearer leak", "undeclared HTTP header"),
+        ):
+            subprocess.run(["git", "config", bad_cfg_k, bad_cfg_v], cwd=self.root, check=True)
+            with (
+                patch.object(r.urllib.request, "build_opener", return_value=SimpleNamespace(open=lambda req, timeout=None: FakeMetaResp(json.dumps(release_payload).encode("utf8")))),
+                patch.object(r, "git", _checking_git),
+            ):
+                with self.assertRaisesRegex(r.ReleaseError, pat):
+                    r.verify(self.root, plan, args, {})
+            self.assertEqual(seen_git_args, [])
+            subprocess.run(["git", "config", "--unset", bad_cfg_k], cwd=self.root, check=True)
 
         with (
             patch.object(r.urllib.request, "build_opener", return_value=SimpleNamespace(open=lambda req, timeout=None: FakeMetaResp(json.dumps(release_payload).encode("utf8")))),
@@ -698,7 +994,7 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
         ):
             r.verify(self.root, plan, args, {})
 
-        self.assertTrue(any("core.askPass=" in gargs and "http.sslVerify=true" in gargs and "credential.helper=" in gargs for gargs, _ in seen_git_args))
+        self.assertTrue(any(anon and "core.askPass=" in gargs and "http.sslVerify=true" in gargs and "credential.helper=" in gargs for gargs, _, anon in seen_git_args))
         report = json.loads(stale_report.read_text(encoding="utf8"))
         self.assertEqual(report["verifyMode"], "api-digest")
         self.assertFalse(report["downloadVerified"])

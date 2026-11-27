@@ -2,7 +2,7 @@
 """Repeatable local releases. No clone unless verify --clone-check is selected."""
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-import argparse, base64, ctypes, hashlib, http.client, inspect, io, json, os, re, shlex, shutil, signal, socket, ssl, struct, subprocess, sys, tempfile, time
+import argparse, base64, ctypes, hashlib, http.client, inspect, io, json, os, re, shlex, shutil, signal, socket, ssl, struct, subprocess, sys, tempfile, threading, time
 import urllib.error, urllib.parse, urllib.request, zipfile
 
 ALLOWED_DOWNLOAD_HOSTS = frozenset({
@@ -30,6 +30,11 @@ PIPE_DRAIN_TIMEOUT_SECONDS = 3
 CONTENT_RANGE_RE = re.compile(r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$', re.IGNORECASE)
 
 _REGISTERED_SECRETS: set[str] = set()
+_CONTROLLED_ASKPASS_TOKENS: dict[str, str] = {}
+_EXPLICIT_SECRET_KEYS = frozenset({'github_token', 'GITHUB_TOKEN', 'ORIVA_GIT_TOKEN', 'ORIVA_RELEASE_STOREPASS'})
+_SECRET_KEY_MARKERS = ('TOKEN', 'SECRET', 'PASSWORD', 'STOREPASS', 'KEYPASS', 'CREDENTIAL', 'API_KEY')
+_WIN_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_WIN_CREATE_SUSPENDED = 0x00000004
 
 
 class ReleaseError(RuntimeError): pass
@@ -47,21 +52,44 @@ def register_secret(secret):
         _REGISTERED_SECRETS.add(str(secret))
 
 
+def _extract_secrets_from_env(env_map):
+    found = []
+    if not env_map:
+        return ()
+    for key, val in env_map.items():
+        if not val:
+            continue
+        upper = str(key).upper()
+        sval = str(val)
+        if key in _EXPLICIT_SECRET_KEYS and len(sval) >= 4:
+            found.append(sval)
+            register_secret(sval)
+        elif any(marker in upper for marker in _SECRET_KEY_MARKERS) and len(sval) >= 6:
+            found.append(sval)
+            register_secret(sval)
+    return tuple(found)
+
+
+def _percent_variants(val):
+    out = set()
+    for encoded in (urllib.parse.quote(val, safe=''), urllib.parse.quote_plus(val)):
+        if encoded and encoded != val:
+            out.add(encoded)
+            lowered_hex = re.sub(r'%[0-9A-F]{2}', lambda m: m.group(0).lower(), encoded)
+            out.add(lowered_hex)
+    return out
+
+
 def _collect_active_secrets(extra_secrets=()):
     values = set(_REGISTERED_SECRETS)
     for item in extra_secrets:
         if item: values.add(str(item))
-    explicit_keys = {'github_token', 'GITHUB_TOKEN', 'ORIVA_GIT_TOKEN', 'ORIVA_RELEASE_STOREPASS'}
-    secret_key_markers = ('TOKEN', 'SECRET', 'PASSWORD', 'STOREPASS', 'KEYPASS', 'CREDENTIAL', 'API_KEY')
-    for key, val in os.environ.items():
-        if not val:
-            continue
-        upper = key.upper()
-        if key in explicit_keys or (any(marker in upper for marker in secret_key_markers) and len(val) >= 6):
-            values.add(val)
+    for item in _extract_secrets_from_env(os.environ):
+        values.add(item)
     expanded = set(values)
     for val in values:
         expanded.add(base64.b64encode(('x-access-token:' + val).encode('utf8')).decode('ascii'))
+        expanded.update(_percent_variants(val))
     return tuple(sorted((v for v in expanded if v), key=len, reverse=True))
 
 
@@ -73,11 +101,12 @@ def redact_secrets(text, extra_secrets=()):
         cleaned = cleaned.replace(secret, '[REDACTED]')
     cleaned = re.sub(r'(?i)(Authorization\s*:\s*)(?:Bearer|Basic|token)\s+\S+', r'\1[REDACTED]', cleaned)
     cleaned = re.sub(r'(?i)((?:https?|ssh|jdbc:mysql)://)[^\s/@]+@', r'\1[REDACTED]@', cleaned)
-    cleaned = re.sub(r'(https?://[^\s\'"<>?#]+)\?[^\s\'"<>#]*', r'\1?[REDACTED]', cleaned)
+    cleaned = re.sub(r'(?i)(https?://[^\s\'"<>?#]+)\?[^\s\'"<>#]*(?:#[^\s\'"<>]*)?', r'\1?[REDACTED]', cleaned)
+    cleaned = re.sub(r'(?i)(https?://[^\s\'"<>?#]+)#[^\s\'"<>]*', r'\1#[REDACTED]', cleaned)
     return cleaned
 
 
-def sanitize_git_env(base_env, empty_gitconfig_path=None):
+def sanitize_git_env(base_env, empty_gitconfig_path=None, allow_controlled_askpass=False):
     clean = {}
     for key, val in base_env.items():
         upper = key.upper()
@@ -94,28 +123,69 @@ def sanitize_git_env(base_env, empty_gitconfig_path=None):
         ):
             continue
         clean[key] = val
-    clean['GIT_TRACE'] = '0'
-    clean['GIT_TRACE2'] = '0'
-    clean['GIT_TRACE_CURL'] = '0'
-    clean['GIT_CURL_VERBOSE'] = '0'
     clean['GIT_TERMINAL_PROMPT'] = '0'
     clean['GIT_CONFIG_NOSYSTEM'] = '1'
     if empty_gitconfig_path is not None:
         clean['GIT_CONFIG_GLOBAL'] = str(empty_gitconfig_path)
+    if allow_controlled_askpass:
+        candidate_askpass = base_env.get('GIT_ASKPASS')
+        expected_cfg = _CONTROLLED_ASKPASS_TOKENS.get(candidate_askpass)
+        if candidate_askpass and expected_cfg is not None and str(clean.get('GIT_CONFIG_GLOBAL', '')) == expected_cfg:
+            clean['GIT_ASKPASS'] = candidate_askpass
+            for k in ('ORIVA_GIT_TOKEN', 'ORIVA_GIT_EXPECTED_HOST', 'ORIVA_GIT_EXPECTED_USER', 'ORIVA_GIT_EXPECTED_REPO', 'ORIVA_GIT_EXPECTED_PORT'):
+                if k in base_env:
+                    clean[k] = base_env[k]
     return clean
 
 
+def _remove_temp_dir_with_diag(path_obj, label, extra_secrets=(), raise_on_failure=True):
+    cleanup_error = None
+    for attempt in range(3):
+        try:
+            if path_obj.exists():
+                shutil.rmtree(path_obj)
+            cleanup_error = None
+            break
+        except OSError as exc:
+            cleanup_error = exc
+            time.sleep(0.05 * (attempt + 1))
+    if cleanup_error is not None:
+        msg = redact_secrets(f'Failed to remove temporary {label} {path_obj}: {cleanup_error}', extra_secrets)
+        print('WARNING:', msg, file=sys.stderr)
+        if raise_on_failure:
+            raise ReleaseError(msg) from cleanup_error
+
+
 @contextmanager
-def isolated_git_env(base_env=None):
+def isolated_git_env(base_env=None, anonymous=False):
     cfg_dir = Path(tempfile.mkdtemp(prefix='oriva-git-cfg-'))
+    in_body_exception = False
+    raw_env = base_env if base_env is not None else os.environ
+    extra_secrets = _extract_secrets_from_env(raw_env)
     try:
         if os.name != 'nt':
             cfg_dir.chmod(0o700)
         empty_cfg = cfg_dir / 'empty.gitconfig'
         empty_cfg.write_bytes(b'')
-        yield sanitize_git_env(base_env if base_env is not None else os.environ, empty_gitconfig_path=empty_cfg)
+        try:
+            yield sanitize_git_env(raw_env, empty_gitconfig_path=empty_cfg, allow_controlled_askpass=not anonymous)
+        except BaseException:
+            in_body_exception = True
+            raise
     finally:
-        shutil.rmtree(cfg_dir, ignore_errors=True)
+        _remove_temp_dir_with_diag(cfg_dir, 'isolated Git config directory', extra_secrets=extra_secrets, raise_on_failure=not in_body_exception)
+
+
+class _WinThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ('dwSize', ctypes.c_uint32),
+        ('cntUsage', ctypes.c_uint32),
+        ('th32ThreadID', ctypes.c_uint32),
+        ('th32OwnerProcessID', ctypes.c_uint32),
+        ('tpBasePri', ctypes.c_long),
+        ('tpDeltaPri', ctypes.c_long),
+        ('dwFlags', ctypes.c_uint32),
+    ]
 
 
 def _create_windows_job_for_process(proc):
@@ -143,6 +213,47 @@ def _create_windows_job_for_process(proc):
         return (k32, job), None
     except Exception as exc:
         return None, f'Windows job setup failed: {exc}'
+
+
+def _resume_windows_process_threads(pid):
+    import ctypes.wintypes as wt
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    k32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    k32.Thread32First.argtypes = [wt.HANDLE, ctypes.POINTER(_WinThreadEntry32)]
+    k32.Thread32First.restype = wt.BOOL
+    k32.Thread32Next.argtypes = [wt.HANDLE, ctypes.POINTER(_WinThreadEntry32)]
+    k32.Thread32Next.restype = wt.BOOL
+    k32.OpenThread.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    k32.OpenThread.restype = wt.HANDLE
+    k32.ResumeThread.argtypes = [wt.HANDLE]
+    k32.ResumeThread.restype = wt.DWORD
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.CloseHandle.restype = wt.BOOL
+
+    snap = k32.CreateToolhelp32Snapshot(0x00000004, 0)
+    if not snap or snap == wt.HANDLE(-1).value:
+        return f'CreateToolhelp32Snapshot failed (winerr={ctypes.get_last_error()})'
+    resumed = 0
+    try:
+        te = _WinThreadEntry32(dwSize=ctypes.sizeof(_WinThreadEntry32))
+        if k32.Thread32First(snap, ctypes.byref(te)):
+            while True:
+                if te.th32OwnerProcessID == pid:
+                    th = k32.OpenThread(0x0002, False, te.th32ThreadID)
+                    if th:
+                        try:
+                            if k32.ResumeThread(th) != 0xFFFFFFFF:
+                                resumed += 1
+                        finally:
+                            k32.CloseHandle(th)
+                if not k32.Thread32Next(snap, ctypes.byref(te)):
+                    break
+    finally:
+        k32.CloseHandle(snap)
+    if resumed == 0:
+        return f'No suspended threads resumed for pid {pid}'
+    return None
 
 
 def _close_windows_job(job_info):
@@ -204,24 +315,124 @@ def _terminate_process_tree(proc, job_info=None, attach_diag=None):
     return diags
 
 
-def _drain_after_termination(proc, drain_timeout=PIPE_DRAIN_TIMEOUT_SECONDS):
+class _PipeCollector:
+    """Non-blocking daemon collector avoiding BufferedReader.close() deadlocks."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.chunks = []
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        fd = self.stream.fileno()
+        while True:
+            try:
+                data = os.read(fd, 8192)
+            except OSError:
+                break
+            if not data:
+                break
+            self.chunks.append(data)
+
+    def join(self, timeout):
+        self._thread.join(timeout=timeout)
+        return not self._thread.is_alive()
+
+    def data(self):
+        return b''.join(list(self.chunks))
+
+
+def _drain_after_termination(proc, collectors, drain_timeout=PIPE_DRAIN_TIMEOUT_SECONDS):
     diags = []
+    deadline = time.monotonic() + drain_timeout
+    all_drained = True
+    for collector in collectors:
+        if collector is None:
+            continue
+        rem = max(0.0, deadline - time.monotonic())
+        if not collector.join(rem):
+            all_drained = False
+    if not all_drained:
+        # Never call buffered .close() from main thread: daemon os.read holds pipe read until writer exits.
+        diags.append(f'pipe drain timed out after {drain_timeout}s; detached daemon pipe reader to avoid stream lock deadlock')
     try:
-        out_b, err_b = proc.communicate(timeout=drain_timeout)
-        return out_b, err_b, diags
+        proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        diags.append(f'pipe drain timed out after {drain_timeout}s; closing inherited pipes')
+        diags.append('process did not finalize within 1s after tree termination')
+    out_b = collectors[0].data() if len(collectors) >= 1 and collectors[0] is not None else b''
+    err_b = collectors[1].data() if len(collectors) >= 2 and collectors[1] is not None else b''
+    return out_b, err_b, diags
+
+
+def _run_bounded_subprocess(actual_cmd, cwd, env, stderr_target, timeout=None, shell=False, extra_secrets=(), drain_timeout=PIPE_DRAIN_TIMEOUT_SECONDS):
+    popen_kwargs = dict(
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=stderr_target,
+        shell=shell,
+    )
+    suspended_spawn = False
+    if os.name == 'nt':
+        popen_kwargs['creationflags'] = _WIN_CREATE_NEW_PROCESS_GROUP | _WIN_CREATE_SUSPENDED
+        suspended_spawn = True
+    else:
+        popen_kwargs['start_new_session'] = True
+
+    proc = subprocess.Popen(actual_cmd, **popen_kwargs)
+    job_info, attach_diag = _create_windows_job_for_process(proc)
+    if suspended_spawn:
+        if job_info is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            _close_windows_job(job_info)
+            raise ReleaseError(redact_secrets(f'Failed to attach Windows Job Object before resume: {attach_diag}', extra_secrets))
+        resume_diag = _resume_windows_process_threads(proc.pid)
+        if resume_diag is not None:
+            _terminate_process_tree(proc, job_info=job_info)
+            _close_windows_job(job_info)
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            raise ReleaseError(redact_secrets(f'Failed to resume suspended process after Job bind: {resume_diag}', extra_secrets))
+
+    out_collector = _PipeCollector(proc.stdout)
+    err_collector = _PipeCollector(proc.stderr) if stderr_target == subprocess.PIPE else None
+    collectors = (out_collector, err_collector)
+    end_deadline = None if timeout is None else (time.monotonic() + timeout)
+    try:
+        try:
+            proc.wait(timeout=timeout)
+            for collector in collectors:
+                if collector is None:
+                    continue
+                if end_deadline is None:
+                    collector.join(None)
+                else:
+                    rem = max(0.0, end_deadline - time.monotonic())
+                    if not collector.join(rem):
+                        raise subprocess.TimeoutExpired(actual_cmd, timeout)
+            return False, proc.returncode, out_collector.data(), (err_collector.data() if err_collector else b''), []
+        except subprocess.TimeoutExpired:
+            tree_diags = _terminate_process_tree(proc, job_info=job_info, attach_diag=attach_diag)
+            out_b, err_b, drain_diags = _drain_after_termination(proc, collectors, drain_timeout=drain_timeout)
+            return True, proc.returncode, out_b, err_b, tree_diags + drain_diags
+    finally:
+        _close_windows_job(job_info)
         for stream in (proc.stdout, proc.stderr):
             if stream is not None:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            diags.append('process did not finalize within 1s after pipe closure')
-        return b'', b'', diags
+                # Only close if no collector thread is still blocked in os.read
+                collector = out_collector if stream is proc.stdout else err_collector
+                if collector is not None and not collector._thread.is_alive():
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
 
 
 def _decode_bytes(raw):
@@ -233,74 +444,58 @@ def _decode_bytes(raw):
         return raw.decode('gb18030', errors='replace')
 
 
-def _ensure_isolated_env(env):
-    if env is None:
-        return None
-    if 'GIT_CONFIG_GLOBAL' in env and env.get('GIT_CONFIG_NOSYSTEM') == '1' and 'GIT_SSL_NO_VERIFY' not in env:
-        return env
-    return sanitize_git_env(env)
-
-
-def git(root, *args, timeout=None, env=None):
+def _run_git_raw(root, *args, timeout=None, env=None, anonymous=False):
     @contextmanager
     def _env_ctx():
         if env is None:
-            with isolated_git_env(os.environ) as iso_env:
+            with isolated_git_env(os.environ, anonymous=anonymous) as iso_env:
                 yield iso_env
         elif 'GIT_CONFIG_GLOBAL' not in env:
-            with isolated_git_env(env) as iso_env:
+            with isolated_git_env(env, anonymous=anonymous) as iso_env:
                 yield iso_env
         else:
-            yield sanitize_git_env(env, empty_gitconfig_path=env['GIT_CONFIG_GLOBAL'])
+            yield sanitize_git_env(
+                env,
+                empty_gitconfig_path=env['GIT_CONFIG_GLOBAL'],
+                allow_controlled_askpass=not anonymous,
+            )
 
-    popen_kwargs = dict(
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if os.name == 'nt':
-        popen_kwargs['creationflags'] = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
-    else:
-        popen_kwargs['start_new_session'] = True
-
+    effective_timeout = timeout if timeout is not None else DEFAULT_GIT_TIMEOUT_SECONDS
     with _env_ctx() as effective_env:
-        extra_secrets = (
-            effective_env.get('ORIVA_GIT_TOKEN'),
-            effective_env.get('GITHUB_TOKEN'),
-            effective_env.get('github_token'),
+        extra_secrets = _extract_secrets_from_env(effective_env)
+        timed_out, rc, out_b, err_b, diags = _run_bounded_subprocess(
+            ['git', *args],
+            cwd=root,
+            env=effective_env,
+            stderr_target=subprocess.PIPE,
+            timeout=effective_timeout,
+            extra_secrets=extra_secrets,
         )
-        for s in extra_secrets:
-            register_secret(s)
-        popen_kwargs['env'] = effective_env
-        proc = subprocess.Popen(['git', *args], **popen_kwargs)
-        job_info, attach_diag = _create_windows_job_for_process(proc)
-        try:
-            try:
-                out_b, err_b = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                tree_diags = _terminate_process_tree(proc, job_info=job_info, attach_diag=attach_diag)
-                _, _, drain_diags = _drain_after_termination(proc)
-                all_diags = tree_diags + drain_diags
-                diag_note = f' ({"; ".join(all_diags)})' if all_diags else ''
-                cmd = args[0] if args else 'git'
-                raise ReleaseError(redact_secrets(f'git {cmd} timed out after {timeout}s{diag_note}', extra_secrets)) from None
-        finally:
-            _close_windows_job(job_info)
+        if timed_out:
+            diag_note = f' ({"; ".join(diags)})' if diags else ''
+            cmd = args[0] if args else 'git'
+            raise ReleaseError(redact_secrets(f'git {cmd} timed out after {effective_timeout}s{diag_note}', extra_secrets))
+        return rc, out_b, err_b, extra_secrets
 
+
+def git(root, *args, timeout=None, env=None, anonymous=False):
+    rc, out_b, err_b, extra_secrets = _run_git_raw(root, *args, timeout=timeout, env=env, anonymous=anonymous)
     out = redact_secrets(_decode_bytes(out_b), extra_secrets)
     err = redact_secrets(_decode_bytes(err_b), extra_secrets)
-    if proc.returncode != 0:
-        raise ReleaseError(f'git {args[0] if args else ""} failed ({proc.returncode}): {err.strip() or out.strip()}')
+    if rc != 0:
+        raise ReleaseError(f'git {args[0] if args else ""} failed ({rc}): {err.strip() or out.strip()}')
     return out.strip()
 
 
-def _call_git(root, *args, timeout=None, env=None):
+def _call_git(root, *args, timeout=None, env=None, anonymous=False):
     params = inspect.signature(git).parameters
     kwargs = {}
     if timeout is not None and 'timeout' in params:
         kwargs['timeout'] = timeout
     if env is not None and 'env' in params:
         kwargs['env'] = env
+    if anonymous and 'anonymous' in params:
+        kwargs['anonymous'] = anonymous
     return git(root, *args, **kwargs)
 
 
@@ -364,46 +559,50 @@ def write_json_atomic(path, data):
             tmp.unlink(missing_ok=True)
 
 
+@contextmanager
+def _execution_env_ctx(args, env):
+    is_git_cmd = bool(args) and Path(str(args[0])).stem.lower() == 'git'
+    if not is_git_cmd:
+        yield env
+        return
+    if 'GIT_CONFIG_GLOBAL' not in env:
+        with isolated_git_env(env, anonymous=False) as iso_env:
+            yield iso_env
+    else:
+        yield sanitize_git_env(
+            env,
+            empty_gitconfig_path=env['GIT_CONFIG_GLOBAL'],
+            allow_controlled_askpass=True,
+        )
+
+
 def execute(args, cwd, env, logfile=None, timeout=None):
     actual = list(map(str, args))
     shell = False
     if os.name == 'nt' and str(args[0]).lower().endswith(('.bat', '.cmd')):
         need(not any(any(c in arg for c in '"\r\n%') for arg in actual), 'Unsupported quote/newline/percent in batch argument')
         actual = 'cmd.exe /d /v:off /s /c "' + ' '.join('"' + arg + '"' for arg in actual) + '"'
-    popen_kwargs = dict(
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        shell=shell,
-    )
-    if os.name == 'nt':
-        popen_kwargs['creationflags'] = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
-    else:
-        popen_kwargs['start_new_session'] = True
 
-    secrets = (env.get('ORIVA_GIT_TOKEN'), env.get('GITHUB_TOKEN'), env.get('github_token'), env.get('ORIVA_RELEASE_STOREPASS'))
-    for s in secrets:
-        register_secret(s)
-    proc = subprocess.Popen(actual, **popen_kwargs)
-    job_info, attach_diag = _create_windows_job_for_process(proc)
-    try:
-        try:
-            raw, _ = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            tree_diags = _terminate_process_tree(proc, job_info=job_info, attach_diag=attach_diag)
-            raw, _, drain_diags = _drain_after_termination(proc)
-            all_diags = tree_diags + drain_diags
+    secrets = _extract_secrets_from_env(env)
+    with _execution_env_ctx(args, env) as effective_env:
+        timed_out, rc, raw, _, all_diags = _run_bounded_subprocess(
+            actual,
+            cwd=cwd,
+            env=effective_env,
+            stderr_target=subprocess.STDOUT,
+            timeout=timeout,
+            shell=shell,
+            extra_secrets=secrets,
+        )
+        if timed_out:
             diag_line = f'[TREE_CLEANUP_DIAG: {"; ".join(all_diags)}]\n' if all_diags else ''
             output = redact_secrets(_decode_bytes(raw), secrets) + f'\n[TIMEOUT after {timeout}s]\n' + redact_secrets(diag_line, secrets)
             if logfile: Path(logfile).write_text(output, encoding='utf8')
-            raise ReleaseError(f'Command timed out after {timeout}s ({Path(str(args[0])).name}); see {logfile or "terminal"}') from None
-    finally:
-        _close_windows_job(job_info)
+            raise ReleaseError(f'Command timed out after {timeout}s ({Path(str(args[0])).name}); see {logfile or "terminal"}')
 
     output = redact_secrets(_decode_bytes(raw), secrets)
     if logfile: Path(logfile).write_text(output, encoding='utf8')
-    need(proc.returncode == 0, f'Command failed ({Path(str(args[0])).name}); see {logfile or "terminal"}')
+    need(rc == 0, f'Command failed ({Path(str(args[0])).name}); see {logfile or "terminal"}')
     return output
 
 
@@ -415,6 +614,7 @@ def _call_execute(args, cwd, env, logfile=None, timeout=None):
 
 
 def audit_archive(z):
+    """Audit public source archive and supported PK-prefixed nested ZIPs (including directory paths)."""
     forbidden = {
         'build', 'target', '.gradle', '.gradle-home', '.android-home', '.cxx', '.git',
         '.secrets', '.plugin-signing', '.m2', 'node_modules', 'work', 'Obsidian', '__pycache__',
@@ -431,7 +631,7 @@ def audit_archive(z):
         rb'(?i)(?:https?|jdbc:mysql)://[^\s/:]+:[^\s/@]+@',
     ]
 
-    def validate_member_rel(raw_name, parsed_rel, full_label, orig_name=None):
+    def validate_member_rel(raw_name, parsed_rel, full_label, orig_name=None, is_dir=False):
         orig = raw_name if orig_name is None else orig_name
         need(
             bool(raw_name)
@@ -445,11 +645,15 @@ def audit_archive(z):
             and not re.match(r'^[A-Za-z]:', orig),
             'Unsafe or absolute archive path: ' + full_label,
         )
+        raw_segs = [seg for seg in raw_name.split('/') if seg]
+        orig_segs = [seg for seg in orig.split('/') if seg]
         need(
             '..' not in parsed_rel.parts
+            and '..' not in raw_segs
+            and '..' not in orig_segs
             and not parsed_rel.is_absolute()
             and not forbidden_lower.intersection(p.lower() for p in parsed_rel.parts)
-            and parsed_rel.suffix.lower() not in forbidden_suffixes
+            and (is_dir or parsed_rel.suffix.lower() not in forbidden_suffixes)
             and not parsed_rel.name.lower().startswith('.env')
             and parsed_rel.name.lower() != 'local.properties',
             'Private/unsafe archive member: ' + full_label,
@@ -457,25 +661,43 @@ def audit_archive(z):
 
     def scan(data, label, depth=0):
         need(not any(re.search(p, data) for p in secret_patterns), 'Sensitive content found: '+label)
+        # Recursive nested archive auditing explicitly covers ZIP payloads (PK-prefixed headers).
         if data[:2] == b'PK':
             need(depth < 4, 'Nested archive requires manual review: '+label)
             with zipfile.ZipFile(io.BytesIO(data)) as nested:
                 for item in nested.infolist():
-                    if item.is_dir(): continue
-                    nested_path = PurePosixPath(item.filename)
+                    raw_nested = item.filename.rstrip('/') if item.is_dir() else item.filename
+                    nested_path = PurePosixPath(raw_nested) if raw_nested else PurePosixPath('.')
                     validate_member_rel(
                         item.filename, nested_path, label + '!' + item.filename,
                         orig_name=getattr(item, 'orig_filename', item.filename),
+                        is_dir=item.is_dir(),
                     )
+                    if item.is_dir():
+                        continue
                     need(item.file_size <= 50_000_000, 'Large archive member requires review: '+label)
                     scan(nested.read(item), label+'!'+item.filename, depth+1)
+
     count = 0
+    readme_screenshots = {'docs/screenshots/today-ink.png', 'docs/screenshots/today-atlas.png', 'docs/screenshots/today-phosphor.png'}
+    allowed_dirs = {'docs', 'docs/screenshots', '.github', '.github/workflows'}
     for item in z.infolist():
-        if item.is_dir(): continue
-        path = PurePosixPath(item.filename); rel = PurePosixPath(*path.parts[1:]); count += 1
-        readme_screenshots = {'docs/screenshots/today-ink.png', 'docs/screenshots/today-atlas.png', 'docs/screenshots/today-phosphor.png'}
+        normalized = item.filename.rstrip('/') if item.is_dir() else item.filename
+        path = PurePosixPath(normalized) if normalized else PurePosixPath('.')
+        orig = getattr(item, 'orig_filename', item.filename)
+        if item.is_dir() and len(path.parts) <= 1 and '..' not in path.parts:
+            validate_member_rel(item.filename, path, str(item.filename), orig_name=orig, is_dir=True)
+            continue
+        rel = PurePosixPath(*path.parts[1:]) if len(path.parts) >= 2 else path
+        validate_member_rel(item.filename, rel, str(rel), orig_name=orig, is_dir=item.is_dir())
+        if item.is_dir():
+            need(
+                rel.as_posix() in allowed_dirs or rel.parts[0] in {'android', 'backend', 'deploy'},
+                'Outside public boundary: ' + str(rel),
+            )
+            continue
+        count += 1
         need(rel.as_posix() in {'README.md','LICENSE','.gitignore'} | readme_screenshots or rel.parts[0] in {'android','backend','deploy'} or rel.parts[:2] == ('.github','workflows'), 'Outside public boundary: '+str(rel))
-        validate_member_rel(item.filename, rel, str(rel), orig_name=getattr(item, 'orig_filename', item.filename))
         data = z.read(item); scan(data, str(rel))
         if rel.suffix.lower() in {'.yml','.yaml'}:
             for match in re.finditer(rb'(?im)^\s*(?:password|secret|token)\s*:\s*([^\r\n#]+)', data):
@@ -490,8 +712,11 @@ def audit_archive(z):
 
 
 def archive_source(root, commit, name, output):
-    with isolated_git_env(os.environ) as iso_env:
-        subprocess.run(['git','-c','core.autocrlf=false','archive','--format=zip','--prefix=zhixu-oriva-'+name+'/', '--output='+str(output),commit],cwd=root,env=iso_env,check=True)
+    git(
+        root, '-c', 'core.autocrlf=false', 'archive', '--format=zip',
+        '--prefix=zhixu-oriva-'+name+'/', '--output='+str(output), commit,
+        timeout=DEFAULT_GIT_TIMEOUT_SECONDS, anonymous=True,
+    )
     with zipfile.ZipFile(output) as z: return audit_archive(z)
 
 
@@ -574,9 +799,10 @@ def check_remote_tag(refs, tag, commit):
 def sanitize_url_for_log(url):
     try:
         parsed = urllib.parse.urlsplit(str(url))
-        host = parsed.hostname or ''
+        scheme = (parsed.scheme or '').lower()
+        host = (parsed.hostname or '').lower()
         port_part = f':{parsed.port}' if parsed.port is not None else ''
-        return f'{parsed.scheme}://{host}{port_part}{parsed.path}'
+        return redact_secrets(f'{scheme}://{host}{port_part}{parsed.path}')
     except ValueError:
         return '<malformed-url>'
 
@@ -744,15 +970,24 @@ expected_host = os.environ.get("ORIVA_GIT_EXPECTED_HOST", "github.com").lower()
 expected_user = os.environ.get("ORIVA_GIT_EXPECTED_USER", "x-access-token")
 expected_repo = os.environ.get("ORIVA_GIT_EXPECTED_REPO", "").strip("/")
 try:
+    expected_port = int(os.environ.get("ORIVA_GIT_EXPECTED_PORT", "443"))
+except ValueError:
+    sys.stderr.write("Invalid ORIVA_GIT_EXPECTED_PORT\\n")
+    sys.exit(1)
+if not expected_repo:
+    sys.stderr.write("Missing ORIVA_GIT_EXPECTED_REPO\\n")
+    sys.exit(1)
+try:
     port = parsed.port
 except ValueError:
     sys.stderr.write("Refused GIT_ASKPASS malformed port\\n")
     sys.exit(1)
 
+allowed_ports = (None, 443) if expected_port == 443 else (expected_port,)
 if (
     parsed.scheme.lower() != "https"
     or (parsed.hostname or "").lower() != expected_host
-    or port not in (None, 443)
+    or port not in allowed_ports
     or parsed.query != ""
     or parsed.fragment != ""
     or parsed.password is not None
@@ -760,9 +995,7 @@ if (
     sys.stderr.write("Refused GIT_ASKPASS request for unexpected origin\\n")
     sys.exit(1)
 
-allowed_paths = {"", "/"}
-if expected_repo:
-    allowed_paths.update({f"/{expected_repo}", f"/{expected_repo}.git"})
+allowed_paths = {f"/{expected_repo}", f"/{expected_repo}.git"}
 if parsed.path not in allowed_paths:
     sys.stderr.write("Refused GIT_ASKPASS request for unexpected repository path\\n")
     sys.exit(1)
@@ -785,11 +1018,15 @@ elif kind == "Password":
 
 
 @contextmanager
-def git_askpass_env(base_env, token, expected_host='github.com', expected_user='x-access-token', expected_repo=''):
+def git_askpass_env(base_env, token, expected_host='github.com', expected_user='x-access-token', expected_repo='', expected_port=443):
     need(token, 'Set github_token or GITHUB_TOKEN for HTTPS git operation')
+    need(isinstance(expected_port, int) and 1 <= expected_port <= 65535, 'Invalid expected_port')
+    normalized_repo = (expected_repo or '').strip('/')
+    need(bool(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', normalized_repo)), 'Repository context required for controlled GIT_ASKPASS')
     register_secret(token)
     askpass_dir = Path(tempfile.mkdtemp(prefix='oriva-git-askpass-'))
     in_body_exception = False
+    helper_str = None
     try:
         if os.name != 'nt':
             askpass_dir.chmod(0o700)
@@ -809,34 +1046,23 @@ def git_askpass_env(base_env, token, expected_host='github.com', expected_user='
             helper_str = helper.as_posix()
         else:
             helper_str = str(py_script)
-        git_env = sanitize_git_env(base_env, empty_gitconfig_path=empty_cfg)
+        _CONTROLLED_ASKPASS_TOKENS[helper_str] = str(empty_cfg)
+        git_env = sanitize_git_env(base_env, empty_gitconfig_path=empty_cfg, allow_controlled_askpass=False)
         git_env['GIT_ASKPASS'] = helper_str
         git_env['ORIVA_GIT_TOKEN'] = token
         git_env['ORIVA_GIT_EXPECTED_HOST'] = expected_host
         git_env['ORIVA_GIT_EXPECTED_USER'] = expected_user
-        if expected_repo:
-            git_env['ORIVA_GIT_EXPECTED_REPO'] = expected_repo
+        git_env['ORIVA_GIT_EXPECTED_REPO'] = normalized_repo
+        git_env['ORIVA_GIT_EXPECTED_PORT'] = str(expected_port)
         try:
             yield git_env
         except BaseException:
             in_body_exception = True
             raise
     finally:
-        cleanup_error = None
-        for attempt in range(3):
-            try:
-                if askpass_dir.exists():
-                    shutil.rmtree(askpass_dir)
-                cleanup_error = None
-                break
-            except OSError as exc:
-                cleanup_error = exc
-                time.sleep(0.1 * (attempt + 1))
-        if cleanup_error is not None:
-            msg = redact_secrets(f'Failed to remove temporary GIT_ASKPASS directory {askpass_dir}: {cleanup_error}', (token,))
-            print('WARNING:', msg, file=sys.stderr)
-            if not in_body_exception:
-                raise ReleaseError(msg) from cleanup_error
+        if helper_str is not None:
+            _CONTROLLED_ASKPASS_TOKENS.pop(helper_str, None)
+        _remove_temp_dir_with_diag(askpass_dir, 'GIT_ASKPASS directory', extra_secrets=(token,), raise_on_failure=not in_body_exception)
 
 
 def _parse_refs(output):
@@ -848,42 +1074,55 @@ def _parse_refs(output):
     return refs
 
 
-def _verify_origin_push_urls(root, repo, allowed_remotes, git_env):
-    cfg_probe = subprocess.run(
-        ['git', 'config', '--list', '-z'],
-        cwd=root, env=git_env, capture_output=True,
+def _audit_repo_git_config(root, git_env, timeout=DEFAULT_GIT_TIMEOUT_SECONDS):
+    rc, cfg_out_b, cfg_err_b, extra_secrets = _run_git_raw(
+        root, 'config', '--list', '-z', timeout=timeout, env=git_env, anonymous=True,
     )
-    need(cfg_probe.returncode == 0, f'Cannot inspect isolated git config: {redact_secrets(_decode_bytes(cfg_probe.stderr))}')
-    for raw_entry in cfg_probe.stdout.split(b'\x00'):
+    need(rc == 0, f'Cannot inspect isolated git config: {redact_secrets(_decode_bytes(cfg_err_b), extra_secrets)}')
+    for raw_entry in cfg_out_b.split(b'\x00'):
         if not raw_entry:
             continue
         entry = _decode_bytes(raw_entry)
         key, _, val = entry.partition('\n')
         low_key = key.lower()
         if low_key.endswith('.insteadof') or low_key.endswith('.pushinsteadof'):
-            raise ReleaseError(f'Git URL rewrite rule ({key}) is forbidden during release')
+            raise ReleaseError(f'Git URL rewrite rule ({key}) is forbidden')
         if low_key == 'http.sslverify' or (low_key.startswith('http.') and low_key.endswith('.sslverify')):
-            if val.strip().lower() in {'false', '0', 'no', 'off'}:
-                raise ReleaseError(f'Git TLS verification downgrade ({key}={val}) is forbidden during release')
+            if val.strip().lower() not in {'true', '1', 'yes', 'on'}:
+                raise ReleaseError(f'Git TLS verification downgrade ({key}={val}) is forbidden')
+        if low_key == 'http.followredirects' or (low_key.startswith('http.') and low_key.endswith('.followredirects')):
+            if val.strip().lower() not in {'false', '0', 'no', 'off'}:
+                raise ReleaseError(f'Git HTTP redirect rule ({key}={val}) is forbidden')
+        if low_key == 'http.extraheader' or (low_key.startswith('http.') and low_key.endswith('.extraheader')):
+            raise ReleaseError(f'Git undeclared HTTP header ({key}) is forbidden')
+        if low_key.startswith('credential.') and low_key != 'credential.usehttppath' and low_key.endswith('.helper'):
+            raise ReleaseError(f'Git URL-scoped credential helper ({key}) is forbidden')
 
-    origin_probe = subprocess.run(
-        ['git', 'config', '--get-all', 'remote.origin.url'],
-        cwd=root, env=git_env, capture_output=True, text=True,
+
+def _verify_origin_push_urls(root, repo, allowed_remotes, git_env, timeout=DEFAULT_GIT_TIMEOUT_SECONDS, ssh_mode=False):
+    _audit_repo_git_config(root, git_env, timeout=timeout)
+
+    rc_org, out_org_b, err_org_b, org_secrets = _run_git_raw(
+        root, 'config', '--get-all', 'remote.origin.url', timeout=timeout, env=git_env, anonymous=True,
     )
-    if origin_probe.returncode == 1 and not origin_probe.stdout.strip() and not origin_probe.stderr.strip():
-        return  # Synthetic/mocked git environment without real .git/config remote.
-    need(
-        origin_probe.returncode == 0,
-        f'Cannot inspect remote.origin.url: {redact_secrets(origin_probe.stderr.strip())}',
+    need(rc_org == 0, f'Cannot inspect remote.origin.url: {redact_secrets(_decode_bytes(err_org_b).strip(), org_secrets)}')
+    fetch_urls = [line.strip() for line in _decode_bytes(out_org_b).splitlines() if line.strip()]
+    need(len(fetch_urls) == 1, f'origin must have exactly one fetch URL, found {len(fetch_urls)}')
+    need(fetch_urls[0] in allowed_remotes, f'origin URL does not match {repo}: {sanitize_url_for_log(fetch_urls[0])}')
+
+    rc_push, out_push_b, err_push_b, push_secrets = _run_git_raw(
+        root, 'remote', 'get-url', '--push', '--all', 'origin', timeout=timeout, env=git_env, anonymous=True,
     )
-    push_probe = subprocess.run(
-        ['git', 'remote', 'get-url', '--push', '--all', 'origin'],
-        cwd=root, env=git_env, capture_output=True, text=True,
-    )
-    need(push_probe.returncode == 0, f'Cannot inspect origin push URLs: {redact_secrets(push_probe.stderr.strip())}')
-    push_urls = [line.strip() for line in push_probe.stdout.splitlines() if line.strip()]
+    need(rc_push == 0, f'Cannot inspect origin push URLs: {redact_secrets(_decode_bytes(err_push_b).strip(), push_secrets)}')
+    push_urls = [line.strip() for line in _decode_bytes(out_push_b).splitlines() if line.strip()]
     need(len(push_urls) == 1, f'origin must have exactly one push URL, found {len(push_urls)}')
     need(push_urls[0] in allowed_remotes, f'origin push URL does not match {repo}: {sanitize_url_for_log(push_urls[0])}')
+    if ssh_mode:
+        need(
+            push_urls[0].startswith('git@') or push_urls[0].startswith('ssh://'),
+            f'SSH mode forbids non-SSH push URL: {sanitize_url_for_log(push_urls[0])}',
+        )
+    return fetch_urls[0], push_urls[0]
 
 
 def publish(root, plan, args, env):
@@ -906,29 +1145,32 @@ def publish(root, plan, args, env):
     token = env.get('github_token') or env.get('GITHUB_TOKEN') or os.environ.get('github_token') or os.environ.get('GITHUB_TOKEN')
     register_secret(token)
 
-    with isolated_git_env(env) as clean_env:
-        remote = _call_git(root, 'remote', 'get-url', 'origin', env=clean_env)
+    with isolated_git_env(env, anonymous=True) as clean_env:
+        remote = _call_git(root, 'remote', 'get-url', 'origin', env=clean_env, anonymous=True)
         need(remote in allowed_remotes, 'origin does not match selected public repository')
-        _verify_origin_push_urls(root, args.repo, allowed_remotes, clean_env)
+        _, effective_push_url = _verify_origin_push_urls(
+            root, args.repo, allowed_remotes, clean_env, timeout=git_timeout, ssh_mode=(push_protocol == 'ssh'),
+        )
 
         is_ssh_remote = remote.startswith('git@') or remote.startswith('ssh://')
+        is_ssh_push = effective_push_url.startswith('git@') or effective_push_url.startswith('ssh://')
         use_https_askpass = False
         push_target = 'origin'
 
         if push_protocol == 'ssh':
-            need(is_ssh_remote, 'origin is not an SSH remote; cannot use --push-protocol ssh')
-            refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=git_timeout, env=clean_env))
+            need(is_ssh_remote and is_ssh_push, 'origin is not an SSH remote/push target; cannot use --push-protocol ssh')
+            refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=git_timeout, env=clean_env, anonymous=True))
         elif push_protocol == 'https':
             push_target = https_url
             use_https_askpass = True
             refs = None
         else:
-            if is_ssh_remote:
+            if is_ssh_remote and is_ssh_push:
                 try:
-                    refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=min(SSH_PROBE_TIMEOUT_SECONDS, git_timeout), env=clean_env))
+                    refs = _parse_refs(_call_git(root, 'ls-remote', 'origin', timeout=min(SSH_PROBE_TIMEOUT_SECONDS, git_timeout), env=clean_env, anonymous=True))
                 except (ReleaseError, subprocess.CalledProcessError, OSError):
                     print('SSH remote probe failed; falling back to HTTPS GIT_ASKPASS')
-                    _verify_origin_push_urls(root, args.repo, allowed_remotes, clean_env)
+                    _verify_origin_push_urls(root, args.repo, allowed_remotes, clean_env, timeout=git_timeout, ssh_mode=False)
                     push_target = https_url
                     use_https_askpass = True
                     refs = None
@@ -939,8 +1181,8 @@ def publish(root, plan, args, env):
 
         def run_git_push_flow(current_refs, push_env):
             check_remote_tag(current_refs, tag, commit)
-            local = _call_git(root, 'tag', '--list', tag, env=clean_env)
-            if local: need(_call_git(root, 'rev-parse', tag+'^{}', env=clean_env) == commit, 'Existing local tag differs')
+            local = _call_git(root, 'tag', '--list', tag, env=clean_env, anonymous=True)
+            if local: need(_call_git(root, 'rev-parse', tag+'^{}', env=clean_env, anonymous=True) == commit, 'Existing local tag differs')
             api = Github(args.repo)
             if hasattr(api, 'upload_timeout'):
                 api.upload_timeout = upload_timeout
@@ -950,7 +1192,7 @@ def publish(root, plan, args, env):
                 need(current_refs.get('refs/tags/'+tag+'^{}', current_refs.get('refs/tags/'+tag)) == commit, 'Release tag must point at packaged commit')
 
             git_prefix = (
-                ['git', '-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true']
+                ['git', '-c', 'credential.helper=', '-c', 'credential.useHttpPath=true', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true']
                 if use_https_askpass else ['git']
             )
             _call_execute(git_prefix + ['push', '-u', push_target, 'main'], root, push_env, w/'git-push.log', timeout=git_timeout)
@@ -959,7 +1201,7 @@ def publish(root, plan, args, env):
 
             if release is None:
                 release = api.call(api.base+'/releases', 'POST', dict(tag_name=tag, target_commitish=commit, name='知序 ORIVA '+tag, body=notes, draft=True, prerelease='-' in plan['version']))
-            write_json(w/'github-release-state.json', dict(id=release['id'], commit=commit, tag=tag))
+            write_json_atomic(w/'github-release-state.json', dict(id=release['id'], commit=commit, tag=tag))
             existing = {item['name']: item for item in release['assets']}
             need(set(existing) <= set(names), 'Unexpected assets exist; reconcile manually')
             if not release['draft']:
@@ -975,19 +1217,106 @@ def publish(root, plan, args, env):
                     )
                 release = api.call(api.base+'/releases/'+str(release['id']), 'PATCH', dict(body=notes, draft=False, make_latest='false' if '-' in plan['version'] else 'true'))
             require_https_url(release['html_url'], {'github.com'}, 'Release HTML URL', allow_query=False)
-            safe_html_url = sanitize_url_for_log(release['html_url'])
-            write_json(w/'github-published-release.json', release); print('PUBLISHED', safe_html_url)
+            safe_html_url = redact_secrets(sanitize_url_for_log(release['html_url']))
+            release_evidence = dict(
+                id=release.get('id'),
+                tag_name=release.get('tag_name'),
+                target_commitish=release.get('target_commitish'),
+                draft=bool(release.get('draft', False)),
+                html_url=safe_html_url,
+                assets=[dict(name=it.get('name'), size=it.get('size'), digest=it.get('digest')) for it in release.get('assets', [])],
+            )
+            write_json_atomic(w/'github-published-release.json', release_evidence); print('PUBLISHED', safe_html_url)
 
         if use_https_askpass:
             with git_askpass_env(clean_env, token, expected_host='github.com', expected_user='x-access-token', expected_repo=args.repo) as askpass_env:
                 if refs is None:
                     refs = _parse_refs(_call_git(
-                        root, '-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
-                        'ls-remote', push_target, timeout=git_timeout, env=askpass_env,
+                        root, '-c', 'credential.helper=', '-c', 'credential.useHttpPath=true', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
+                        'ls-remote', push_target, timeout=git_timeout, env=askpass_env, anonymous=False,
                     ))
                 run_git_push_flow(refs, askpass_env)
         else:
             run_git_push_flow(refs, clean_env)
+
+
+class _DeadlineSocketAborter:
+    """Aborts any registered connection/response sockets immediately once deadline expires."""
+
+    def __init__(self, deadline):
+        self.deadline = deadline
+        self.expired = False
+        self._lock = threading.Lock()
+        self._sockets = set()
+        self._timer = None
+        rem = max(0.0, deadline - time.monotonic())
+        if rem <= 0.0:
+            self.expired = True
+        else:
+            self._timer = threading.Timer(rem, self.abort)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def track(self, sock):
+        if sock is None:
+            return
+        should_abort = False
+        with self._lock:
+            if self.expired:
+                should_abort = True
+            else:
+                self._sockets.add(sock)
+        if should_abort:
+            self._close_sock(sock)
+
+    @staticmethod
+    def _close_sock(sock):
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def abort(self):
+        with self._lock:
+            self.expired = True
+            socks = list(self._sockets)
+            self._sockets.clear()
+        for sock in socks:
+            self._close_sock(sock)
+
+    def stop(self):
+        timer = self._timer
+        self._timer = None
+        if timer is not None:
+            timer.cancel()
+        with self._lock:
+            self._sockets.clear()
+
+
+def _make_deadline_http_handlers(aborter):
+    class _TrackedHTTPConnection(http.client.HTTPConnection):
+        def connect(self):
+            super().connect()
+            aborter.track(self.sock)
+
+    class _TrackedHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self):
+            super().connect()
+            aborter.track(self.sock)
+
+    class _DeadlineHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_TrackedHTTPConnection, req)
+
+    class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_TrackedHTTPSConnection, req, context=self._context)
+
+    return _DeadlineHTTPHandler(), _DeadlineHTTPSHandler()
 
 
 class AllowedAssetRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1026,13 +1355,18 @@ class AllowedAssetRedirectHandler(urllib.request.HTTPRedirectHandler):
         if self.deadline is not None and time.monotonic() >= self.deadline:
             fp.close()
             raise TimeoutError('Download total timeout exceeded during redirect')
+        visited = dict(getattr(req, 'redirect_dict', {}))
+        hop_count = getattr(req, '_oriva_redirect_count', 0) + 1
+        target_for_visit = urllib.parse.urljoin(req.full_url, newurl)
+        if hop_count > self.MAX_REDIRECTS or visited.get(target_for_visit, 0) >= 4:
+            fp.close()
+            raise urllib.error.HTTPError(req.full_url, code, f'Too many redirects ({self.MAX_REDIRECTS})', headers, fp)
         new_req = self.redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is None:
             return None
-        visited = getattr(req, 'redirect_dict', {})
-        if len(visited) >= self.MAX_REDIRECTS:
-            fp.close()
-            raise urllib.error.HTTPError(req.full_url, code, f'Too many redirects ({self.MAX_REDIRECTS})', headers, fp)
+        visited[target_for_visit] = visited.get(target_for_visit, 0) + 1
+        new_req.redirect_dict = visited
+        new_req._oriva_redirect_count = hop_count
         fp.close()
         hop_timeout = self.download_timeout
         if self.deadline is not None:
@@ -1080,9 +1414,8 @@ def _parse_optional_content_length(headers):
     return int(raw.strip())
 
 
-def _set_response_socket_timeout(response, timeout_seconds):
-    if timeout_seconds is None or timeout_seconds <= 0:
-        return
+def _extract_response_sockets(response):
+    socks = []
     candidates = [
         getattr(response, 'fp', None),
         getattr(getattr(response, 'fp', None), 'raw', None),
@@ -1090,11 +1423,30 @@ def _set_response_socket_timeout(response, timeout_seconds):
     ]
     for obj in candidates:
         sock = getattr(obj, '_sock', None)
-        if sock is not None and hasattr(sock, 'settimeout'):
+        if sock is not None and sock not in socks:
+            socks.append(sock)
+    return socks
+
+
+def _set_response_socket_timeout(response, timeout_seconds, aborter=None):
+    for sock in _extract_response_sockets(response):
+        if aborter is not None:
+            aborter.track(sock)
+        if timeout_seconds is not None and timeout_seconds > 0 and hasattr(sock, 'settimeout'):
             try:
                 sock.settimeout(timeout_seconds)
             except OSError:
                 pass
+
+
+def _load_valid_part_meta(meta_path, expected_meta):
+    if not meta_path.is_file():
+        return False
+    try:
+        loaded = json.loads(meta_path.read_text('utf8'))
+    except (OSError, ValueError):
+        return False
+    return isinstance(loaded, dict) and loaded == expected_meta
 
 
 def download_asset(url, target, expected_size=None, expected_sha256=None,
@@ -1104,130 +1456,158 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
     need(download_timeout > 0 and total_timeout > 0, 'Download timeouts must be positive')
 
     part = target.with_name(target.name + '.part')
+    meta_path = target.with_name(target.name + '.part.meta.json')
+    expected_meta = {
+        'url': redact_secrets(sanitize_url_for_log(url)),
+        'expectedSize': expected_size,
+        'expectedSha256': expected_sha256.upper() if expected_sha256 is not None else None,
+    }
     deadline = time.monotonic() + total_timeout
+    aborter = _DeadlineSocketAborter(deadline)
     if opener is None:
-        opener = urllib.request.build_opener(AllowedAssetRedirectHandler(deadline=deadline, download_timeout=download_timeout))
+        http_h, https_h = _make_deadline_http_handlers(aborter)
+        opener = urllib.request.build_opener(
+            http_h,
+            https_h,
+            AllowedAssetRedirectHandler(deadline=deadline, download_timeout=download_timeout),
+        )
 
     max_allowed = expected_size if expected_size is not None else MAX_ASSET_DOWNLOAD_BYTES
 
-    for attempt in range(len(DOWNLOAD_BACKOFF_SECONDS) + 1):
-        offset = part.stat().st_size if part.exists() else 0
-        if expected_size is not None and offset >= expected_size:
-            part.unlink()
-            offset = 0
+    try:
+        for attempt in range(len(DOWNLOAD_BACKOFF_SECONDS) + 1):
+            if part.exists():
+                if not _load_valid_part_meta(meta_path, expected_meta):
+                    part.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
+            offset = part.stat().st_size if part.exists() else 0
+            if expected_size is not None and offset >= expected_size:
+                part.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+                offset = 0
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded before starting {target.name}')
-        req_timeout = min(download_timeout, remaining)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded before starting {target.name}')
+            req_timeout = min(download_timeout, remaining)
 
-        headers = {'User-Agent': 'ORIVA-public-verification'}
-        if offset > 0:
-            headers['Range'] = f'bytes={offset}-'
-        req = urllib.request.Request(url, headers=headers)
+            headers = {'User-Agent': 'ORIVA-public-verification'}
+            if offset > 0:
+                headers['Range'] = f'bytes={offset}-'
+            req = urllib.request.Request(url, headers=headers)
 
-        stage = 'DNS/TCP'
-        try:
-            with opener.open(req, timeout=req_timeout) as response:
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded')
-                status = getattr(response, 'status', None)
-                if status is None:
-                    status = response.getcode()
-                resp_headers = getattr(response, 'headers', {}) or {}
-                content_length = _parse_optional_content_length(resp_headers)
+            stage = 'DNS/TCP'
+            try:
+                with opener.open(req, timeout=req_timeout) as response:
+                    _set_response_socket_timeout(response, min(download_timeout, max(0.001, deadline - time.monotonic())), aborter=aborter)
+                    if time.monotonic() > deadline or aborter.expired:
+                        raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded')
+                    status = getattr(response, 'status', None)
+                    if status is None:
+                        status = response.getcode()
+                    resp_headers = getattr(response, 'headers', {}) or {}
+                    content_length = _parse_optional_content_length(resp_headers)
 
-                expected_span = None
-                if offset == 0:
-                    need(status == 200, f'Expected HTTP 200 for full download of {target.name}, got {status}')
-                    need(not resp_headers.get('Content-Range'), f'Unexpected Content-Range on HTTP 200 for {target.name}')
-                    if expected_size is not None and content_length is not None:
-                        need(content_length == expected_size, f'Content-Length {content_length} differs from expected {expected_size}')
-                    mode = 'wb'
-                    written = 0
-                else:
-                    if status == 206:
-                        start, end = _parse_content_range(resp_headers.get('Content-Range', ''), offset, expected_size)
-                        expected_span = end - start + 1
-                        if content_length is not None:
-                            need(content_length == expected_span, f'Content-Length {content_length} mismatches Content-Range span')
-                        mode = 'ab'
-                        written = offset
-                    elif status == 200:
+                    expected_span = None
+                    if offset == 0:
+                        need(status == 200, f'Expected HTTP 200 for full download of {target.name}, got {status}')
                         need(not resp_headers.get('Content-Range'), f'Unexpected Content-Range on HTTP 200 for {target.name}')
                         if expected_size is not None and content_length is not None:
                             need(content_length == expected_size, f'Content-Length {content_length} differs from expected {expected_size}')
                         mode = 'wb'
                         written = 0
                     else:
-                        raise ReleaseError(f'Unexpected HTTP {status} resuming {target.name}')
+                        if status == 206:
+                            start, end = _parse_content_range(resp_headers.get('Content-Range', ''), offset, expected_size)
+                            expected_span = end - start + 1
+                            if content_length is not None:
+                                need(content_length == expected_span, f'Content-Length {content_length} mismatches Content-Range span')
+                            mode = 'ab'
+                            written = offset
+                        elif status == 200:
+                            need(not resp_headers.get('Content-Range'), f'Unexpected Content-Range on HTTP 200 for {target.name}')
+                            if expected_size is not None and content_length is not None:
+                                need(content_length == expected_size, f'Content-Length {content_length} differs from expected {expected_size}')
+                            mode = 'wb'
+                            written = 0
+                        else:
+                            raise ReleaseError(f'Unexpected HTTP {status} resuming {target.name}')
 
-                stage = 'data read'
-                response_bytes_read = 0
-                with open(part, mode) as stream:
-                    while True:
-                        rem_read = deadline - time.monotonic()
-                        if rem_read <= 0:
-                            raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded')
-                        _set_response_socket_timeout(response, min(download_timeout, rem_read))
-                        chunk = response.read(DOWNLOAD_CHUNK_BYTES)
-                        if time.monotonic() > deadline:
-                            raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded')
-                        if not chunk:
-                            break
-                        response_bytes_read += len(chunk)
-                        written += len(chunk)
-                        if written > max_allowed:
-                            raise ReleaseError(f'Downloaded stream exceeded allowed size ({max_allowed} bytes) for {target.name}')
-                        if expected_span is not None and response_bytes_read > expected_span:
-                            raise ReleaseError(f'HTTP 206 response exceeded declared Content-Range span ({expected_span} bytes) for {target.name}')
-                        stream.write(chunk)
+                    if mode == 'wb':
+                        write_json_atomic(meta_path, expected_meta)
 
-                if expected_span is not None:
-                    need(
-                        response_bytes_read == expected_span,
-                        f'HTTP 206 body length {response_bytes_read} mismatches Content-Range span {expected_span}',
-                    )
-                if content_length is not None:
-                    need(
-                        response_bytes_read == content_length,
-                        f'Response body length {response_bytes_read} mismatches Content-Length {content_length}',
-                    )
+                    stage = 'data read'
+                    response_bytes_read = 0
+                    read_fn = getattr(response, 'read1', None) or response.read
+                    with open(part, mode) as stream:
+                        while True:
+                            rem_read = deadline - time.monotonic()
+                            if rem_read <= 0 or aborter.expired:
+                                raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded')
+                            _set_response_socket_timeout(response, min(download_timeout, rem_read), aborter=aborter)
+                            chunk = read_fn(DOWNLOAD_CHUNK_BYTES)
+                            if time.monotonic() > deadline or aborter.expired:
+                                raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded')
+                            if not chunk:
+                                break
+                            response_bytes_read += len(chunk)
+                            written += len(chunk)
+                            if written > max_allowed:
+                                raise ReleaseError(f'Downloaded stream exceeded allowed size ({max_allowed} bytes) for {target.name}')
+                            if expected_span is not None and response_bytes_read > expected_span:
+                                raise ReleaseError(f'HTTP 206 response exceeded declared Content-Range span ({expected_span} bytes) for {target.name}')
+                            stream.write(chunk)
 
-            if time.monotonic() > deadline:
-                raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded before completion')
-            if expected_size is not None and written != expected_size:
-                raise http.client.IncompleteRead(b'', expected_size - written)
-            if expected_sha256 is not None and sha256(part).upper() != expected_sha256.upper():
-                part.unlink(missing_ok=True)
-                raise ReleaseError(f'Downloaded asset checksum mismatch before promotion: {target.name}')
-            if time.monotonic() > deadline:
-                raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded after digest check before promotion')
-            part.replace(target)
-            return
-        except urllib.error.HTTPError as exc:
-            if exc.code == 416 and part.exists():
-                part.unlink()
-                last_error = ReleaseError(f'HTTP 416 restarting {target.name}')
-            elif exc.code in {429, 500, 502, 503, 504}:
-                last_error = ReleaseError(f'HTTP {exc.code} during {stage} for {target.name}')
-            else:
-                raise ReleaseError(f'Download failed for {target.name} during {stage}: HTTP {exc.code}') from None
-        except urllib.error.URLError as exc:
-            stage = _classify_network_stage(exc, stage)
-            last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {stage}: {exc.reason}'))
-        except (TimeoutError, socket.timeout, http.client.IncompleteRead, ssl.SSLError, OSError) as exc:
-            if isinstance(exc, ssl.SSLError):
-                stage = 'TLS handshake'
-            last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {stage}: {exc}'))
+                    if expected_span is not None:
+                        need(
+                            response_bytes_read == expected_span,
+                            f'HTTP 206 body length {response_bytes_read} mismatches Content-Range span {expected_span}',
+                        )
+                    if content_length is not None:
+                        need(
+                            response_bytes_read == content_length,
+                            f'Response body length {response_bytes_read} mismatches Content-Length {content_length}',
+                        )
 
-        if attempt >= len(DOWNLOAD_BACKOFF_SECONDS):
-            raise last_error
-        remaining = deadline - time.monotonic()
-        delay = min(DOWNLOAD_BACKOFF_SECONDS[attempt], max(0.0, remaining))
-        if delay <= 0:
-            raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {stage}: {last_error}')
-        sleep_fn(delay)
+                if time.monotonic() > deadline or aborter.expired:
+                    raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded before completion')
+                if expected_size is not None and written != expected_size:
+                    raise http.client.IncompleteRead(b'', expected_size - written)
+                if expected_sha256 is not None and sha256(part).upper() != expected_sha256.upper():
+                    part.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
+                    raise ReleaseError(f'Downloaded asset checksum mismatch before promotion: {target.name}')
+                if time.monotonic() > deadline or aborter.expired:
+                    raise TimeoutError(f'Download total timeout ({total_timeout}s) exceeded after digest check before promotion')
+                part.replace(target)
+                meta_path.unlink(missing_ok=True)
+                return
+            except urllib.error.HTTPError as exc:
+                if exc.code == 416 and part.exists():
+                    part.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
+                    last_error = ReleaseError(f'HTTP 416 restarting {target.name}')
+                elif exc.code in {429, 500, 502, 503, 504}:
+                    last_error = ReleaseError(f'HTTP {exc.code} during {stage} for {target.name}')
+                else:
+                    raise ReleaseError(f'Download failed for {target.name} during {stage}: HTTP {exc.code}') from None
+            except urllib.error.URLError as exc:
+                stage = _classify_network_stage(exc, stage)
+                last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {stage}: {exc.reason}'))
+            except (TimeoutError, socket.timeout, http.client.IncompleteRead, ssl.SSLError, OSError) as exc:
+                if isinstance(exc, ssl.SSLError):
+                    stage = 'TLS handshake'
+                last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {stage}: {exc}'))
+
+            if attempt >= len(DOWNLOAD_BACKOFF_SECONDS):
+                raise last_error
+            remaining = deadline - time.monotonic()
+            delay = min(DOWNLOAD_BACKOFF_SECONDS[attempt], max(0.0, remaining))
+            if delay <= 0:
+                raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {stage}: {last_error}')
+            sleep_fn(delay)
+    finally:
+        aborter.stop()
 
 
 def verify(root, plan, args, env):
@@ -1252,14 +1632,15 @@ def verify(root, plan, args, env):
         release = json.load(response)
     need(not release['draft'] and release['tag_name'] == plan['tag'], 'Public release differs')
     require_https_url(release['html_url'], {'github.com'}, 'Release HTML URL', allow_query=False)
-    safe_html_url = sanitize_url_for_log(release['html_url'])
+    safe_html_url = redact_secrets(sanitize_url_for_log(release['html_url']))
     assets = {item['name']: item for item in release['assets']}; need(set(assets) == set(names), 'Public asset set differs')
 
-    with isolated_git_env(env) as clean_env:
+    with isolated_git_env(env, anonymous=True) as clean_env:
+        _audit_repo_git_config(root, clean_env, timeout=git_timeout)
         remote = _call_git(
             root, '-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true',
             'ls-remote', 'https://github.com/'+args.repo+'.git', 'refs/tags/'+plan['tag'], 'refs/tags/'+plan['tag']+'^{}',
-            timeout=git_timeout, env=clean_env,
+            timeout=git_timeout, env=clean_env, anonymous=True,
         )
         refs = _parse_refs(remote); check_remote_tag(refs, plan['tag'], m['commit']); need(bool(refs), 'Remote release tag missing')
 
@@ -1300,9 +1681,9 @@ def verify(root, plan, args, env):
                      'https://github.com/'+args.repo+'.git', clone],
                     root, clean_env, w/'recipient-clone.log', timeout=git_timeout,
                 )
-            need(_call_git(clone, 'rev-parse', 'HEAD', env=clean_env) == m['commit'] and not _call_git(clone, 'status', '--porcelain', env=clean_env), 'Recipient clone differs')
+            need(_call_git(clone, 'rev-parse', 'HEAD', env=clean_env, anonymous=True) == m['commit'] and not _call_git(clone, 'status', '--porcelain', env=clean_env, anonymous=True), 'Recipient clone differs')
             with zipfile.ZipFile(source) as z:
-                for path in _call_git(clone, 'ls-files', env=clean_env).splitlines():
+                for path in _call_git(clone, 'ls-files', env=clean_env, anonymous=True).splitlines():
                     need((clone/path).read_bytes() == z.read('zhixu-oriva-'+plan['version']+'/'+path), 'Clone/source differ: '+path)
         write_json_atomic(report_path, dict(
             status='PASS', verifyMode='full', downloadVerified=True,

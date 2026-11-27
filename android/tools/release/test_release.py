@@ -77,6 +77,7 @@ class PublishRecoveryTests(unittest.TestCase):
   from unittest.mock import patch
   from types import SimpleNamespace
   plan=r.make_plan(self.root);directory=Path(plan['assets']);directory.mkdir(parents=True)
+  self.git('remote','add','origin','git@github.com:owner/repo.git')
   head=self.git('rev-parse','HEAD');name=plan['version']
   names=['zhixu-oriva-'+name+'.apk','zhixu-oriva-'+name+'-source.zip','oriva-release.cer','release-manifest.json']
   for asset in names[:3]:(directory/asset).write_bytes(asset.encode())
