@@ -29,6 +29,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Proxy;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -216,7 +217,8 @@ class WebPortalBootIntegrationTest {
                     .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()));
         }
 
-        // R1b: Unauthenticated non-JSON cross-method requests on protected endpoints are intercepted BEFORE 405 dispatch -> 200 JSON 1001 + no-store.
+        // R1b: Unauthenticated non-JSON cross-method requests on protected endpoints AND MVC path-decoding variants
+        // (/%61pi/..., /api;v=1/..., /api/v1;x=1/..., //api/...) are intercepted BEFORE 405 dispatch -> 200 JSON 1001 + no-store.
         for (var req : List.of(
                 post("/api/v1/me"),
                 delete("/api/v1/me"),
@@ -225,7 +227,12 @@ class WebPortalBootIntegrationTest {
                 options("/api/v1/me"),
                 delete("/api/v1/not-exists"),
                 post("/api/unknown"),
-                delete("/api/v1/plugins/catalog/other"))) {
+                delete("/api/v1/plugins/catalog/other"),
+                delete(URI.create("/%61pi/v1/me")),
+                post(URI.create("/%61pi/v1/me")),
+                delete(URI.create("/api;v=1/v1/me")),
+                delete(URI.create("/api/v1;x=1/me")),
+                delete(URI.create("http://localhost//api/v1/me")))) {
             mvc.perform(req.header("Accept", "text/html"))
                     .andExpect(status().isOk())
                     .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -317,6 +324,20 @@ class WebPortalBootIntegrationTest {
             }
         }
 
+        // R1b + R2: Authenticated unknown API path variants (encoded / matrix first segment) ALSO classify as API -> 404 JSON 1003 + no-store.
+        for (URI variantUnknown : List.of(
+                URI.create("/%61pi/v1/not-exists"),
+                URI.create("/api;v=1/v1/not-exists"))) {
+            mvc.perform(get(variantUnknown)
+                            .header("Authorization", "Bearer " + token)
+                            .header("Accept", "text/html"))
+                    .andExpect(status().isNotFound())
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                    .andExpect(jsonPath("$.code").value(ErrorCode.NOT_FOUND.getCode()));
+        }
+
         // R2a: Non-API missing pages & missing static assets return plain HTTP 404 + no-store + nosniff (NO ApiResponse 1003 JSON envelope).
         for (String nonApiMissing : List.of("/no-such-page", "/setup-assets/missing.css")) {
             for (String accept : List.of("", "text/html", "text/css", "application/json", "*/*")) {
@@ -337,13 +358,16 @@ class WebPortalBootIntegrationTest {
 
     @Test
     void setupRfc9110AcceptPriorityNegotiationAndInitialized410Hold() throws Exception {
-        // Initialized: every Accept variant (including complex q=0 + wildcard) receives deterministic 410 JSON + no-store.
+        // Initialized: every Accept variant (including complex q=0, post-q params & duplicate q) receives deterministic 410 JSON + no-store.
         deploymentRow.put("initialized", true);
         for (String accept : List.of(
                 "",
                 "text/html",
                 "application/json",
                 "text/html;q=0, */*;q=0.8",
+                "text/html;q=0.9;charset=iso-8859-1",
+                "text/html;q=0;q=0.9",
+                "text/html;q=0.9;charset=utf-8",
                 "*/*")) {
             var req = get("/setup");
             if (!accept.isEmpty()) {
@@ -355,7 +379,7 @@ class WebPortalBootIntegrationTest {
                     .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
         }
 
-        // Pending: HTML / text/* / */* / mixed q>0 / parameterized specificity overrides & RFC 9110 valid q=1. accept HTML.
+        // Pending: HTML / text/* / */* / mixed q>0 / parameterized specificity overrides (in any order) & RFC 9110 valid q=1. accept HTML.
         deploymentRow.put("initialized", false);
         for (String accept : List.of(
                 "",
@@ -363,6 +387,8 @@ class WebPortalBootIntegrationTest {
                 "text/html;charset=utf-8",
                 "text/html;charset=\"utf-8\"",
                 "text/html;q=1.",
+                "text/html;q=0.9;charset=utf-8, */*;q=0.1",
+                "text/html;foo=\"a,b;q=0\";q=0.9, */*;q=0.5",
                 "text/html;q=0, text/html;charset=utf-8;q=0.8",
                 "text/html;charset=iso-8859-1;q=0, text/html;q=0.8",
                 "text/*;q=0, text/*;charset=utf-8;q=0.8",
@@ -380,12 +406,19 @@ class WebPortalBootIntegrationTest {
                     .andExpect(header().string("Cache-Control", "no-store"));
         }
 
-        // R3: More specific parameterized q=0, non-matching wildcard params, RFC 9110 q=0., invalid q & JSON-only -> 406.
+        // R3: Post-q incompatible params, duplicate q in single range, parameterized q=0, non-matching wildcard params, RFC 9110 q=0., invalid q & JSON-only -> 406.
         for (String rejectedAccept : List.of(
                 "application/json",
                 "text/html;q=0, */*;q=0.8",
                 "text/*;q=0, */*;q=0.9",
                 "text/html;charset=utf-8;q=0, text/html;q=0.9",
+                "text/html;q=0;charset=utf-8, text/html;q=0.9",
+                "text/html;q=0.9;charset=iso-8859-1",
+                "text/html;q=0.9;foo=bar",
+                "text/html;q=0;q=0.9",
+                "text/html;q=0.9;q=0",
+                "text/html;q=0;q=0.9, */*;q=0.8",
+                "text/html;q=\"0.8\"",
                 "text/*;charset=utf-8;q=0, text/*;q=0.8",
                 "*/*;charset=utf-8;q=0, */*;q=0.8",
                 "text/html;charset=iso-8859-1",

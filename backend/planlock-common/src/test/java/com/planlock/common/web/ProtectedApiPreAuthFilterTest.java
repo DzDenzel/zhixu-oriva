@@ -46,7 +46,14 @@ class ProtectedApiPreAuthFilterTest {
                     "/api/v1/plugins/catalog/other",
                     "/api/v1/plugins/unknown",
                     "/api/v1/health;matrix=1",
-                    "/api/v1/plugins/artifacts/official/..")) {
+                    "/api/v1/plugins/artifacts/official/..",
+                    "/%61pi/v1/me",
+                    "/%61pi/v1/health",
+                    "/api;v=1/v1/me",
+                    "/api;v=1/v1/health",
+                    "/api/v1;x=1/me",
+                    "//api/v1/me",
+                    "//api/v1/health")) {
                 MockHttpServletRequest req = new MockHttpServletRequest(method, path);
                 MockHttpServletResponse res = new MockHttpServletResponse();
                 AtomicBoolean proceeded = new AtomicBoolean(false);
@@ -122,5 +129,22 @@ class ProtectedApiPreAuthFilterTest {
         assertThat(overRes.getHeader("X-Content-Type-Options")).isEqualTo("nosniff");
         assertThat(overRes.getContentAsString(StandardCharsets.UTF_8))
                 .contains("\"code\":" + ErrorCode.INVALID_PARAM.getCode());
+    }
+
+    @Test
+    void apiPathMatcherAlignsWithSpringMvcSegmentDecodingWithoutSplittingEncodedSlash() {
+        assertThat(ApiPathMatcher.isApiPath("/%61pi/v1/me")).isTrue();
+        assertThat(ApiPathMatcher.isApiPath("/api;v=1/v1/me")).isTrue();
+        assertThat(ApiPathMatcher.isApiPath("/api/v1;x=1/me")).isTrue();
+        assertThat(ApiPathMatcher.isApiPath("//api/v1/me")).isTrue();
+        // Encoded %2F inside first segment must NOT be expanded into a path separator
+        assertThat(ApiPathMatcher.isApiPath("/api%2Fv1/me")).isFalse();
+        assertThat(ApiPathMatcher.isApiPath("/no-such-page")).isFalse();
+
+        assertThat(bodyLimitFilter.isProtectedApiRoute("/%61pi/v1/me")).isTrue();
+        assertThat(bodyLimitFilter.isProtectedApiRoute("/api;v=1/v1/me")).isTrue();
+        assertThat(bodyLimitFilter.isProtectedApiRoute("/api/v1;x=1/me")).isTrue();
+        assertThat(bodyLimitFilter.isProtectedApiRoute("//api/v1/me")).isTrue();
+        assertThat(bodyLimitFilter.isProtectedApiRoute("/api/v1/health")).isFalse();
     }
 }

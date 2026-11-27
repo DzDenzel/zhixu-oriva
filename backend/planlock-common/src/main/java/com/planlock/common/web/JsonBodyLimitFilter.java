@@ -268,22 +268,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
     }
 
     boolean isProtectedApiRoute(String path) {
-        if (!pathMatcher.match("/api/**", path)) {
-            return false;
-        }
-        if (hasSuspiciousPublicPathToken(path)) {
-            return true;
-        }
-        for (String publicPattern : WebConfig.PUBLIC_API_PATTERNS) {
-            if (pathMatcher.match(publicPattern, path)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static boolean hasSuspiciousPublicPathToken(String path) {
-        return path.contains("..") || path.indexOf(';') >= 0 || path.indexOf('%') >= 0 || path.indexOf('\\') >= 0;
+        return ApiPathMatcher.isProtectedApiPath(path);
     }
 
     private boolean isAuthorized(HttpServletRequest request) {

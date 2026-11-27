@@ -1,5 +1,6 @@
 package com.planlock.app.setup;
 
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -37,8 +38,10 @@ public class SetupController {
         return ResponseEntity.status(healthy?HttpStatus.OK:HttpStatus.SERVICE_UNAVAILABLE).cacheControl(CacheControl.noStore()).body(body);
     }
     @GetMapping("/setup")
-    public ResponseEntity<ClassPathResource> page(@RequestHeader(value = HttpHeaders.ACCEPT, required = false) List<String> acceptHeaders) {
+    public ResponseEntity<ClassPathResource> page(HttpServletRequest request) {
         setup.requirePage();
+        Enumeration<String> rawHeaders = request == null ? null : request.getHeaders(HttpHeaders.ACCEPT);
+        List<String> acceptHeaders = rawHeaders == null ? List.of() : Collections.list(rawHeaders);
         if (!acceptsHtml(acceptHeaders)) {
             throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE, "该页面仅支持 text/html 响应");
         }
@@ -69,14 +72,15 @@ public class SetupController {
                 .body(Map.of("message","请求格式无效，请检查输入"));
     }
     /**
-     * 按 RFC 9110 §12.5.1 / §12.4.2 媒体类型与表示参数最具体匹配优先级评估是否接受 {@code text/html; charset=utf-8}（REQ-041 R3）：
+     * 按 RFC 9110 §12.5.1 / §12.4.2 直接在原始字符串层级解析 {@code Accept} 头并评估是否接受 {@code text/html; charset=utf-8}（REQ-041 R3）：
      * <ul>
-     *   <li>所有匹配层级均参与参数校验：{@code text/html}（基准 30）&gt; {@code text/*}（基准 20）&gt; {@code *&#47;*}（基准 10），
-     *       同层带有效表示参数（如 {@code charset=utf-8}）优先于无参同级范围（+1）；携带与 UTF-8 HTML 表示不符的参数则视为不匹配；</li>
-     *   <li>{@code text/html;q=0, *&#47;*;q=0.8}、{@code text/html;charset=utf-8;q=0, text/html;q=0.9} 或重复 Accept 头中同级显式 {@code q=0}
-     *       均禁止被较宽泛范围掩盖；</li>
-     *   <li>严格遵循 RFC 9110 §12.4.2 {@code qvalue = ("0" ["." 0*3DIGIT]) / ("1" ["." 0*3("0")])}，允许 {@code q=0.} / {@code q=1.}，
-     *       拒绝 {@code q=1.5} / {@code q=0.1234} / {@code q=abc} 等非法权重。</li>
+     *   <li>先于任何 Map 归并、按引号感知语法切分逗号媒体范围与分号参数，彻底消除 Spring {@code MediaType} 同名参数覆盖吞掉重复 {@code q=} 的隐患；</li>
+     *   <li>同一媒体范围若出现超过 1 个 {@code q} 参数或任一 {@code q} 不满足 {@code (?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)}，
+     *       立即整体判 406 拒绝（绝不被 {@code *&#47;*} 掩盖）；</li>
+     *   <li>按 RFC 9110 识别任意位置（不限于 {@code q} 之前）的全部表示参数并与 {@code text/html; charset=utf-8} 统一比对：
+     *       {@code text/html}（基准 30）&gt; {@code text/*}（基准 20）&gt; {@code *&#47;*}（基准 10），匹配 {@code charset=utf-8} 具体度 +1，
+     *       出现不兼容字符集或未声明参数则该范围不匹配 HTML 表示；</li>
+     *   <li>同具体度存在显式 {@code q=0} 时优先拒绝；已初始化状态始终在调用本方法前先返 410 JSON。</li>
      * </ul>
      */
     static boolean acceptsHtml(List<String> acceptHeaders) {
@@ -93,24 +97,99 @@ public class SetupController {
                 continue;
             }
             hasNonBlankHeader = true;
-            List<MediaType> parsed;
-            try {
-                parsed = MediaType.parseMediaTypes(header);
-            } catch (IllegalArgumentException invalid) {
+            List<String> rawRanges = splitRespectingQuotes(header, ',');
+            if (rawRanges == null) {
                 return false;
             }
-            if (parsed.isEmpty()) {
-                return false;
-            }
-            for (MediaType mt : parsed) {
-                Double q = parseStrictQuality(mt);
-                if (q == null) {
-                    return false;
-                }
-                int specificity = htmlMatchSpecificity(mt);
-                if (specificity == 0) {
+            boolean hasRangeInHeader = false;
+            for (String rawRange : rawRanges) {
+                String trimmedRange = rawRange.trim();
+                if (trimmedRange.isEmpty()) {
                     continue;
                 }
+                hasRangeInHeader = true;
+                List<String> parts = splitRespectingQuotes(trimmedRange, ';');
+                if (parts == null || parts.isEmpty()) {
+                    return false;
+                }
+                String typePart = parts.get(0).trim();
+                int slash = typePart.indexOf('/');
+                if (slash <= 0 || slash != typePart.lastIndexOf('/') || slash == typePart.length() - 1) {
+                    return false;
+                }
+                String type = typePart.substring(0, slash).trim();
+                String subtype = typePart.substring(slash + 1).trim();
+                if (!isHttpToken(type) || !isHttpToken(subtype)) {
+                    return false;
+                }
+                if ("*".equals(type) && !"*".equals(subtype)) {
+                    return false;
+                }
+
+                boolean seenQ = false;
+                double q = 1.0;
+                Set<String> matchedParams = new HashSet<>();
+                boolean paramMismatch = false;
+
+                for (int i = 1; i < parts.size(); i++) {
+                    String rawParam = parts.get(i).trim();
+                    if (rawParam.isEmpty()) {
+                        continue;
+                    }
+                    int eq = rawParam.indexOf('=');
+                    if (eq <= 0 || eq == rawParam.length() - 1) {
+                        return false;
+                    }
+                    String paramName = rawParam.substring(0, eq).trim();
+                    String rawParamValue = rawParam.substring(eq + 1).trim();
+                    if (!isHttpToken(paramName) || rawParamValue.isEmpty()) {
+                        return false;
+                    }
+
+                    if ("q".equalsIgnoreCase(paramName)) {
+                        // RFC 9110 §12.4.2：单媒体范围严禁重复 q 参数，且 qvalue 不可带引号
+                        if (seenQ) {
+                            return false;
+                        }
+                        Double parsedQ = parseStrictQualityValue(rawParamValue);
+                        if (parsedQ == null) {
+                            return false;
+                        }
+                        q = parsedQ;
+                        seenQ = true;
+                        continue;
+                    }
+
+                    String unquotedValue = parseParamValue(rawParamValue);
+                    if (unquotedValue == null) {
+                        return false;
+                    }
+                    // RFC 9110 §12.5.1：任意位置（含 q 之后）的非 q 参数均按实际表示 text/html; charset=utf-8 参与匹配
+                    if ("charset".equalsIgnoreCase(paramName)) {
+                        if ("utf-8".equalsIgnoreCase(unquotedValue.trim())) {
+                            matchedParams.add("charset");
+                        } else {
+                            paramMismatch = true;
+                        }
+                    } else {
+                        paramMismatch = true;
+                    }
+                }
+
+                if (paramMismatch) {
+                    continue;
+                }
+                int baseTier;
+                if ("text".equalsIgnoreCase(type) && "html".equalsIgnoreCase(subtype)) {
+                    baseTier = 3;
+                } else if ("text".equalsIgnoreCase(type) && "*".equals(subtype)) {
+                    baseTier = 2;
+                } else if ("*".equals(type) && "*".equals(subtype)) {
+                    baseTier = 1;
+                } else {
+                    continue;
+                }
+                int specificity = baseTier * 10 + matchedParams.size();
                 if (specificity > bestSpecificity) {
                     bestSpecificity = specificity;
                     bestQualityAtBest = q;
@@ -124,6 +203,9 @@ public class SetupController {
                     }
                 }
             }
+            if (!hasRangeInHeader) {
+                return false;
+            }
         }
         if (!hasNonBlankHeader) {
             return true;
@@ -131,59 +213,92 @@ public class SetupController {
         return bestSpecificity > 0 && !explicitZeroAtBest && bestQualityAtBest > 0.0;
     }
 
-    private static int htmlMatchSpecificity(MediaType mt) {
-        String type = mt.getType();
-        String subtype = mt.getSubtype();
-        int baseTier;
-        if ("text".equalsIgnoreCase(type) && "html".equalsIgnoreCase(subtype)) {
-            baseTier = 3;
-        } else if ("text".equalsIgnoreCase(type) && mt.isWildcardSubtype()) {
-            baseTier = 2;
-        } else if (mt.isWildcardType() && mt.isWildcardSubtype()) {
-            baseTier = 1;
-        } else {
-            return 0;
-        }
-
-        // RFC 9110 §12.5.1：q 之前的参数均为媒体范围参数，须与实际表示 text/html; charset=utf-8 兼容；
-        // q 之后的 accept-ext 参数不参与媒体范围匹配。
-        int matchedParams = 0;
-        for (Map.Entry<String, String> entry : mt.getParameters().entrySet()) {
-            String key = entry.getKey();
-            if ("q".equalsIgnoreCase(key)) {
-                break;
+    /** 按 RFC 9110 双引号参数值感知切分分隔符；遇未闭合引号或悬空转义返回 {@code null}。 */
+    private static List<String> splitRespectingQuotes(String input, char delimiter) {
+        List<String> segments = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        boolean escaped = false;
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (escaped) {
+                current.append(c);
+                escaped = false;
+                continue;
             }
-            if ("charset".equalsIgnoreCase(key)) {
-                String normalizedCharset = unquoteParam(entry.getValue());
-                if (!"utf-8".equalsIgnoreCase(normalizedCharset)) {
-                    return 0;
+            if (inQuotes) {
+                if (c == '\\') {
+                    current.append(c);
+                    escaped = true;
+                } else if (c == '"') {
+                    current.append(c);
+                    inQuotes = false;
+                } else {
+                    current.append(c);
                 }
-                matchedParams++;
             } else {
-                // 实际 UTF-8 HTML 表示仅声明 charset=utf-8，不具备其他媒体范围参数
-                return 0;
+                if (c == '"') {
+                    current.append(c);
+                    inQuotes = true;
+                } else if (c == delimiter) {
+                    segments.add(current.toString());
+                    current.setLength(0);
+                } else {
+                    current.append(c);
+                }
             }
         }
-        return baseTier * 10 + matchedParams;
+        if (inQuotes || escaped) {
+            return null;
+        }
+        segments.add(current.toString());
+        return segments;
     }
 
-    private static String unquoteParam(String raw) {
-        if (raw == null) {
-            return "";
+    private static String parseParamValue(String raw) {
+        if (raw.startsWith("\"")) {
+            if (raw.length() < 2 || !raw.endsWith("\"")) {
+                return null;
+            }
+            StringBuilder out = new StringBuilder(raw.length() - 2);
+            boolean escaped = false;
+            for (int i = 1; i < raw.length() - 1; i++) {
+                char c = raw.charAt(i);
+                if (escaped) {
+                    out.append(c);
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    return null;
+                } else {
+                    out.append(c);
+                }
+            }
+            return escaped ? null : out.toString();
         }
-        String trimmed = raw.trim();
-        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-            return trimmed.substring(1, trimmed.length() - 1).trim();
-        }
-        return trimmed;
+        return isHttpToken(raw) ? raw : null;
     }
 
-    private static Double parseStrictQuality(MediaType mt) {
-        String rawQ = mt.getParameter("q");
-        if (rawQ == null) {
-            return 1.0;
+    private static boolean isHttpToken(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
         }
-        if (!rawQ.matches("(?:0(?:\\.[0-9]{0,3})?|1(?:\\.0{0,3})?)")) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')
+                    || "!#$%&'*+-.^_`|~".indexOf(c) >= 0;
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Double parseStrictQualityValue(String rawQ) {
+        if (rawQ == null || !rawQ.matches("(?:0(?:\\.[0-9]{0,3})?|1(?:\\.0{0,3})?)")) {
             return null;
         }
         try {

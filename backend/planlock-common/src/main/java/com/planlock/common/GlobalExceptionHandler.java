@@ -1,5 +1,6 @@
 package com.planlock.common;
 
+import com.planlock.common.web.ApiPathMatcher;
 import com.planlock.common.web.JsonBodyLimitFilter;
 import com.planlock.common.web.JsonCollectionTooLargeException;
 import com.planlock.common.web.JsonPayloadTooLargeException;
@@ -109,15 +110,7 @@ public class GlobalExceptionHandler {
     }
 
     private static boolean isApiUri(HttpServletRequest request) {
-        if (request == null || request.getRequestURI() == null) {
-            return false;
-        }
-        String uri = request.getRequestURI();
-        String ctx = request.getContextPath();
-        if (ctx != null && !ctx.isEmpty() && uri.startsWith(ctx)) {
-            uri = uri.substring(ctx.length());
-        }
-        return uri.equals("/api") || uri.startsWith("/api/");
+        return ApiPathMatcher.isApiRequest(request);
     }
 
     private static ResponseEntity<ApiResponse<Void>> jsonResponse(HttpStatus status, int code, String message) {
