@@ -365,8 +365,10 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
         )
 
         auth_seen = []
+        all_https_headers = []
         class RealGitAuthServer(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                all_https_headers.append({k.lower(): v for k, v in self.headers.items()})
                 auth = self.headers.get("Authorization")
                 if auth:
                     auth_seen.append((self.path, auth))
@@ -382,59 +384,124 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
         ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
         srv.socket = ssl_ctx.wrap_socket(srv.socket, server_side=True)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        t_srv = threading.Thread(target=srv.serve_forever, daemon=True)
+        t_srv.start()
         try:
             port = srv.server_address[1]
+            # Poison host env with fake HOME/.netrc/_netrc/cookies targeting 127.0.0.1 on the SAME HTTPS test!
+            fake_home = self.root / "https_fake_home"
+            fake_home.mkdir()
+            (fake_home / ".netrc").write_text("machine 127.0.0.1 login netrcuser password netrcpass\n", encoding="utf8")
+            (fake_home / "_netrc").write_text("machine 127.0.0.1 login netrcuser password netrcpass\n", encoding="utf8")
+            cookie_file = fake_home / "cookies.txt"
+            cookie_file.write_text("127.0.0.1\tFALSE\t/\tTRUE\t2147483647\tsid\thttps_secret_cookie\n", encoding="utf8")
+            (fake_home / ".gitconfig").write_text(f"[http]\n\tcookieFile = {cookie_file.as_posix()}\n", encoding="utf8")
+            host_https_env = {**os.environ, "HOME": str(fake_home), "USERPROFILE": str(fake_home)}
+
+            popen_envs: list[dict[str, str]] = []
+            orig_popen = subprocess.Popen
+            def _capturing_popen(*pargs, **pkwargs):
+                popen_envs.append(dict(pkwargs.get("env") or {}))
+                return orig_popen(*pargs, **pkwargs)
+
             with r.git_askpass_env(
-                os.environ.copy(), token_val, expected_host="127.0.0.1", expected_user="x-access-token", expected_repo="owner/repo", expected_port=port,
+                host_https_env, token_val, expected_host="127.0.0.1", expected_user="x-access-token", expected_repo="owner/repo", expected_port=port,
             ) as ask_env:
-                # 1. release.git with anonymous=False preserves controlled GIT_ASKPASS and sends token only for /owner/repo.git
-                with self.assertRaises(r.ReleaseError):
-                    r.git(
-                        self.root,
-                        "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
-                        "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
-                        "ls-remote", f"https://127.0.0.1:{port}/owner/repo.git",
-                        timeout=15, env=ask_env, anonymous=False,
-                    )
+                # 1. release.git with anonymous=False preserves controlled GIT_ASKPASS + isolated home and sends ONLY controlled askpass token
+                with patch.object(r.subprocess, "Popen", side_effect=_capturing_popen):
+                    with self.assertRaises(r.ReleaseError):
+                        r.git(
+                            self.root,
+                            "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
+                            "-c", "http.cookieFile=", "-c", "http.saveCookies=false",
+                            "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
+                            "ls-remote", f"https://127.0.0.1:{port}/owner/repo.git",
+                            timeout=15, env=ask_env, anonymous=False,
+                        )
                 self.assertEqual(len(auth_seen), 1)
                 self.assertTrue(auth_seen[0][0].startswith("/owner/repo.git/"))
                 expected_basic = "Basic " + base64.b64encode(f"x-access-token:{token_val}".encode("utf8")).decode("ascii")
                 self.assertEqual(auth_seen[0][1], expected_basic)
+                for hdrs in all_https_headers:
+                    self.assertNotIn("cookie", hdrs)
 
                 # 2. Mismatched repo path is blocked by askpass BEFORE sending token
                 auth_seen.clear()
+                all_https_headers.clear()
                 with self.assertRaises(r.ReleaseError):
                     r.git(
                         self.root,
                         "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
+                        "-c", "http.cookieFile=", "-c", "http.saveCookies=false",
                         "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
                         "ls-remote", f"https://127.0.0.1:{port}/other/repo.git",
                         timeout=15, env=ask_env, anonymous=False,
                     )
                 self.assertEqual(auth_seen, [])
 
-                # 3. anonymous=True strips controlled GIT_ASKPASS and sends no credentials
-                with self.assertRaises(r.ReleaseError):
-                    r.git(
-                        self.root,
-                        "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
-                        "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
-                        "ls-remote", f"https://127.0.0.1:{port}/owner/repo.git",
-                        timeout=15, env=ask_env, anonymous=True,
-                    )
+                # 3. anonymous=True strips GIT_ASKPASS AND preserves empty home at Popen boundary (no netrc, no cookie over real HTTPS!)
+                all_https_headers.clear()
+                popen_envs.clear()
+                with r.isolated_git_env(host_https_env, anonymous=True) as anon_env:
+                    with patch.object(r.subprocess, "Popen", side_effect=_capturing_popen):
+                        with self.assertRaises(r.ReleaseError):
+                            r.git(
+                                self.root,
+                                "-c", "credential.helper=", "-c", "core.askPass=", "-c", "credential.useHttpPath=true",
+                                "-c", "http.cookieFile=", "-c", "http.saveCookies=false",
+                                "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
+                                "ls-remote", f"https://127.0.0.1:{port}/owner/repo.git",
+                                timeout=15, env=anon_env, anonymous=True,
+                            )
+                        with self.assertRaises(r.ReleaseError):
+                            r.execute(
+                                [
+                                    "git", "-c", "credential.helper=", "-c", "core.askPass=",
+                                    "-c", "http.cookieFile=", "-c", "http.saveCookies=false",
+                                    "-c", "http.sslBackend=openssl", "-c", f"http.sslCAInfo={cert_pem}", "-c", "http.sslVerify=true",
+                                    "ls-remote", f"https://127.0.0.1:{port}/owner/repo.git",
+                                ],
+                                self.root, anon_env, timeout=15,
+                            )
                 self.assertEqual(auth_seen, [])
+                self.assertGreaterEqual(len(all_https_headers), 2)
+                for hdrs in all_https_headers:
+                    self.assertNotIn("authorization", hdrs)
+                    self.assertNotIn("cookie", hdrs)
+                self.assertEqual(len(popen_envs), 2)
+                for penv in popen_envs:
+                    for hk in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+                        self.assertEqual(penv.get(hk), anon_env.get(hk))
+                        self.assertNotEqual(penv.get(hk), str(fake_home))
+                    if os.name == "nt":
+                        self.assertIn("HOMEDRIVE", penv)
+                        self.assertIn("HOMEPATH", penv)
         finally:
             srv.shutdown()
             srv.server_close()
+            t_srv.join(timeout=1)
 
-        # Cleanup failure must surface visibly AND redact token
-        with patch.object(r.shutil, "rmtree", side_effect=PermissionError(f"locked {token_val}")):
-            with self.assertRaises(r.ReleaseError) as ctx:
-                with r.git_askpass_env(os.environ.copy(), token_val, expected_repo="owner/repo"):
-                    pass
-            self.assertIn("Failed to remove temporary GIT_ASKPASS", str(ctx.exception))
-            self.assertNotIn(token_val, str(ctx.exception))
+        # Cleanup failure must surface visibly, redact token, AND recycle temp dir created under %TEMP%
+        real_rmtree = r.shutil.rmtree
+        real_mkdtemp = tempfile.mkdtemp
+        created_dirs: list[str] = []
+        def _tracking_mkdtemp(*a, **kw):
+            d = real_mkdtemp(*a, **kw)
+            created_dirs.append(d)
+            return d
+        try:
+            with (
+                patch.object(r.tempfile, "mkdtemp", side_effect=_tracking_mkdtemp),
+                patch.object(r.shutil, "rmtree", side_effect=PermissionError(f"locked {token_val}")),
+            ):
+                with self.assertRaises(r.ReleaseError) as ctx:
+                    with r.git_askpass_env(os.environ.copy(), token_val, expected_repo="owner/repo"):
+                        pass
+                self.assertIn("Failed to remove temporary GIT_ASKPASS", str(ctx.exception))
+                self.assertNotIn(token_val, str(ctx.exception))
+        finally:
+            for d in created_dirs:
+                real_rmtree(d, ignore_errors=True)
 
     def test_r2_sanitize_git_env_and_centralized_log_redaction(self) -> None:
         dirty = {
@@ -466,29 +533,56 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
             "DB_PASS": "s3c",
             "PRIVATE_KEY": "pw!9",
             "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+            "SSH_AGENT_PID": "4242",
+            "GIT_SSH": "/usr/bin/ssh",
+            "GIT_SSH_COMMAND": "ssh -i /home/user/.ssh/id_ed25519",
         }
         anon_cleaned = r.sanitize_git_env(rich_env, empty_gitconfig_path="/tmp/empty.cfg", empty_home_path="/tmp/empty-home", keep_ssh_env=False)
-        for dropped in ("CUSTOM_APP_TOKEN", "DB_PASS", "PRIVATE_KEY", "SSH_AUTH_SOCK"):
+        for dropped in ("CUSTOM_APP_TOKEN", "DB_PASS", "PRIVATE_KEY", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GIT_SSH", "GIT_SSH_COMMAND"):
             self.assertNotIn(dropped, anon_cleaned)
-        ssh_cleaned = r.sanitize_git_env(rich_env, empty_gitconfig_path="/tmp/empty.cfg", keep_ssh_env=True)
-        self.assertEqual(ssh_cleaned.get("SSH_AUTH_SOCK"), "/tmp/ssh-agent.sock")
+        # Explicit SSH mode keeps all SSH & agent vars even when allow_controlled_askpass=True, and survives Popen sanitization
+        ssh_cleaned = r.sanitize_git_env(rich_env, empty_gitconfig_path="/tmp/empty.cfg", allow_controlled_askpass=True, keep_ssh_env=True)
+        for kept in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "GIT_SSH", "GIT_SSH_COMMAND"):
+            self.assertEqual(ssh_cleaned.get(kept), rich_env[kept])
         for dropped in ("CUSTOM_APP_TOKEN", "DB_PASS", "PRIVATE_KEY"):
             self.assertNotIn(dropped, ssh_cleaned)
 
+        ssh_popen_envs: list[dict[str, str]] = []
+        orig_popen_ssh = subprocess.Popen
+        def _fake_ssh_popen(cmd, **kw):
+            ssh_popen_envs.append(dict(kw.get("env") or {}))
+            raise OSError("stop before launch")
+        with r.isolated_git_env(rich_env, anonymous=False, keep_ssh_env=True) as ssh_env:
+            with patch.object(r.subprocess, "Popen", side_effect=_fake_ssh_popen):
+                with self.assertRaises(OSError):
+                    r.git(self.root, "status", env=ssh_env, anonymous=False)
+                with self.assertRaises(OSError):
+                    r.execute(["git", "status"], self.root, ssh_env)
+        self.assertEqual(len(ssh_popen_envs), 2)
+        for penv in ssh_popen_envs:
+            for kept in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "GIT_SSH", "GIT_SSH_COMMAND"):
+                self.assertEqual(penv.get(kept), rich_env[kept])
+            for dropped in ("CUSTOM_APP_TOKEN", "DB_PASS", "PRIVATE_KEY"):
+                self.assertNotIn(dropped, penv)
+
         secret = "synthetic/secret+tok=999"
         short_secret = "pw9"
+        unicode_secret = "密钥=秘密値"
         b64_auth = base64.b64encode(("x-access-token:" + secret).encode("utf8")).decode("ascii")
         pct_upper = r.urllib.parse.quote(secret, safe="")
         pct_lower = pct_upper.replace("%2F", "%2f").replace("%2B", "%2b").replace("%3D", "%3d")
         pct_mixed = pct_upper.replace("%2F", "%2f")  # mixed %2f + %2B + %3D
+        unicode_pct_mixed = "%e5%af%86%E9%92%A5%3d%E7%A7%98%e5%af%86%E5%80%A4"
         log = self.root / "leak.log"
         env = os.environ.copy()
         env["CUSTOM_CHILD_SECRET"] = secret
         env["DB_PASS"] = short_secret
+        env["UNICODE_SECRET"] = unicode_secret
         with self.assertRaises(r.ReleaseError):
             r.execute(
                 [sys.executable, "-c", (
                     f"import sys; sys.stderr.write('raw={secret} short={short_secret} pct1={pct_upper} pct2={pct_lower} pct3={pct_mixed} "
+                    f"upct={unicode_pct_mixed} uplain={unicode_secret} "
                     f"Authorization: Bearer {secret} Authorization: Basic {b64_auth} "
                     f"HTTPS://tok@github.com/o/r?X-Amz-Signature=sigsecret#fragsecret "
                     f"https://github.com/o/r#onlyfrag\\n'); sys.exit(2)"
@@ -496,10 +590,14 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
                 self.root, env, log,
             )
         log_text = log.read_text(encoding="utf8")
-        for leaked in (secret, short_secret, b64_auth, pct_upper, pct_lower, pct_mixed, "sigsecret", "fragsecret", "onlyfrag", "tok@"):
+        for leaked in (secret, short_secret, unicode_secret, b64_auth, pct_upper, pct_lower, pct_mixed, unicode_pct_mixed, "sigsecret", "fragsecret", "onlyfrag", "tok@"):
             self.assertNotIn(leaked, log_text)
         self.assertIn("[REDACTED]", log_text)
         self.assertIn("/tmp/ssh-agent.sock", r.redact_secrets("/tmp/ssh-agent.sock", extra_secrets=r._extract_secrets_from_env(rich_env)))
+        self.assertEqual(
+            r.redact_secrets("url=https://x/%E7%A7%98%e5%af%86%E5%80%A4", extra_secrets=("秘密値",)),
+            "url=https://x/[REDACTED]",
+        )
 
         # archive_source must route via controlled git runner & redact stderr/error messages
         with patch.object(r, "_run_bounded_subprocess", return_value=(False, 1, b"", f"fatal token={secret}".encode("utf8"), [])):
@@ -508,13 +606,27 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
                     r.archive_source(self.root, "HEAD", "2.2.0", self.root / "out.zip")
             self.assertNotIn(secret, str(arch_ctx.exception))
 
-        # isolated_git_env cleanup failure must surface diagnostic visibly (not ignore_errors=True)
-        with patch.object(r.shutil, "rmtree", side_effect=PermissionError(f"locked {secret}")):
-            with self.assertRaises(r.ReleaseError) as iso_ctx:
-                with r.isolated_git_env({"ORIVA_GIT_TOKEN": secret}):
-                    pass
-            self.assertIn("Failed to remove temporary isolated Git config", str(iso_ctx.exception))
-            self.assertNotIn(secret, str(iso_ctx.exception))
+        # isolated_git_env cleanup failure must surface diagnostic visibly AND recycle TEMP dir
+        real_rmtree = r.shutil.rmtree
+        real_mkdtemp = tempfile.mkdtemp
+        created_iso_dirs: list[str] = []
+        def _tracking_iso_mkdtemp(*a, **kw):
+            d = real_mkdtemp(*a, **kw)
+            created_iso_dirs.append(d)
+            return d
+        try:
+            with (
+                patch.object(r.tempfile, "mkdtemp", side_effect=_tracking_iso_mkdtemp),
+                patch.object(r.shutil, "rmtree", side_effect=PermissionError(f"locked {secret}")),
+            ):
+                with self.assertRaises(r.ReleaseError) as iso_ctx:
+                    with r.isolated_git_env({"ORIVA_GIT_TOKEN": secret}):
+                        pass
+                self.assertIn("Failed to remove temporary isolated Git config", str(iso_ctx.exception))
+                self.assertNotIn(secret, str(iso_ctx.exception))
+        finally:
+            for d in created_iso_dirs:
+                real_rmtree(d, ignore_errors=True)
 
     @unittest.skipUnless(r.os.name == "nt", "Windows CMD delayed expansion guard")
     def test_r3_windows_batch_disables_delayed_expansion_for_bang_paths(self) -> None:
@@ -1225,6 +1337,113 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
                 except OSError:
                     pass
             t.join(timeout=1)
+
+    def test_r5_backoff_deadline_exhaustion_preserves_stage_and_retryable_http_clears_part(self) -> None:
+        payload = b"0123456789ABCDEF" * 64
+        expected_sha = hashlib.sha256(payload).hexdigest().upper()
+
+        class ChunkResp:
+            def __init__(self, status: int, chunks: list, headers: dict[str, str] | None = None):
+                self.status = status
+                self._chunks = list(chunks)
+                self.headers = headers or {}
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self, size: int = -1) -> bytes:
+                if not self._chunks:
+                    return b""
+                nxt = self._chunks.pop(0)
+                if isinstance(nxt, BaseException):
+                    raise nxt
+                return nxt
+
+        # 1a. When DOWNLOAD_BACKOFF_SECONDS[0] >= remaining budget, backoff must NOT sleep into 'before starting'; must raise previous stage error!
+        now_box = [1000.0]
+        def _fake_monotonic():
+            return now_box[0]
+
+        def _stall_open(req, timeout=None):
+            # Advance clock inside read to leave only 0.5s (< 2s backoff)
+            def _slow_fail():
+                now_box[0] += 0.5
+                return TimeoutError("read stall")
+            return ChunkResp(200, [payload[:100], TimeoutError("read stall")], {"Content-Length": str(len(payload))})
+
+        t_clock = self.root / "clock_backoff.apk"
+        def _advancing_open(req, timeout=None):
+            now_box[0] += 9.5  # total_timeout=10.0 -> remaining=0.5s (< backoff 2s)
+            return ChunkResp(200, [payload[:64], TimeoutError("read stall")], {"Content-Length": str(len(payload))})
+        sleep_calls: list[float] = []
+        with patch.object(r.time, "monotonic", side_effect=_fake_monotonic):
+            with self.assertRaises(r.ReleaseError) as ctx1:
+                r.download_asset(
+                    "https://github.com/o/r/releases/download/v2.2.0/clock.apk",
+                    t_clock, expected_size=len(payload), expected_sha256=expected_sha,
+                    total_timeout=10.0,
+                    opener=SimpleNamespace(open=_advancing_open),
+                    sleep_fn=lambda s: sleep_calls.append(s),
+                )
+        msg1 = str(ctx1.exception)
+        self.assertIn("during data read", msg1)
+        self.assertIn("read stall", msg1)
+        self.assertNotIn("before starting", msg1)
+        self.assertEqual(sleep_calls, [])
+        self.assertFalse(t_clock.with_name("clock_backoff.apk.part").exists())
+        self.assertFalse(t_clock.with_name("clock_backoff.apk.part.meta.json").exists())
+
+        # 1b. When sleep_fn itself advances clock across deadline, still preserves stage & error (never enters next loop 'before starting')
+        now_box[0] = 2000.0
+        t_sleep_over = self.root / "sleep_over.apk"
+        def _open_plenty_time(req, timeout=None):
+            now_box[0] += 1.0  # remaining=9.0s > backoff 2.0s
+            return ChunkResp(200, [payload[:64], TimeoutError("read stall after sleep")], {"Content-Length": str(len(payload))})
+        def _slow_sleep(sec: float):
+            now_box[0] += 15.0  # pushes past total_timeout=10.0
+        with patch.object(r.time, "monotonic", side_effect=_fake_monotonic):
+            with self.assertRaises(r.ReleaseError) as ctx2:
+                r.download_asset(
+                    "https://github.com/o/r/releases/download/v2.2.0/sleep_over.apk",
+                    t_sleep_over, expected_size=len(payload), expected_sha256=expected_sha,
+                    total_timeout=10.0,
+                    opener=SimpleNamespace(open=_open_plenty_time),
+                    sleep_fn=_slow_sleep,
+                )
+        msg2 = str(ctx2.exception)
+        self.assertIn("during data read", msg2)
+        self.assertIn("read stall after sleep", msg2)
+        self.assertNotIn("before starting", msg2)
+        self.assertFalse(t_sleep_over.with_name("sleep_over.apk.part").exists())
+
+        # 2. Retryable HTTP 429/503 MUST clear existing .part & .part.meta.json BEFORE next retry (restarting cleanly from byte 0)
+        for http_err_code in (429, 503):
+            t_http = self.root / f"retry_{http_err_code}.apk"
+            url_http = f"https://github.com/o/r/releases/download/v2.2.0/retry_{http_err_code}.apk"
+            seen_ranges: list[str | None] = []
+            part_exists_on_retry: list[bool] = []
+            state = {"attempt": 0}
+
+            def _http_retry_open(req, timeout=None, st=state, ranges=seen_ranges, exists_log=part_exists_on_retry, code=http_err_code, target_p=t_http, u=url_http):
+                st["attempt"] += 1
+                ranges.append(req.headers.get("Range"))
+                if st["attempt"] == 1:
+                    return ChunkResp(200, [payload[:200], TimeoutError("transient stall")], {"Content-Length": str(len(payload))})
+                if st["attempt"] == 2:
+                    raise urllib.error.HTTPError(u, code, "Retryable", {}, io.BytesIO(b""))
+                exists_log.append(target_p.with_name(target_p.name + ".part").exists() or target_p.with_name(target_p.name + ".part.meta.json").exists())
+                return ChunkResp(200, [payload], {"Content-Length": str(len(payload))})
+
+            r.download_asset(
+                url_http, t_http,
+                expected_size=len(payload), expected_sha256=expected_sha,
+                opener=SimpleNamespace(open=_http_retry_open),
+                sleep_fn=lambda _: None,
+            )
+            self.assertEqual(len(seen_ranges), 3)
+            self.assertIsNone(seen_ranges[0])
+            self.assertEqual(seen_ranges[1], "bytes=200-")
+            self.assertIsNone(seen_ranges[2], f"HTTP {http_err_code} retry must clear .part and restart without Range")
+            self.assertEqual(part_exists_on_retry, [False])
+            self.assertEqual(t_http.read_bytes(), payload)
 
 
 if __name__ == "__main__":

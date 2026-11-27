@@ -31,6 +31,7 @@ CONTENT_RANGE_RE = re.compile(r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$', re.IGNORECASE)
 
 _REGISTERED_SECRETS: set[str] = set()
 _CONTROLLED_ASKPASS_TOKENS: dict[str, str] = {}
+_CONTROLLED_GIT_CONTEXTS: dict[str, dict[str, object]] = {}
 _EXPLICIT_SECRET_KEYS = frozenset({'github_token', 'GITHUB_TOKEN', 'ORIVA_GIT_TOKEN', 'ORIVA_RELEASE_STOREPASS'})
 _SECRET_KEY_EXACT_TOKENS = frozenset({'TOKEN', 'SECRET', 'PASSWORD', 'PASS', 'PASSWD', 'STOREPASS', 'KEYPASS', 'KEY', 'CREDENTIAL', 'CREDENTIALS', 'AUTH', 'PRIVATE_KEY', 'API_KEY'})
 _NON_SECRET_NAME_TOKENS = frozenset({'SOCK', 'SOCKET', 'DIR', 'PATH', 'HOME', 'FILE', 'PROMPT', 'HOST', 'PORT', 'REPO', 'USER'})
@@ -102,8 +103,6 @@ def _mixed_percent_regex(secret):
     for ch in secret:
         if ch == ' ':
             parts.append(r'(?: |\+|(?i:%20))')
-        elif ch.isalnum() or ch in '-._~':
-            parts.append(re.escape(ch))
         else:
             hex_b = ''.join(f'%{byte:02x}' for byte in ch.encode('utf-8'))
             parts.append(rf'(?:{re.escape(ch)}|(?i:{re.escape(hex_b)}))')
@@ -157,8 +156,10 @@ def _apply_isolated_home_env(clean, home_dir):
 
 def sanitize_git_env(base_env, empty_gitconfig_path=None, empty_home_path=None, allow_controlled_askpass=False, keep_ssh_env=False):
     clean = {}
+    ctx_meta = _CONTROLLED_GIT_CONTEXTS.get(str(empty_gitconfig_path)) if empty_gitconfig_path is not None else None
+    effective_keep_ssh = bool(keep_ssh_env or (ctx_meta is not None and ctx_meta.get('keep_ssh_env')))
     allowed_keys = set(_ESSENTIAL_GIT_RUNTIME_VARS)
-    if keep_ssh_env and not allow_controlled_askpass:
+    if effective_keep_ssh:
         allowed_keys |= _SSH_RUNTIME_VARS
     for key, val in base_env.items():
         upper = key.upper()
@@ -180,14 +181,17 @@ def sanitize_git_env(base_env, empty_gitconfig_path=None, empty_home_path=None, 
     clean['GIT_CONFIG_NOSYSTEM'] = '1'
     if empty_gitconfig_path is not None:
         clean['GIT_CONFIG_GLOBAL'] = str(empty_gitconfig_path)
-    if empty_home_path is not None:
-        _apply_isolated_home_env(clean, empty_home_path)
+    resolved_home = empty_home_path
+    if resolved_home is None and ctx_meta is not None and not effective_keep_ssh:
+        resolved_home = ctx_meta.get('empty_home')
+    if resolved_home is not None:
+        _apply_isolated_home_env(clean, resolved_home)
     if allow_controlled_askpass:
         candidate_askpass = base_env.get('GIT_ASKPASS')
         expected_cfg = _CONTROLLED_ASKPASS_TOKENS.get(candidate_askpass)
         if candidate_askpass and expected_cfg is not None and str(clean.get('GIT_CONFIG_GLOBAL', '')) == expected_cfg:
             clean['GIT_ASKPASS'] = candidate_askpass
-            if 'ORIVA_GIT_HOME' in base_env and empty_home_path is None:
+            if 'ORIVA_GIT_HOME' in base_env and resolved_home is None:
                 _apply_isolated_home_env(clean, base_env['ORIVA_GIT_HOME'])
             for k in ('ORIVA_GIT_TOKEN', 'ORIVA_GIT_EXPECTED_HOST', 'ORIVA_GIT_EXPECTED_USER', 'ORIVA_GIT_EXPECTED_REPO', 'ORIVA_GIT_EXPECTED_PORT'):
                 if k in base_env:
@@ -219,6 +223,7 @@ def isolated_git_env(base_env=None, anonymous=False, keep_ssh_env=False):
     in_body_exception = False
     raw_env = base_env if base_env is not None else os.environ
     extra_secrets = _extract_secrets_from_env(raw_env)
+    cfg_key = None
     try:
         if os.name != 'nt':
             cfg_dir.chmod(0o700)
@@ -226,18 +231,24 @@ def isolated_git_env(base_env=None, anonymous=False, keep_ssh_env=False):
         empty_cfg.write_bytes(b'')
         empty_home = cfg_dir / 'home'
         empty_home.mkdir(parents=True, exist_ok=True)
+        eff_keep_ssh = bool(keep_ssh_env and not anonymous)
+        eff_home = None if eff_keep_ssh else empty_home
+        cfg_key = str(empty_cfg)
+        _CONTROLLED_GIT_CONTEXTS[cfg_key] = {'empty_home': eff_home, 'keep_ssh_env': eff_keep_ssh}
         try:
             yield sanitize_git_env(
                 raw_env,
                 empty_gitconfig_path=empty_cfg,
-                empty_home_path=None if (keep_ssh_env and not anonymous) else empty_home,
+                empty_home_path=eff_home,
                 allow_controlled_askpass=not anonymous,
-                keep_ssh_env=(keep_ssh_env and not anonymous),
+                keep_ssh_env=eff_keep_ssh,
             )
         except BaseException:
             in_body_exception = True
             raise
     finally:
+        if cfg_key is not None:
+            _CONTROLLED_GIT_CONTEXTS.pop(cfg_key, None)
         _remove_temp_dir_with_diag(cfg_dir, 'isolated Git config directory', extra_secrets=extra_secrets, raise_on_failure=not in_body_exception)
 
 
@@ -390,15 +401,21 @@ class _PipeCollector:
         self._thread.start()
 
     def _run(self):
-        fd = self.stream.fileno()
-        while True:
+        try:
+            fd = self.stream.fileno()
+            while True:
+                try:
+                    data = os.read(fd, 8192)
+                except OSError:
+                    break
+                if not data:
+                    break
+                self.chunks.append(data)
+        finally:
             try:
-                data = os.read(fd, 8192)
+                self.stream.close()
             except OSError:
-                break
-            if not data:
-                break
-            self.chunks.append(data)
+                pass
 
     def join(self, timeout):
         self._thread.join(timeout=timeout)
@@ -519,11 +536,34 @@ def _run_git_raw(root, *args, timeout=None, env=None, anonymous=False):
             with isolated_git_env(env, anonymous=anonymous) as iso_env:
                 yield iso_env
         else:
-            yield sanitize_git_env(
-                env,
-                empty_gitconfig_path=env['GIT_CONFIG_GLOBAL'],
-                allow_controlled_askpass=not anonymous,
-            )
+            cfg_key = str(env['GIT_CONFIG_GLOBAL'])
+            ctx_meta = _CONTROLLED_GIT_CONTEXTS.get(cfg_key)
+            if anonymous:
+                if ctx_meta is not None and ctx_meta.get('empty_home') is not None:
+                    yield sanitize_git_env(
+                        env,
+                        empty_gitconfig_path=cfg_key,
+                        empty_home_path=ctx_meta['empty_home'],
+                        allow_controlled_askpass=False,
+                        keep_ssh_env=False,
+                    )
+                else:
+                    with isolated_git_env(env, anonymous=True) as iso_env:
+                        yield iso_env
+            elif ctx_meta is not None:
+                yield sanitize_git_env(
+                    env,
+                    empty_gitconfig_path=cfg_key,
+                    empty_home_path=ctx_meta.get('empty_home'),
+                    allow_controlled_askpass=True,
+                    keep_ssh_env=bool(ctx_meta.get('keep_ssh_env', False)),
+                )
+            else:
+                yield sanitize_git_env(
+                    env,
+                    empty_gitconfig_path=cfg_key,
+                    allow_controlled_askpass=True,
+                )
 
     effective_timeout = timeout if timeout is not None else DEFAULT_GIT_TIMEOUT_SECONDS
     with _env_ctx() as effective_env:
@@ -634,11 +674,22 @@ def _execution_env_ctx(args, env):
         with isolated_git_env(env, anonymous=False) as iso_env:
             yield iso_env
     else:
-        yield sanitize_git_env(
-            env,
-            empty_gitconfig_path=env['GIT_CONFIG_GLOBAL'],
-            allow_controlled_askpass=True,
-        )
+        cfg_key = str(env['GIT_CONFIG_GLOBAL'])
+        ctx_meta = _CONTROLLED_GIT_CONTEXTS.get(cfg_key)
+        if ctx_meta is not None:
+            yield sanitize_git_env(
+                env,
+                empty_gitconfig_path=cfg_key,
+                empty_home_path=ctx_meta.get('empty_home'),
+                allow_controlled_askpass=True,
+                keep_ssh_env=bool(ctx_meta.get('keep_ssh_env', False)),
+            )
+        else:
+            yield sanitize_git_env(
+                env,
+                empty_gitconfig_path=cfg_key,
+                allow_controlled_askpass=True,
+            )
 
 
 def execute(args, cwd, env, logfile=None, timeout=None):
@@ -1092,6 +1143,7 @@ def git_askpass_env(base_env, token, expected_host='github.com', expected_user='
     askpass_dir = Path(tempfile.mkdtemp(prefix='oriva-git-askpass-'))
     in_body_exception = False
     helper_str = None
+    cfg_key = None
     try:
         if os.name != 'nt':
             askpass_dir.chmod(0o700)
@@ -1111,9 +1163,11 @@ def git_askpass_env(base_env, token, expected_host='github.com', expected_user='
             helper_str = helper.as_posix()
         else:
             helper_str = str(py_script)
-        _CONTROLLED_ASKPASS_TOKENS[helper_str] = str(empty_cfg)
+        cfg_key = str(empty_cfg)
+        _CONTROLLED_ASKPASS_TOKENS[helper_str] = cfg_key
         empty_home = askpass_dir / 'home'
         empty_home.mkdir(parents=True, exist_ok=True)
+        _CONTROLLED_GIT_CONTEXTS[cfg_key] = {'empty_home': empty_home, 'keep_ssh_env': False}
         git_env = sanitize_git_env(base_env, empty_gitconfig_path=empty_cfg, empty_home_path=empty_home, allow_controlled_askpass=False)
         git_env['GIT_ASKPASS'] = helper_str
         git_env['ORIVA_GIT_HOME'] = str(empty_home)
@@ -1130,6 +1184,8 @@ def git_askpass_env(base_env, token, expected_host='github.com', expected_user='
     finally:
         if helper_str is not None:
             _CONTROLLED_ASKPASS_TOKENS.pop(helper_str, None)
+        if cfg_key is not None:
+            _CONTROLLED_GIT_CONTEXTS.pop(cfg_key, None)
         _remove_temp_dir_with_diag(askpass_dir, 'GIT_ASKPASS directory', extra_secrets=(token,), raise_on_failure=not in_body_exception)
 
 
@@ -1772,6 +1828,7 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
                     _cleanup_part()
                     last_error = ReleaseError(f'HTTP 416 restarting {target.name}')
                 elif exc_code in {429, 500, 502, 503, 504}:
+                    _cleanup_part()
                     last_error = ReleaseError(f'HTTP {exc_code} during {cur_stage} for {target.name}')
                 else:
                     _cleanup_part()
@@ -1790,11 +1847,14 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
                 _cleanup_part()
                 raise last_error
             remaining = deadline - time.monotonic()
-            delay = min(DOWNLOAD_BACKOFF_SECONDS[attempt], max(0.0, remaining))
-            if delay <= 0:
+            delay = DOWNLOAD_BACKOFF_SECONDS[attempt]
+            if remaining <= 0 or delay >= remaining:
                 _cleanup_part()
                 raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {cur_stage}: {last_error}') from None
             sleep_fn(delay)
+            if aborter.expired or time.monotonic() >= deadline:
+                _cleanup_part()
+                raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {cur_stage}: {last_error}') from None
     finally:
         aborter.stop()
 
