@@ -45,6 +45,10 @@ class ProtectedApiPreAuthFilterTest {
                     "/api/unknown",
                     "/api/v1/plugins/catalog/other",
                     "/api/v1/plugins/unknown",
+                    "/api/v1/plugins/artifacts/official/",
+                    "/api/v1/plugins/artifacts/third-party/",
+                    "/api/v1/plugins/artifacts/official",
+                    "/api/v1/plugins/artifacts/official/a/b",
                     "/api/v1/health;matrix=1",
                     "/api/v1/plugins/artifacts/official/..",
                     "/%61pi/v1/me",
@@ -145,6 +149,62 @@ class ProtectedApiPreAuthFilterTest {
         assertThat(bodyLimitFilter.isProtectedApiRoute("/api;v=1/v1/me")).isTrue();
         assertThat(bodyLimitFilter.isProtectedApiRoute("/api/v1;x=1/me")).isTrue();
         assertThat(bodyLimitFilter.isProtectedApiRoute("//api/v1/me")).isTrue();
+        assertThat(bodyLimitFilter.isProtectedApiRoute("/api/v1/plugins/artifacts/official/")).isTrue();
+        assertThat(bodyLimitFilter.isProtectedApiRoute("/api/v1/plugins/artifacts/third-party/")).isTrue();
+        assertThat(bodyLimitFilter.isProtectedApiRoute("/api/v1/plugins/artifacts/official/demo.pljs")).isFalse();
         assertThat(bodyLimitFilter.isProtectedApiRoute("/api/v1/health")).isFalse();
+    }
+
+    @Test
+    void servletPathPrefixIsClassifiedIsomorphicallyAcrossPreAuthAndJsonBodyLimitFilters() throws Exception {
+        // Simulate a prefix-mapped DispatcherServlet (/portal/*) with contextPath (/ctx):
+        // 1) Protected API (/ctx/portal/api/v1/me) -> both filters reject unauthenticated request with 1001 + no-store
+        MockHttpServletRequest protectedReq = new MockHttpServletRequest("POST", "/ctx/portal/api/v1/me");
+        protectedReq.setContextPath("/ctx");
+        protectedReq.setServletPath("/portal");
+        protectedReq.setPathInfo("/api/v1/me");
+        protectedReq.setContentType("application/json");
+        protectedReq.setContent("{\"x\":1}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(protectedReq)).isEqualTo("/api/v1/me");
+        assertThat(ApiPathMatcher.isApiRequest(protectedReq)).isTrue();
+        assertThat(ApiPathMatcher.isProtectedApiRequest(protectedReq)).isTrue();
+
+        MockHttpServletResponse preAuthRes = new MockHttpServletResponse();
+        preAuthFilter.doFilter(protectedReq, preAuthRes, (r, s) -> {
+            throw new AssertionError("preAuth should block prefixed protected API");
+        });
+        assertThat(preAuthRes.getStatus()).isEqualTo(200);
+        assertThat(preAuthRes.getHeader("Cache-Control")).isEqualTo("no-store");
+        assertThat(preAuthRes.getContentAsString(StandardCharsets.UTF_8))
+                .contains("\"code\":" + ErrorCode.UNAUTHORIZED.getCode());
+
+        MockHttpServletRequest protectedJsonReq = new MockHttpServletRequest("POST", "/ctx/portal/api/v1/me");
+        protectedJsonReq.setContextPath("/ctx");
+        protectedJsonReq.setServletPath("/portal");
+        protectedJsonReq.setPathInfo("/api/v1/me");
+        protectedJsonReq.setContentType("application/json");
+        protectedJsonReq.setContent("{\"x\":1}".getBytes(StandardCharsets.UTF_8));
+        MockHttpServletResponse bodyLimitRes = new MockHttpServletResponse();
+        bodyLimitFilter.doFilter(protectedJsonReq, bodyLimitRes, (r, s) -> {
+            throw new AssertionError("bodyLimitFilter should block prefixed protected API");
+        });
+        assertThat(bodyLimitRes.getStatus()).isEqualTo(200);
+        assertThat(bodyLimitRes.getHeader("Cache-Control")).isEqualTo("no-store");
+        assertThat(bodyLimitRes.getContentAsString(StandardCharsets.UTF_8))
+                .contains("\"code\":" + ErrorCode.UNAUTHORIZED.getCode());
+
+        // 2) Public API (/ctx/portal/api/v1/auth/login) -> both filters pass through cleanly
+        MockHttpServletRequest publicReq = new MockHttpServletRequest("POST", "/ctx/portal/api/v1/auth/login");
+        publicReq.setContextPath("/ctx");
+        publicReq.setServletPath("/portal");
+        publicReq.setPathInfo("/api/v1/auth/login");
+        publicReq.setContentType("application/json");
+        publicReq.setContent("{\"a\":1}".getBytes(StandardCharsets.UTF_8));
+        assertThat(ApiPathMatcher.resolvePathWithinApplication(publicReq)).isEqualTo("/api/v1/auth/login");
+        assertThat(ApiPathMatcher.isProtectedApiRequest(publicReq)).isFalse();
+        AtomicBoolean bodyProceeded = new AtomicBoolean(false);
+        bodyLimitFilter.doFilter(publicReq, new MockHttpServletResponse(), (r, s) -> bodyProceeded.set(true));
+        assertThat(bodyProceeded.get()).isTrue();
     }
 }

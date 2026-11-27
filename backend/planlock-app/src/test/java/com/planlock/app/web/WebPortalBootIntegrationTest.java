@@ -187,7 +187,9 @@ class WebPortalBootIntegrationTest {
                 "/api/unknown",
                 "/api/v2/secret",
                 "/api/v1/plugins/unknown",
-                "/api/v1/plugins/catalog/unknown")) {
+                "/api/v1/plugins/catalog/unknown",
+                "/api/v1/plugins/artifacts/official/",
+                "/api/v1/plugins/artifacts/third-party/")) {
             for (String accept : accepts) {
                 var req = get(path);
                 if (!accept.isEmpty()) {
@@ -306,6 +308,8 @@ class WebPortalBootIntegrationTest {
                 "/api/v1/plugins/catalog/other",
                 "/api/v1/plugins/catalog/unknown",
                 "/api/v1/plugins/catalog/official/extra",
+                "/api/v1/plugins/artifacts/official/",
+                "/api/v1/plugins/artifacts/third-party/",
                 "/api/unknown")) {
             for (String accept : accepts) {
                 var req = get(path).header("Authorization", "Bearer " + token);
@@ -380,12 +384,14 @@ class WebPortalBootIntegrationTest {
         }
 
         // Pending: HTML / text/* / */* / mixed q>0 / parameterized specificity overrides (in any order) & RFC 9110 valid q=1. accept HTML.
+        // Argon RFC 9110 ruling: standalone charset="utf-8" -> 200; foo="a,b;q=0" combined with */*;q=0.5 -> 200; standalone foo="a,b;q=0" -> 406.
         deploymentRow.put("initialized", false);
         for (String accept : List.of(
                 "",
                 "text/html",
                 "text/html;charset=utf-8",
                 "text/html;charset=\"utf-8\"",
+                "text/html;charset=\"utf-8\";q=0.9",
                 "text/html;q=1.",
                 "text/html;q=0.9;charset=utf-8, */*;q=0.1",
                 "text/html;foo=\"a,b;q=0\";q=0.9, */*;q=0.5",
@@ -406,13 +412,15 @@ class WebPortalBootIntegrationTest {
                     .andExpect(header().string("Cache-Control", "no-store"));
         }
 
-        // R3: Post-q incompatible params, duplicate q in single range, parameterized q=0, non-matching wildcard params, RFC 9110 q=0., invalid q & JSON-only -> 406.
+        // R3: Undeclared params (including standalone quoted foo="a,b;q=0" per Argon RFC 9110 ruling), post-q incompatible params,
+        // duplicate q in single range, parameterized q=0, non-matching wildcard params, RFC 9110 q=0., invalid q & JSON-only -> 406.
         for (String rejectedAccept : List.of(
                 "application/json",
                 "text/html;q=0, */*;q=0.8",
                 "text/*;q=0, */*;q=0.9",
                 "text/html;charset=utf-8;q=0, text/html;q=0.9",
                 "text/html;q=0;charset=utf-8, text/html;q=0.9",
+                "text/html;foo=\"a,b;q=0\";q=0.9",
                 "text/html;q=0.9;charset=iso-8859-1",
                 "text/html;q=0.9;foo=bar",
                 "text/html;q=0;q=0.9",

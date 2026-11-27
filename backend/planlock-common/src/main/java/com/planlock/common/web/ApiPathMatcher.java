@@ -12,13 +12,14 @@ import java.nio.charset.StandardCharsets;
 /**
  * 与 Spring MVC 6.2 {@link ServletRequestPathUtils} / {@link PathContainer#parsePath} 完全对齐的 API 路径分类器（REQ-041 R1b）：
  * <ol>
- *   <li>通过 {@link PathContainer.Options#HTTP_PATH} 逐段剥离矩阵参数（{@code ;k=v}）并做分段 UTF-8 百分号解码
- *       （绝不将 {@code %2F} 展开为路径分隔符），同步识别前导多斜杠（如 {@code //api/v1/me}）、首段编码
- *       （如 {@code /%61pi/v1/me}）与首段/中段矩阵参数（如 {@code /api;v=1/v1/me}、{@code /api/v1;x=1/me}）；</li>
- *   <li>供 {@link ProtectedApiPreAuthFilter}、{@link JsonBodyLimitFilter} 与 {@link com.planlock.common.GlobalExceptionHandler}
- *       共享同一 API 前缀与受保护判定语义，彻底消除 Servlet 过滤器与 Spring MVC 路由解码差异；</li>
+ *   <li>三端（{@link ProtectedApiPreAuthFilter}、{@link JsonBodyLimitFilter}、{@link com.planlock.common.GlobalExceptionHandler}）
+ *       均直接以 {@link HttpServletRequest} 驱动，经 {@link ServletRequestPathUtils#parseAndCache(HttpServletRequest)} 统一获取
+ *       应用内路径（同步剥离 {@code contextPath} 与前缀型 {@code servletPath}），并按 {@link PathContainer.Options#HTTP_PATH}
+ *       逐段剥离矩阵参数与分段 UTF-8 百分号解码（绝不将 {@code %2F} 展开为路径分隔符）；</li>
  *   <li>任何含可疑路径语法（{@code ..}、{@code ;}、{@code %}、{@code \}、{@code //}）的 API 变体均禁止获得公开白名单豁免，
- *       强制归类为受保护 API。</li>
+ *       强制归类为受保护 API；</li>
+ *   <li>公开产物通配（{@code /api/v1/plugins/artifacts/{official,third-party}/*}）与 MVC {@code {fileName:.+}} 保持一致，
+ *       严格要求单个非空末段，绝不豁免空末段（如 {@code /api/v1/plugins/artifacts/official/}）或深层子路径。</li>
  * </ol>
  */
 public final class ApiPathMatcher {
@@ -26,6 +27,25 @@ public final class ApiPathMatcher {
     private static final AntPathMatcher ANT_PATH_MATCHER = new AntPathMatcher();
 
     private ApiPathMatcher() {
+    }
+
+    /**
+     * 解析与 Spring MVC 6.2 {@link ServletRequestPathUtils} 一致的应用内请求路径（剥离 contextPath 与前缀型 servletPath）。
+     */
+    public static String resolvePathWithinApplication(HttpServletRequest request) {
+        if (request == null) {
+            return "/";
+        }
+        try {
+            RequestPath parsed = ServletRequestPathUtils.parseAndCache(request);
+            if (parsed != null && parsed.pathWithinApplication() != null) {
+                String value = parsed.pathWithinApplication().value();
+                return (value == null || value.isEmpty()) ? "/" : value;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // 非法百分号编码时回退到容错路径剥离
+        }
+        return extractFallbackPathWithinApplication(request);
     }
 
     /**
@@ -37,13 +57,13 @@ public final class ApiPathMatcher {
         }
         try {
             RequestPath parsed = ServletRequestPathUtils.parseAndCache(request);
-            if (isApiPathContainer(parsed.pathWithinApplication())) {
+            if (parsed != null && isApiPathContainer(parsed.pathWithinApplication())) {
                 return true;
             }
         } catch (IllegalArgumentException ignored) {
             // 非法百分号编码时回退到容错首段检测，避免漏判 API 前缀
         }
-        return isApiPath(extractRawPathWithinApplication(request));
+        return isApiPath(extractFallbackPathWithinApplication(request));
     }
 
     /**
@@ -53,11 +73,11 @@ public final class ApiPathMatcher {
         if (request == null || !isApiRequest(request)) {
             return false;
         }
-        String rawPath = extractRawPathWithinApplication(request);
-        if (hasSuspiciousPublicPathToken(rawPath)) {
+        String appPath = resolvePathWithinApplication(request);
+        if (hasSuspiciousPublicPathToken(appPath)) {
             return true;
         }
-        return !matchesPublicPattern(rawPath);
+        return !matchesPublicPattern(appPath);
     }
 
     /**
@@ -91,16 +111,24 @@ public final class ApiPathMatcher {
         return !matchesPublicPattern(rawPath);
     }
 
-    static String extractRawPathWithinApplication(HttpServletRequest request) {
+    static String extractFallbackPathWithinApplication(HttpServletRequest request) {
         String uri = request.getRequestURI();
         if (uri == null) {
             return "/";
         }
+        String path = uri;
         String contextPath = request.getContextPath();
-        if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
-            return uri.substring(contextPath.length());
+        if (contextPath != null && !contextPath.isEmpty() && path.startsWith(contextPath)) {
+            path = path.substring(contextPath.length());
         }
-        return uri;
+        // 与 Spring ServletRequestPath 一致：当前缀映射 Servlet（pathInfo != null）存在时剥离 servletPath 前缀
+        String pathInfo = request.getPathInfo();
+        String servletPath = request.getServletPath();
+        if (pathInfo != null && servletPath != null && !servletPath.isEmpty() && path.startsWith(servletPath)) {
+            String stripped = path.substring(servletPath.length());
+            path = stripped.isEmpty() ? "/" : stripped;
+        }
+        return path.isEmpty() ? "/" : path;
     }
 
     static boolean hasSuspiciousPublicPathToken(String path) {
@@ -113,7 +141,20 @@ public final class ApiPathMatcher {
 
     private static boolean matchesPublicPattern(String cleanPath) {
         for (String publicPattern : WebConfig.PUBLIC_API_PATTERNS) {
-            if (ANT_PATH_MATCHER.match(publicPattern, cleanPath)) {
+            if (publicPattern.endsWith("/*")) {
+                // 严格对齐 Spring MVC {fileName:.+}：仅匹配单个非空末段，绝不豁免空末段 "/" 或多级路径
+                String prefix = publicPattern.substring(0, publicPattern.length() - 1);
+                if (cleanPath.startsWith(prefix)) {
+                    String tail = cleanPath.substring(prefix.length());
+                    if (!tail.isEmpty() && tail.indexOf('/') < 0) {
+                        return true;
+                    }
+                }
+            } else if (!publicPattern.contains("*") && !publicPattern.contains("?")) {
+                if (publicPattern.equals(cleanPath)) {
+                    return true;
+                }
+            } else if (ANT_PATH_MATCHER.match(publicPattern, cleanPath)) {
                 return true;
             }
         }
