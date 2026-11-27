@@ -69,10 +69,15 @@ jobs:
 
           if event == "pull_request":
               base_sha = os.environ["BASE_SHA"]
-              changed = subprocess.check_output(
-                  ["git", "-C", str(workspace), "diff", "--name-only", f"{base_sha}...HEAD"],
-                  text=True,
-              ).splitlines()
+              raw_diff = subprocess.check_output(
+                  [
+                      "git", "-C", str(workspace),
+                      "-c", "core.quotePath=false",
+                      "diff", "-z", "--no-renames", "--name-only",
+                      f"{base_sha}...HEAD",
+                  ],
+              )
+              changed = [os.fsdecode(entry) for entry in raw_diff.split(b"\x00") if entry]
               touches_registry = any(
                   p == ".github/workflows/plugin-registry.yml" or p.startswith("deploy/plugin-registry/")
                   for p in changed
@@ -174,14 +179,19 @@ jobs:
                       raise SystemExit(1)
 
                   trusted_source = f"isolated trusted base ({base_sha[:12]}) in runner.temp"
-                  privileged_prefixes = (
+                  privileged_exact_files = frozenset({
                       ".github/workflows/plugin-registry.yml",
                       "deploy/plugin-registry/registry_tool.py",
                       "deploy/plugin-registry/JarSignerVerifier.java",
+                  })
+                  privileged_dir_prefixes = (
                       "deploy/plugin-registry/web/",
                       "deploy/plugin-registry/tests/",
                   )
-                  privileged_hits = [p for p in changed if p == privileged_prefixes[0] or p.startswith(privileged_prefixes[1:])]
+                  privileged_hits = [
+                      p for p in changed
+                      if p in privileged_exact_files or p.startswith(privileged_dir_prefixes)
+                  ]
 
                   base_reg = trusted_dir / "registry.json"
                   cand_reg = candidate_dir / "registry.json"

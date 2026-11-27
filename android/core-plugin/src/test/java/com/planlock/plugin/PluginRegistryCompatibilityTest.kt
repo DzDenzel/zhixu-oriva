@@ -1,5 +1,6 @@
 package com.planlock.plugin
 
+import java.io.BufferedReader
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -123,10 +124,16 @@ class PluginRegistryCompatibilityTest {
             .start()
         var grandchildPid: Long = -1L
         val cleanupFailures = mutableListOf<Throwable>()
-        val readExecutor = Executors.newSingleThreadExecutor()
+        val readExecutor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "plugin-test-process-stdout-reader").apply {
+                isDaemon = true
+            }
+        }
+        var procReader: BufferedReader? = null
+        var mainFailure: Throwable? = null
         try {
             val outputLines = mutableListOf<String>()
-            val reader = proc.inputStream.bufferedReader()
+            val reader = proc.inputStream.bufferedReader().also { procReader = it }
             val readyLine = readExecutor.submit(
                 Callable {
                     while (true) {
@@ -151,6 +158,8 @@ class PluginRegistryCompatibilityTest {
             if (opt.isPresent) {
                 assertFalse("Grandchild process $grandchildPid should be terminated", isAliveMethod.invoke(opt.get()) as Boolean)
             }
+        } catch (t: Throwable) {
+            mainFailure = t
         } finally {
             readExecutor.shutdownNow()
             try {
@@ -173,6 +182,26 @@ class PluginRegistryCompatibilityTest {
                     cleanupFailures += t
                 }
             }
+            // Close the underlying pipe/reader so a blocked readLine() unblocks immediately, then bound daemon join.
+            try {
+                proc.inputStream.close()
+            } catch (t: Throwable) {
+                cleanupFailures += t
+            }
+            try {
+                procReader?.close()
+            } catch (t: Throwable) {
+                cleanupFailures += t
+            }
+            try {
+                readExecutor.awaitTermination(1, TimeUnit.SECONDS)
+            } catch (t: Throwable) {
+                cleanupFailures += t
+            }
+        }
+        if (mainFailure != null) {
+            cleanupFailures.forEach { mainFailure.addSuppressed(it) }
+            throw mainFailure
         }
         if (cleanupFailures.isNotEmpty()) {
             val err = AssertionError("Test teardown encountered ${cleanupFailures.size} cleanup failure(s)")
@@ -488,8 +517,14 @@ class PluginRegistryCompatibilityTest {
                 baseManifest(extraJson = ""","contributions":[{"kind":"StatusLine","id":"sl","slot":"plan.detail.protection","text":"ok","unavailableText":123}]"""),
             )
             signPackage(tempDir, unavailPkg, ksA, envA, "alpha")
+            // Boundary note (see deploy/plugin-registry/README.md): kotlinx.serialization rejects JSON primitive 123
+            // for nullable String field `unavailableText` at decode time; Python independently rejects non-string/oversize copy at PR admission.
             val uaErr = assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(unavailPkg, "community-x") }
-            assertTrue("Expected Android decode rejection for numeric unavailableText: ${uaErr.message}", uaErr.message.orEmpty().contains("string", ignoreCase = true) || uaErr.message.orEmpty().contains("unexpected", ignoreCase = true))
+            val uaMsg = uaErr.message.orEmpty()
+            assertTrue(
+                "Expected Android decode rejection pinpointing unavailableText string type: $uaMsg",
+                uaMsg.contains("unavailableText") && (uaMsg.contains("string", ignoreCase = true) || uaMsg.contains("quotation", ignoreCase = true) || uaMsg.contains("unexpected", ignoreCase = true)),
+            )
             val (uaCode, uaOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(unavailDir, "registry.json").absolutePath)
             assertNotEquals(0, uaCode)
             assertTrue("Expected Python unavailableText rejection: $uaOut", uaOut.contains("Invalid StatusLine unavailableText"))
@@ -549,6 +584,8 @@ class PluginRegistryCompatibilityTest {
             ).replace("\"type\":\"js\"", "\"type\":\"dex\"").replace("\"entryPoint\":\"entryPoint\"", "\"entryPoint\":\"a.B\"")
             writePljs(badFormPkg, badFormManifest, extraEntries = mapOf("classes.dex" to ("dex\n037\u0000".toByteArray() + ByteArray(32))))
             signPackage(tempDir, badFormPkg, ksA, envA, "alpha")
+            // Boundary note: PluginContract.validateContributions enforces `require(manifest.contractVersion >= 2 || ...)`
+            // returning bare "Failed requirement." on contractVersion=1 with FormSection; Python PR gate independently explains the FormSection v2 rule.
             val bfErr = assertThrows(IllegalArgumentException::class.java) { androidVerifierA.verify(badFormPkg, "community-x") }
             assertEquals("FormSection validation failed on contractVersion=1", "Failed requirement.", bfErr.message)
             val (bfCode, bfOut) = runRegistryTool(python, toolScript, tempDir, "validate", "--registry", File(badFormDir, "registry.json").absolutePath)

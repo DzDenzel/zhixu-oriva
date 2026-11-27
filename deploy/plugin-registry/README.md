@@ -32,7 +32,7 @@ deploy/plugin-registry/
    - 严禁在 `META-INF/` 下放置除 `MANIFEST.MF` 与配对 `*.SF` / `*.(RSA|DSA|EC)` 之外的普通文件，且 `META-INF/` 须严格大写；所有签名元数据文件（`MANIFEST.MF`、`*.SF`、`*.RSA/DSA/EC`）均不得为空（0 字节），也不允许包含不被任何负载归因的多余或损坏签名配对。
    - **算法与证书有效期策略**：PR CI 的 Temurin JDK 21 与终端侧所在 Android 设备各自执行所在运行时的 JAR 签名验证策略（桌面 Temurin JDK 21 遵循其 `jdk.jar.disabledAlgorithms` 约束，不宣称所有旧版 Android 系统拥有完全一致的弱算法策略）；社区签名建议使用 `RSA >= 2048` 或 `ECDSA P-256` 搭配 `SHA-256`。在离线证书钉扎模型下，自签名开发证书不因到期时间自动拒收（维护者可通过 `inspect-cert` / `keytool -printcert` 巡检时间）。
    - **双端结构边界与严格前置收录门禁**：`FormSection` 与 `StatusLine` 共享核心结构契约，但 `registry_tool.py` 作为公共目录前置收录门禁实施了比 Android 宽松 JSON 解码器更严格的策略（例如对 `switch`/`text` 字段若出现多余 `"options"`，一律强校列表长度 `<= 64` 及 `{value, label}` 结构；对 `StatusLine` 即使省略 `requiresCapability`，若提供非空 `"unavailableText"` 仍校验控制字符与 UTF-16 长度 `<= 4096`）。
-   - **安全临时目录与写入模型**：`JarSignerVerifier.java` 禁用系统临时目录回退并强制要求传入独占非符号链接临时目录参数（仅受支持通过 `registry_tool.py` 或显式隔离目录调用）；静态站输出采用新建临时文件 + 原子替换写入并禁止覆盖既有硬链接，在 Windows 无原语目录描述符（`dir_fd`）平台上依赖受保护输入/输出父目录不被并发替换。
+   - **安全临时目录、句柄锚定与受控运行目录边界**：`JarSignerVerifier.java` 禁用系统临时目录回退并强制要求传入独立非符号链接目录参数；静态站输出采用排他临时文件 + 原子替换写入并禁止覆盖既有硬链接。由于 Windows 系统层面不存在与 POSIX `unlinkat(dir_fd)` / `renameat(dir_fd)` 完全等价的原子 `dir_fd` 路径操作，Windows 下 `registry_tool.py` 在 `--clean` 与写盘期间全程持有 `CreateFileW(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)` 已验证目录句柄并复核句柄身份与 `GetFinalPathNameByHandleW`，同时**明确界定本 CLI 工具与直调 `JarSignerVerifier` 仅适用于独立专用或不可被互不信任并发写入方篡改的受控工作目录（如独立本地构建目录或 GitHub Hosted Runner 私有目录）**。
 2. **使用作者签名证书签名（本地私钥绝不入库）**：
    ```sh
    # 生成签名证书（若已有签名密钥库可跳过）

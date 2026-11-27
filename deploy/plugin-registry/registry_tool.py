@@ -402,28 +402,176 @@ def _win_final_path_for_fd(fd: int) -> Path | None:
     return Path(raw_final)
 
 
+def _win_norm_path(path: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+class _WinAnchoredDirHandle:
+    """Hold an open non-reparse Win32 directory handle across anchored checks, cleanup, and atomic publish."""
+
+    def __init__(
+        self,
+        dir_path: Path,
+        label: str,
+        expected_id: tuple[int, int] | None = None,
+        allow_delete_share: bool = False,
+    ) -> None:
+        self.dir_path = dir_path
+        self.label = label
+        self.expected_id = expected_id
+        self.handle = None
+        self.final_path: Path | None = None
+        self.dir_id: tuple[int, int] | None = None
+        self._k32 = None
+        self._wt = None
+
+        if os.name != "nt":
+            return
+        import ctypes
+        import ctypes.wintypes as wt
+
+        class _FILE_INFO(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wt.DWORD),
+                ("ftCreationTime", wt.FILETIME),
+                ("ftLastAccessTime", wt.FILETIME),
+                ("ftLastWriteTime", wt.FILETIME),
+                ("dwVolumeSerialNumber", wt.DWORD),
+                ("nFileSizeHigh", wt.DWORD),
+                ("nFileSizeLow", wt.DWORD),
+                ("nNumberOfLinks", wt.DWORD),
+                ("nFileIndexHigh", wt.DWORD),
+                ("nFileIndexLow", wt.DWORD),
+            ]
+
+        self._ctypes = ctypes
+        self._wt = wt
+        self._file_info_cls = _FILE_INFO
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, wt.LPVOID, wt.DWORD, wt.DWORD, wt.HANDLE]
+        k32.CreateFileW.restype = wt.HANDLE
+        k32.GetFileInformationByHandle.argtypes = [wt.HANDLE, ctypes.POINTER(_FILE_INFO)]
+        k32.GetFileInformationByHandle.restype = wt.BOOL
+        k32.GetFinalPathNameByHandleW.argtypes = [wt.HANDLE, wt.LPWSTR, wt.DWORD, wt.DWORD]
+        k32.GetFinalPathNameByHandleW.restype = wt.DWORD
+        k32.CloseHandle.argtypes = [wt.HANDLE]
+        k32.CloseHandle.restype = wt.BOOL
+        self._k32 = k32
+
+        lst = _lstat_no_symlink(dir_path, label)
+        if not stat.S_ISDIR(lst.st_mode):
+            raise RegistryValidationError(f"{label} is not a directory: {dir_path}")
+        if expected_id is not None and (lst.st_dev, lst.st_ino) != expected_id:
+            raise RegistryValidationError(f"{label} identity changed before opening handle: {dir_path.name}")
+
+        # Open the directory itself without traversing reparse points; restrict delete share unless caller controls removal.
+        share_mode = 0x0001 | 0x0002 | (0x0004 if allow_delete_share else 0)
+        flags = 0x02000000 | 0x00200000  # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+        invalid_handle = wt.HANDLE(-1).value
+        handle = k32.CreateFileW(str(dir_path), 0x0001, share_mode, None, 3, flags, None)
+        if not handle or handle == invalid_handle:
+            raise RegistryValidationError(
+                f"Cannot open anchored Windows handle for {label} (winerr={ctypes.get_last_error()}): {dir_path.name}"
+            )
+        self.handle = handle
+        try:
+            self.dir_id, self.final_path = self._query_handle_state()
+            self.verify_matches(dir_path, expected_id=expected_id or (lst.st_dev, lst.st_ino))
+        except Exception:
+            self.close()
+            raise
+
+    def _query_handle_state(self) -> tuple[tuple[int, int], Path]:
+        if self.handle is None:
+            raise RegistryValidationError(f"Directory handle is closed for {self.label}")
+        info = self._file_info_cls()
+        if not self._k32.GetFileInformationByHandle(self.handle, self._ctypes.byref(info)):
+            raise RegistryValidationError(
+                f"Cannot inspect handle identity for {self.label} (winerr={self._ctypes.get_last_error()})"
+            )
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+        dir_flag = getattr(stat, "FILE_ATTRIBUTE_DIRECTORY", 0x0010)
+        if (info.dwFileAttributes & reparse_flag) or not (info.dwFileAttributes & dir_flag):
+            raise RegistryValidationError(f"Reparse point or non-directory handle is forbidden for {self.label}")
+
+        buf = self._ctypes.create_unicode_buffer(4096)
+        length = self._k32.GetFinalPathNameByHandleW(self.handle, buf, len(buf), 0)
+        if length == 0 or length >= len(buf):
+            raise RegistryValidationError(
+                f"Cannot resolve final handle path for {self.label} (winerr={self._ctypes.get_last_error()})"
+            )
+        raw_final = buf.value
+        if raw_final.startswith("\\\\?\\UNC\\"):
+            raw_final = "\\\\" + raw_final[8:]
+        elif raw_final.startswith("\\\\?\\"):
+            raw_final = raw_final[4:]
+        file_index = (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow)
+        return (int(info.dwVolumeSerialNumber), file_index), Path(raw_final)
+
+    def verify_matches(
+        self,
+        expected_path: Path | None = None,
+        expected_id: tuple[int, int] | None = None,
+        expected_parent: Path | None = None,
+    ) -> None:
+        if os.name != "nt":
+            return
+        check_path = expected_path or self.dir_path
+        handle_id, cur_final = self._query_handle_state()
+        if self.final_path is not None and _win_norm_path(cur_final) != _win_norm_path(self.final_path):
+            raise RegistryValidationError(f"{self.label} moved or changed while handle was held")
+        if expected_parent is not None and _win_norm_path(cur_final.parent) != _win_norm_path(expected_parent):
+            raise RegistryValidationError(f"{self.label} escaped verified parent handle")
+        cur_st = _lstat_no_symlink(check_path, self.label)
+        target_id = expected_id if expected_id is not None else self.expected_id
+        if target_id is not None and (cur_st.st_dev, cur_st.st_ino) != target_id:
+            raise RegistryValidationError(f"{self.label} identity changed while handle was held")
+        if self.dir_id is not None and handle_id != self.dir_id:
+            raise RegistryValidationError(f"{self.label} OS handle file index mismatch")
+
+    def close(self) -> None:
+        if self.handle is not None and self._k32 is not None:
+            try:
+                self._k32.CloseHandle(self.handle)
+            finally:
+                self.handle = None
+
+    def __enter__(self) -> "_WinAnchoredDirHandle":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
 def _open_anchored_dir_fd(target_dir: Path, label: str, stop_at: Path | None = None) -> int:
-    """Open a directory descriptor walking segment-by-segment with O_NOFOLLOW and identity checks."""
+    """Open a directory descriptor walking segment-by-segment from OS root (/) with O_NOFOLLOW and identity checks."""
     canonical_dir = _resolve_non_symlink_path(target_dir, label, must_exist=True, stop_at=stop_at)
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     if stop_at is not None:
         canonical_stop = _resolve_non_symlink_path(stop_at, f"trusted root for {label}", must_exist=True)
-        start = canonical_stop
+        # Always walk from filesystem root (/) down to trusted_root before traversing to target_dir.
+        cur_fd = _open_anchored_dir_fd(canonical_stop, f"trusted root for {label}", stop_at=None)
         rel_parts = canonical_dir.relative_to(canonical_stop).parts
-    elif canonical_dir.is_absolute():
-        start = Path(canonical_dir.anchor)
-        rel_parts = canonical_dir.parts[1:]
     else:
-        start = Path.cwd()
-        rel_parts = canonical_dir.parts
+        if canonical_dir.is_absolute():
+            start = Path(canonical_dir.anchor)
+            rel_parts = canonical_dir.parts[1:]
+        else:
+            start = Path.cwd()
+            rel_parts = canonical_dir.parts
+        cur_fd = -1
+        try:
+            start_st = _lstat_no_symlink(start, f"anchor start of {label}")
+            cur_fd = os.open(start, dir_flags)
+            cur_fst = os.fstat(cur_fd)
+            if not stat.S_ISDIR(cur_fst.st_mode) or (cur_fst.st_dev, cur_fst.st_ino) != (start_st.st_dev, start_st.st_ino):
+                raise RegistryValidationError(f"Directory anchor identity mismatch for {label}")
+        except OSError as exc:
+            if cur_fd != -1:
+                os.close(cur_fd)
+            raise RegistryValidationError(f"Cannot open anchored directory {label}: {exc}") from exc
 
-    cur_fd = -1
     try:
-        start_st = _lstat_no_symlink(start, f"anchor start of {label}")
-        cur_fd = os.open(start, dir_flags)
-        cur_fst = os.fstat(cur_fd)
-        if not stat.S_ISDIR(cur_fst.st_mode) or (cur_fst.st_dev, cur_fst.st_ino) != (start_st.st_dev, start_st.st_ino):
-            raise RegistryValidationError(f"Directory anchor identity mismatch for {label}")
         for seg in rel_parts:
             if seg in {"", "."}:
                 continue
@@ -1429,26 +1577,51 @@ def _safe_rmtree_dir_fd(parent_fd: int, name: str, expected_dir_id: tuple[int, i
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _safe_rmtree_windows_anchored(dir_path: Path, expected_dir_id: tuple[int, int]) -> None:
-    st = _lstat_no_symlink(dir_path, f"output directory {dir_path.name}")
-    if not stat.S_ISDIR(st.st_mode) or (st.st_dev, st.st_ino) != expected_dir_id:
-        raise RegistryValidationError(f"Output directory identity changed during --clean: {dir_path.name}")
-    with os.scandir(dir_path) as it:
-        entries = list(it)
-    for entry in entries:
-        child_path = dir_path / entry.name
-        child_st = _lstat_no_symlink(child_path, f"output entry {entry.name}")
-        if stat.S_ISDIR(child_st.st_mode):
-            _safe_rmtree_windows_anchored(child_path, (child_st.st_dev, child_st.st_ino))
-        else:
-            os.unlink(child_path)
+def _safe_rmtree_windows_anchored(
+    dir_path: Path,
+    expected_dir_id: tuple[int, int],
+    parent_handle: _WinAnchoredDirHandle | None = None,
+) -> None:
+    if parent_handle is not None:
+        parent_handle.verify_matches()
+    with _WinAnchoredDirHandle(
+        dir_path,
+        f"output directory {dir_path.name}",
+        expected_id=expected_dir_id,
+        allow_delete_share=False,
+    ) as dir_handle:
+        expected_parent = parent_handle.final_path if parent_handle is not None else None
+        dir_handle.verify_matches(dir_path, expected_id=expected_dir_id, expected_parent=expected_parent)
+        with os.scandir(dir_path) as it:
+            entries = list(it)
+        for entry in entries:
+            if parent_handle is not None:
+                parent_handle.verify_matches()
+            dir_handle.verify_matches(dir_path, expected_id=expected_dir_id, expected_parent=expected_parent)
+            child_path = dir_path / entry.name
+            child_st = _lstat_no_symlink(child_path, f"output entry {entry.name}")
+            if stat.S_ISDIR(child_st.st_mode):
+                _safe_rmtree_windows_anchored(child_path, (child_st.st_dev, child_st.st_ino), parent_handle=dir_handle)
+            else:
+                os.unlink(child_path)
+        if parent_handle is not None:
+            parent_handle.verify_matches()
+        dir_handle.verify_matches(dir_path, expected_id=expected_dir_id, expected_parent=expected_parent)
+
+    if parent_handle is not None:
+        parent_handle.verify_matches()
     st_after = _lstat_no_symlink(dir_path, f"output directory {dir_path.name}")
     if (st_after.st_dev, st_after.st_ino) != expected_dir_id:
         raise RegistryValidationError(f"Output directory identity changed before rmdir: {dir_path.name}")
     os.rmdir(dir_path)
 
 
-def _safe_rmtree_anchored(target_out: Path, real_parent: Path, expected_parent_id: tuple[int, int]) -> None:
+def _safe_rmtree_anchored(
+    target_out: Path,
+    real_parent: Path,
+    expected_parent_id: tuple[int, int],
+    parent_handle: _WinAnchoredDirHandle | None = None,
+) -> None:
     cur_parent_st = _lstat_no_symlink(real_parent, "output parent directory")
     if (cur_parent_st.st_dev, cur_parent_st.st_ino) != expected_parent_id:
         raise RegistryValidationError("Output parent directory identity changed before --clean")
@@ -1467,7 +1640,13 @@ def _safe_rmtree_anchored(target_out: Path, real_parent: Path, expected_parent_i
         finally:
             os.close(parent_fd)
 
-    _safe_rmtree_windows_anchored(target_out, (out_st.st_dev, out_st.st_ino))
+    if parent_handle is not None:
+        parent_handle.verify_matches(real_parent, expected_id=expected_parent_id)
+        _safe_rmtree_windows_anchored(target_out, (out_st.st_dev, out_st.st_ino), parent_handle=parent_handle)
+        return
+
+    with _WinAnchoredDirHandle(real_parent, "output parent directory", expected_id=expected_parent_id) as owned_parent:
+        _safe_rmtree_windows_anchored(target_out, (out_st.st_dev, out_st.st_ino), parent_handle=owned_parent)
 
 
 def _write_anchored_output_file_fd(
@@ -1538,8 +1717,9 @@ def _write_anchored_output_file(
     rel: Path,
     src_file: Path,
     expected_out_id: tuple[int, int],
+    out_handle: _WinAnchoredDirHandle | None = None,
 ) -> None:
-    """Write src_file into target_out / rel via new temp file + atomic replace (never O_TRUNC, rejects symlinks & hardlinks)."""
+    """Write src_file into target_out / rel via held dir handles + new temp file + atomic replace (never O_TRUNC)."""
     cur_out_st = _lstat_no_symlink(target_out, "output directory")
     if (cur_out_st.st_dev, cur_out_st.st_ino) != expected_out_id:
         raise RegistryValidationError("Output directory identity changed during publish")
@@ -1552,56 +1732,83 @@ def _write_anchored_output_file(
             os.close(out_fd)
         return
 
-    current = target_out
-    for seg in rel.parts[:-1]:
-        current = current / seg
-        if os.path.lexists(current):
-            st = _lstat_no_symlink(current, f"output subdirectory {seg}")
-            if not stat.S_ISDIR(st.st_mode):
-                raise RegistryValidationError(f"Output subdirectory path is not a directory: {current}")
-        else:
-            os.mkdir(current)
-
-    dst_path = target_out / rel
-    if os.path.lexists(dst_path):
-        st = _lstat_no_symlink(dst_path, f"existing output file {dst_path.name}")
-        if not stat.S_ISREG(st.st_mode):
-            raise RegistryValidationError(f"Existing output target is not a regular file: {dst_path}")
-        if st.st_nlink > 1:
-            raise RegistryValidationError(f"Hard-linked output target is forbidden (st_nlink={st.st_nlink}): {dst_path.name}")
-
-    excl_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    tmp_path = dst_path.with_name(f".{dst_path.name}.{os.getpid()}.stage.tmp")
-    tmp_fd = -1
-    created_tmp = False
+    owned_out = None
     try:
-        tmp_fd = os.open(tmp_path, excl_flags, 0o644)
-        created_tmp = True
-        final_path = _win_final_path_for_fd(tmp_fd)
-        real_out = Path(os.path.realpath(target_out))
-        if final_path is not None and not final_path.is_relative_to(real_out):
-            raise RegistryValidationError(f"Output temp file handle escaped output directory: {dst_path.name}")
-        with src_file.open("rb") as fin, os.fdopen(tmp_fd, "wb") as fout:
+        if out_handle is None:
+            owned_out = _WinAnchoredDirHandle(target_out, "output directory", expected_id=expected_out_id)
+            active_out = owned_out
+        else:
+            active_out = out_handle
+        active_out.verify_matches(target_out, expected_id=expected_out_id)
+
+        held_subdirs: list[_WinAnchoredDirHandle] = []
+        try:
+            current = target_out
+            parent_final = active_out.final_path
+            for seg in rel.parts[:-1]:
+                current = current / seg
+                if os.path.lexists(current):
+                    st = _lstat_no_symlink(current, f"output subdirectory {seg}")
+                    if not stat.S_ISDIR(st.st_mode):
+                        raise RegistryValidationError(f"Output subdirectory path is not a directory: {current}")
+                else:
+                    os.mkdir(current)
+                    st = _lstat_no_symlink(current, f"output subdirectory {seg}")
+                sub_h = _WinAnchoredDirHandle(current, f"output subdirectory {seg}", expected_id=(st.st_dev, st.st_ino))
+                sub_h.verify_matches(current, expected_id=(st.st_dev, st.st_ino), expected_parent=parent_final)
+                held_subdirs.append(sub_h)
+                parent_final = sub_h.final_path
+
+            leaf_parent_handle = held_subdirs[-1] if held_subdirs else active_out
+            dst_path = target_out / rel
+            if os.path.lexists(dst_path):
+                st = _lstat_no_symlink(dst_path, f"existing output file {dst_path.name}")
+                if not stat.S_ISREG(st.st_mode):
+                    raise RegistryValidationError(f"Existing output target is not a regular file: {dst_path}")
+                if st.st_nlink > 1:
+                    raise RegistryValidationError(
+                        f"Hard-linked output target is forbidden (st_nlink={st.st_nlink}): {dst_path.name}"
+                    )
+
+            excl_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            tmp_path = dst_path.with_name(f".{dst_path.name}.{os.getpid()}.stage.tmp")
             tmp_fd = -1
-            while True:
-                chunk = fin.read(READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                fout.write(chunk)
-        cur_out_after = _lstat_no_symlink(target_out, "output directory")
-        if (cur_out_after.st_dev, cur_out_after.st_ino) != expected_out_id:
-            raise RegistryValidationError("Output directory identity changed before atomic replace")
-        if os.path.lexists(dst_path):
-            st_after = _lstat_no_symlink(dst_path, f"existing output file {dst_path.name}")
-            if not stat.S_ISREG(st_after.st_mode) or st_after.st_nlink > 1:
-                raise RegistryValidationError(f"Unsafe output target before atomic replace: {dst_path.name}")
-        os.replace(tmp_path, dst_path)
-        created_tmp = False
+            created_tmp = False
+            try:
+                tmp_fd = os.open(tmp_path, excl_flags, 0o644)
+                created_tmp = True
+                final_path = _win_final_path_for_fd(tmp_fd)
+                if final_path is not None and leaf_parent_handle.final_path is not None:
+                    if _win_norm_path(final_path.parent) != _win_norm_path(leaf_parent_handle.final_path):
+                        raise RegistryValidationError(
+                            f"Output temp file handle escaped anchored directory: {dst_path.name}"
+                        )
+                with src_file.open("rb") as fin, os.fdopen(tmp_fd, "wb") as fout:
+                    tmp_fd = -1
+                    while True:
+                        chunk = fin.read(READ_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        fout.write(chunk)
+                active_out.verify_matches(target_out, expected_id=expected_out_id)
+                leaf_parent_handle.verify_matches(current)
+                if os.path.lexists(dst_path):
+                    st_after = _lstat_no_symlink(dst_path, f"existing output file {dst_path.name}")
+                    if not stat.S_ISREG(st_after.st_mode) or st_after.st_nlink > 1:
+                        raise RegistryValidationError(f"Unsafe output target before atomic replace: {dst_path.name}")
+                os.replace(tmp_path, dst_path)
+                created_tmp = False
+            finally:
+                if tmp_fd != -1:
+                    os.close(tmp_fd)
+                if created_tmp and os.path.lexists(tmp_path):
+                    tmp_path.unlink(missing_ok=True)
+        finally:
+            for sub_h in reversed(held_subdirs):
+                sub_h.close()
     finally:
-        if tmp_fd != -1:
-            os.close(tmp_fd)
-        if created_tmp and os.path.lexists(tmp_path):
-            tmp_path.unlink(missing_ok=True)
+        if owned_out is not None:
+            owned_out.close()
 
 
 def build_static_site(
@@ -1705,21 +1912,27 @@ def build_static_site(
                     os.close(out_fd)
                 os.close(parent_fd)
         else:
-            if clean and os.path.lexists(target_out):
-                _safe_rmtree_anchored(target_out, real_parent, parent_id)
+            with _WinAnchoredDirHandle(real_parent, "output parent directory", expected_id=parent_id) as parent_handle:
+                if clean and os.path.lexists(target_out):
+                    _safe_rmtree_anchored(target_out, real_parent, parent_id, parent_handle=parent_handle)
+                parent_handle.verify_matches(real_parent, expected_id=parent_id)
 
-            if os.path.lexists(target_out):
-                out_st = _lstat_no_symlink(target_out, "output directory")
-                if not stat.S_ISDIR(out_st.st_mode):
-                    raise RegistryValidationError(f"Output path exists and is not a directory: {target_out}")
-            else:
-                os.mkdir(target_out)
-                out_st = _lstat_no_symlink(target_out, "output directory")
+                if os.path.lexists(target_out):
+                    out_st = _lstat_no_symlink(target_out, "output directory")
+                    if not stat.S_ISDIR(out_st.st_mode):
+                        raise RegistryValidationError(f"Output path exists and is not a directory: {target_out}")
+                else:
+                    os.mkdir(target_out)
+                    out_st = _lstat_no_symlink(target_out, "output directory")
 
-            out_id = (out_st.st_dev, out_st.st_ino)
-            for src_file in staged_files:
-                rel = src_file.relative_to(stage_dir)
-                _write_anchored_output_file(target_out, rel, src_file, out_id)
+                out_id = (out_st.st_dev, out_st.st_ino)
+                with _WinAnchoredDirHandle(target_out, "output directory", expected_id=out_id) as out_handle:
+                    out_handle.verify_matches(target_out, expected_id=out_id, expected_parent=parent_handle.final_path)
+                    for src_file in staged_files:
+                        parent_handle.verify_matches(real_parent, expected_id=parent_id)
+                        out_handle.verify_matches(target_out, expected_id=out_id, expected_parent=parent_handle.final_path)
+                        rel = src_file.relative_to(stage_dir)
+                        _write_anchored_output_file(target_out, rel, src_file, out_id, out_handle=out_handle)
 
     return validated
 
@@ -1749,6 +1962,40 @@ def inspect_package_certificates(pkg_path: Path, trusted_root: Path | None = Non
         "sourceId": pkg_manifest.get("sourceId"),
         "commonSigners": report["commonSigners"],
         "payloadEntries": report["payloadEntries"],
+    }
+
+
+PLUGIN_REGISTRY_WORKFLOW_PATH = ".github/workflows/plugin-registry.yml"
+PLUGIN_REGISTRY_PREFIX = "deploy/plugin-registry/"
+PRIVILEGED_EXACT_PATHS = frozenset({
+    PLUGIN_REGISTRY_WORKFLOW_PATH,
+    "deploy/plugin-registry/registry_tool.py",
+    "deploy/plugin-registry/JarSignerVerifier.java",
+})
+PRIVILEGED_DIR_PREFIXES = (
+    "deploy/plugin-registry/web/",
+    "deploy/plugin-registry/tests/",
+)
+
+
+def parse_nul_diff_paths(raw_diff: bytes) -> list[str]:
+    """Decode NUL-delimited `git diff -z --no-renames --name-only` output without C-unescaping."""
+    return [os.fsdecode(entry) for entry in raw_diff.split(b"\x00") if entry]
+
+
+def classify_pr_changed_paths(changed_paths: list[str] | tuple[str, ...]) -> dict[str, object]:
+    """Classify PR changed paths consistently for both scope gate and privileged governance alerts."""
+    touches_registry = False
+    privileged_hits: list[str] = []
+    for rel_path in changed_paths:
+        if rel_path == PLUGIN_REGISTRY_WORKFLOW_PATH or rel_path.startswith(PLUGIN_REGISTRY_PREFIX):
+            touches_registry = True
+        if rel_path in PRIVILEGED_EXACT_PATHS or rel_path.startswith(PRIVILEGED_DIR_PREFIXES):
+            privileged_hits.append(rel_path)
+    return {
+        "changedPaths": list(changed_paths),
+        "touchesRegistry": touches_registry,
+        "privilegedHits": privileged_hits,
     }
 
 

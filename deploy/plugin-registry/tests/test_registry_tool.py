@@ -1218,6 +1218,159 @@ assert.strictEqual(elements.siteTitle.textContent, '<b>站名</b>');
         proc = subprocess.run([node, "-e", script], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
+    def test_r3_workflow_nul_diff_handles_unrelated_rename_out_and_escaped_paths(self) -> None:
+        workflow_path = REGISTRY_ROOT.parents[1] / ".github" / "workflows" / "plugin-registry.yml"
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        self.assertIn("-c\", \"core.quotePath=false\"", workflow_text)
+        self.assertIn("\"diff\", \"-z\", \"--no-renames\", \"--name-only\"", workflow_text)
+        self.assertNotIn("git\", \"-C\", str(workspace), \"diff\", \"--name-only\"", workflow_text)
+
+        repo = self.root / "pr_diff_repo"
+        repo.mkdir()
+
+        def _git(*args: str, text_mode: bool = True):
+            return subprocess.run(
+                ["git", "-C", str(repo), *args],
+                check=True,
+                capture_output=True,
+                text=text_mode,
+            ).stdout
+
+        _git("init", "-b", "main")
+        _git("config", "user.name", "Test")
+        _git("config", "user.email", "test@example.com")
+
+        for rel, content in (
+            (".github/workflows/plugin-registry.yml", "name: test\n"),
+            ("deploy/plugin-registry/registry_tool.py", "# verifier\n"),
+            ("deploy/plugin-registry/tests/old_suite.py", "# old test\n"),
+            ("android/app/keep.txt", "keep\n"),
+        ):
+            p = repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        _git("add", ".")
+        _git("commit", "-m", "base")
+        base_sha = _git("rev-parse", "HEAD").strip()
+
+        def _classify_git_branch() -> dict[str, object]:
+            raw_nul = subprocess.check_output(
+                [
+                    "git", "-C", str(repo),
+                    "-c", "core.quotePath=false",
+                    "diff", "-z", "--no-renames", "--name-only",
+                    f"{base_sha}...HEAD",
+                ],
+            )
+            return registry_tool.classify_pr_changed_paths(registry_tool.parse_nul_diff_paths(raw_nul))
+
+        # 1. Pure unrelated PR touches neither registry scope nor privileged paths
+        _git("checkout", "-b", "pr-unrelated", base_sha)
+        (repo / "android/app/keep.txt").write_text("unrelated edit\n", encoding="utf-8")
+        _git("commit", "-am", "unrelated change")
+        res_unrelated = _classify_git_branch()
+        self.assertFalse(res_unrelated["touchesRegistry"])
+        self.assertEqual(res_unrelated["privilegedHits"], [])
+        self.assertEqual(res_unrelated["changedPaths"], ["android/app/keep.txt"])
+
+        # 2. Renaming a protected file OUT of deploy/plugin-registry/tests/ and workflow OUT of .github/workflows/ MUST still trigger both scope and privileged alerts
+        _git("checkout", "-b", "pr-rename-out", base_sha)
+        (repo / "docs").mkdir(exist_ok=True)
+        _git("mv", "deploy/plugin-registry/tests/old_suite.py", "docs/moved_suite.py")
+        _git("mv", ".github/workflows/plugin-registry.yml", "docs/moved_workflow.yml")
+        _git("commit", "-am", "rename protected files out")
+        res_rename = _classify_git_branch()
+        self.assertTrue(res_rename["touchesRegistry"])
+        self.assertIn(".github/workflows/plugin-registry.yml", res_rename["privilegedHits"])
+        self.assertIn("deploy/plugin-registry/tests/old_suite.py", res_rename["privilegedHits"])
+
+        # 3. Non-ASCII / space filename in real git diff -z + C-quote/backslash characters in raw NUL stream
+        _git("checkout", "-b", "pr-special-names", base_sha)
+        special = repo / "deploy/plugin-registry/tests/中文 空格'路径.py"
+        special.write_text("# special\n", encoding="utf-8")
+        _git("add", ".")
+        _git("commit", "-m", "non-ascii space test file")
+        res_special = _classify_git_branch()
+        self.assertTrue(res_special["touchesRegistry"])
+        self.assertEqual(res_special["privilegedHits"], ["deploy/plugin-registry/tests/中文 空格'路径.py"])
+
+        synthetic_nul = (
+            b'deploy/plugin-registry/tests/"quoted"\\t\xe4\xb8\xad\xe6\x96\x87.py\x00'
+            b"deploy/plugin-registry/registry_tool.py_backup\x00"
+        )
+        res_syn = registry_tool.classify_pr_changed_paths(registry_tool.parse_nul_diff_paths(synthetic_nul))
+        self.assertTrue(res_syn["touchesRegistry"])
+        self.assertEqual(res_syn["privilegedHits"], ['deploy/plugin-registry/tests/"quoted"\\t中文.py'])
+
+    def test_r1_r2_anchored_handle_guards_across_clean_and_posix_root_walk(self) -> None:
+        # Simulated POSIX dir_fd walk proves trusted_root opens '/' first segment-by-segment (never raw full-string os.open)
+        opened_calls: list[tuple[str, int | None]] = []
+        fake_fds: dict[int, str] = {}
+        next_fd = {"v": 100}
+
+        class _FakeSt:
+            def __init__(self, dev: int, ino: int, mode: int):
+                self.st_dev = dev
+                self.st_ino = ino
+                self.st_mode = mode
+                self.st_file_attributes = 0
+
+        inode_map = {
+            "/": (1, 1),
+            "opt": (1, 2),
+            "trusted": (1, 3),
+            "registry": (1, 4),
+        }
+
+        def _fake_lstat(p, dir_fd=None):
+            key = fake_fds[dir_fd] if dir_fd is not None else str(p)
+            seg = p if isinstance(p, str) else p.name or "/"
+            dev, ino = inode_map.get(seg, (1, 99))
+            return _FakeSt(dev, ino, stat.S_IFDIR | 0o755)
+
+        def _fake_open(p, flags, mode=0o777, dir_fd=None):
+            opened_calls.append((str(p), dir_fd))
+            fd = next_fd["v"]
+            next_fd["v"] += 1
+            fake_fds[fd] = str(p)
+            return fd
+
+        def _fake_fstat(fd):
+            seg = fake_fds[fd]
+            dev, ino = inode_map.get(seg if seg == "/" else Path(seg).name, (1, 99))
+            return _FakeSt(dev, ino, stat.S_IFDIR | 0o755)
+
+        from pathlib import PurePosixPath
+        fake_open_set = {_fake_open}
+        with (
+            patch.object(registry_tool, "os", wraps=os) as mock_os,
+            patch.object(registry_tool, "Path", PurePosixPath),
+            patch.object(registry_tool, "_resolve_non_symlink_path", side_effect=lambda p, *a, **kw: PurePosixPath(str(p))),
+        ):
+            mock_os.open = _fake_open
+            mock_os.supports_dir_fd = fake_open_set
+            mock_os.lstat = _fake_lstat
+            mock_os.fstat = _fake_fstat
+            mock_os.close = lambda fd: fake_fds.pop(fd, None)
+            mock_os.name = "posix"
+            fd = registry_tool._open_anchored_dir_fd(
+                PurePosixPath("/opt/trusted/registry"), "posix test", stop_at=PurePosixPath("/opt/trusted")
+            )
+            mock_os.close(fd)
+        self.assertEqual(opened_calls[0], ("/", None))
+        self.assertEqual([c[0] for c in opened_calls], ["/", "opt", "trusted", "registry"])
+        self.assertTrue(all(fd is not None for _, fd in opened_calls[1:]))
+
+        # Windows persistent Win32 directory handle rejects swapped/moved parent during --clean / output
+        if os.name == "nt":
+            out_dir = self.root / "win_handle_out"
+            out_dir.mkdir()
+            with registry_tool._WinAnchoredDirHandle(out_dir, "test dir") as h:
+                h.verify_matches(out_dir)
+                with patch.object(h, "_query_handle_state", return_value=((999, 999), out_dir)):
+                    with self.assertRaisesRegex(registry_tool.RegistryValidationError, "file index mismatch"):
+                        h.verify_matches(out_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
