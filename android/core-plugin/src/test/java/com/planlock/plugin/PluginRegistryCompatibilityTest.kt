@@ -8,7 +8,6 @@ import java.nio.file.Files
 import java.security.SecureRandom
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
@@ -41,35 +40,86 @@ class PluginRegistryCompatibilityTest {
         error("Cannot locate repository root from ${File(".").canonicalPath}")
     }
 
+    private class TeardownDiagnosticsSink(
+        initialTargetFailure: Throwable? = null,
+        private val summaryMessage: (Int) -> String = { count ->
+            "Test teardown encountered $count cleanup failure(s)"
+        },
+    ) {
+        private val lock = Any()
+        private val recorded = mutableListOf<Throwable>()
+        private val attachedSet = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+        private var targetFailure: Throwable? = initialTargetFailure
+        private var settled: Boolean = false
+
+        fun record(error: Throwable) {
+            synchronized(lock) {
+                if (recorded.any { it === error }) {
+                    return
+                }
+                recorded.add(error)
+                if (settled) {
+                    val target = targetFailure
+                    if (target != null && target !== error && attachedSet.add(error)) {
+                        target.addSuppressed(error)
+                    }
+                }
+            }
+        }
+
+        fun settle(mainFailure: Throwable? = targetFailure): Throwable? {
+            synchronized(lock) {
+                if (mainFailure != null) {
+                    targetFailure = mainFailure
+                }
+                if (targetFailure == null && recorded.isNotEmpty()) {
+                    targetFailure = AssertionError(summaryMessage(recorded.size))
+                }
+                val target = targetFailure
+                if (target != null) {
+                    for (err in recorded) {
+                        if (target !== err && attachedSet.add(err)) {
+                            target.addSuppressed(err)
+                        }
+                    }
+                }
+                settled = true
+                return target
+            }
+        }
+
+        fun snapshot(): List<Throwable> = synchronized(lock) { recorded.toList() }
+    }
+
     private fun awaitBoundedFuture(
         future: Future<*>,
         deadlineNanos: Long,
         operationName: String,
-        failures: MutableList<Throwable>,
+        sink: TeardownDiagnosticsSink,
     ) {
         val remNanos = deadlineNanos - System.nanoTime()
         if (remNanos <= 0L) {
             future.cancel(true)
-            failures += AssertionError("$operationName exceeded shared cleanup deadline")
+            sink.record(AssertionError("$operationName exceeded shared cleanup deadline"))
             return
         }
         try {
             future.get(remNanos, TimeUnit.NANOSECONDS)
         } catch (e: TimeoutException) {
             future.cancel(true)
-            failures += AssertionError("$operationName did not complete within shared cleanup deadline", e)
+            sink.record(AssertionError("$operationName did not complete within shared cleanup deadline", e))
         } catch (e: ExecutionException) {
-            failures += (e.cause ?: e)
+            sink.record(e.cause ?: e)
         } catch (t: Throwable) {
             future.cancel(true)
-            failures += t
+            sink.record(t)
         }
     }
 
     private fun awaitHandlesExitWithinDeadline(
         handles: List<Any>,
         deadlineNanos: Long,
-        failures: MutableList<Throwable>,
+        sink: TeardownDiagnosticsSink,
     ) {
         val phClass = Class.forName("java.lang.ProcessHandle")
         val onExitMethod = phClass.getMethod("onExit")
@@ -79,18 +129,18 @@ class PluginRegistryCompatibilityTest {
                 if (isAliveMethod.invoke(handle) as Boolean) {
                     val remNanos = deadlineNanos - System.nanoTime()
                     if (remNanos <= 0L) {
-                        failures += AssertionError("Shared cleanup deadline exhausted while descendant process remained alive")
+                        sink.record(AssertionError("Shared cleanup deadline exhausted while descendant process remained alive"))
                         continue
                     }
                     @Suppress("UNCHECKED_CAST")
                     val exitFuture = onExitMethod.invoke(handle) as CompletableFuture<*>
                     exitFuture.get(remNanos, TimeUnit.NANOSECONDS)
                     if (isAliveMethod.invoke(handle) as Boolean) {
-                        failures += AssertionError("Descendant process remained alive after teardown")
+                        sink.record(AssertionError("Descendant process remained alive after teardown"))
                     }
                 }
             } catch (t: Throwable) {
-                failures += t
+                sink.record(t)
             }
         }
     }
@@ -101,12 +151,15 @@ class PluginRegistryCompatibilityTest {
         extraReader: BufferedReader? = null,
         readExecutor: ExecutorService? = null,
         timeoutNanos: Long = TimeUnit.SECONDS.toNanos(5),
-        failures: MutableList<Throwable> = CopyOnWriteArrayList(),
-    ): List<Throwable> {
+        mainFailure: Throwable? = null,
+        sink: TeardownDiagnosticsSink = TeardownDiagnosticsSink(initialTargetFailure = mainFailure),
+    ): Throwable? {
         // AGP 8.13 compileDebugUnitTestKotlin fails to resolve direct Process.descendants()/toHandle() against android.jar;
         // invoke ONLY public java.lang.ProcessHandle / Process APIs under a SINGLE shared bounded teardown deadline.
         // Never call proc.destroyForcibly() or close() synchronously on the test thread: on Unix OpenJDK 21,
         // ProcessImpl.destroyForcibly() calls destroy(true) which synchronously closes all 3 stdio streams without timeout.
+        // All diagnostics (including late daemon exceptions arriving after timeout settlement) flow through the lock-guarded
+        // TeardownDiagnosticsSink so they are attached to the final failure's suppressed list without duplicates.
         val phClass = Class.forName("java.lang.ProcessHandle")
         val destroyForciblyMethod = phClass.getMethod("destroyForcibly")
         val isAliveMethod = phClass.getMethod("isAlive")
@@ -121,7 +174,7 @@ class PluginRegistryCompatibilityTest {
             val descStream = descendantsMethod.invoke(proc) as java.util.stream.Stream<Any>
             descStream.use { s -> s.forEach { handlesToVerify.add(it) } }
         } catch (t: Throwable) {
-            failures += t
+            sink.record(t)
         }
         if (extraPid > 0L) {
             try {
@@ -131,7 +184,7 @@ class PluginRegistryCompatibilityTest {
                     handlesToVerify.add(opt.get())
                 }
             } catch (t: Throwable) {
-                failures += t
+                sink.record(t)
             }
         }
 
@@ -148,14 +201,14 @@ class PluginRegistryCompatibilityTest {
                         try {
                             val killed = destroyForciblyMethod.invoke(handle) as Boolean
                             if (!killed && (isAliveMethod.invoke(handle) as Boolean)) {
-                                failures += AssertionError("ProcessHandle.destroyForcibly() returned false for still-alive descendant")
+                                sink.record(AssertionError("ProcessHandle.destroyForcibly() returned false for still-alive descendant"))
                             }
                         } catch (t: Throwable) {
-                            failures += t
+                            sink.record(t)
                         }
                     }
                 }
-                awaitBoundedFuture(descKillFuture, deadlineNanos, "Daemon descendant destroyForcibly", failures)
+                awaitBoundedFuture(descKillFuture, deadlineNanos, "Daemon descendant destroyForcibly", sink)
             }
 
             // 2. Forcibly terminate root process via ProcessHandle.destroyForcibly() on daemon thread (avoids Unix sync
@@ -168,45 +221,51 @@ class PluginRegistryCompatibilityTest {
                         val killed = destroyForciblyMethod.invoke(rootHandle) as Boolean
                         rootHandleKilled = killed
                         if (!killed && (isAliveMethod.invoke(rootHandle) as Boolean)) {
-                            failures += AssertionError("Root ProcessHandle.destroyForcibly() returned false for still-alive process")
+                            sink.record(AssertionError("Root ProcessHandle.destroyForcibly() returned false for still-alive process"))
                         }
                     } catch (t: Throwable) {
-                        failures += t
+                        sink.record(t)
                     }
                     if (!rootHandleKilled && proc.isAlive) {
                         try {
                             proc.destroyForcibly()
                         } catch (t: Throwable) {
-                            failures += t
+                            sink.record(t)
                         }
                     }
                 }
-                awaitBoundedFuture(rootKillFuture, deadlineNanos, "Daemon root destroyForcibly", failures)
+                awaitBoundedFuture(rootKillFuture, deadlineNanos, "Daemon root destroyForcibly", sink)
             }
 
-            // 3. Interrupt reader executor immediately before closing pipes.
-            readExecutor?.shutdownNow()
+            // 3. Interrupt reader executor immediately before closing pipes, capturing any shutdownNow() failure.
+            if (readExecutor != null) {
+                try {
+                    readExecutor.shutdownNow()
+                } catch (t: Throwable) {
+                    sink.record(t)
+                }
+            }
 
             // 4. Wait for root process exit strictly within remaining shared deadline (no >= 1ms extension).
             try {
                 if (proc.isAlive) {
                     val remNanos = deadlineNanos - System.nanoTime()
                     if (remNanos <= 0L) {
-                        failures += AssertionError("Shared cleanup deadline exhausted before root process exited")
+                        sink.record(AssertionError("Shared cleanup deadline exhausted before root process exited"))
                     } else if (!proc.waitFor(remNanos, TimeUnit.NANOSECONDS)) {
-                        failures += AssertionError("Root process did not terminate within shared cleanup deadline")
+                        sink.record(AssertionError("Root process did not terminate within shared cleanup deadline"))
                     }
                 }
             } catch (t: Throwable) {
-                failures += t
+                sink.record(t)
             }
 
             // 5. Wait for all discovered descendants strictly within remaining shared deadline (no >= 1ms extension).
-            awaitHandlesExitWithinDeadline(handlesToVerify, deadlineNanos, failures)
+            awaitHandlesExitWithinDeadline(handlesToVerify, deadlineNanos, sink)
 
             // 6. Close all process stdio streams on the daemon thread under the shared deadline, recording every failure.
             if (deadlineNanos - System.nanoTime() <= 0L) {
-                failures += AssertionError("Shared cleanup deadline exhausted before daemon process stream close")
+                sink.record(AssertionError("Shared cleanup deadline exhausted before daemon process stream close"))
             } else {
                 val rawCloseFuture = teardownExecutor.submit {
                     for ((label, closeOp) in listOf<Pair<String, () -> Unit>>(
@@ -217,11 +276,11 @@ class PluginRegistryCompatibilityTest {
                         try {
                             closeOp()
                         } catch (t: Throwable) {
-                            failures += IOException("Failed to close $label during teardown", t)
+                            sink.record(IOException("Failed to close $label during teardown", t))
                         }
                     }
                 }
-                awaitBoundedFuture(rawCloseFuture, deadlineNanos, "Daemon process stream close", failures)
+                awaitBoundedFuture(rawCloseFuture, deadlineNanos, "Daemon process stream close", sink)
             }
 
             // 7. Await reader executor termination strictly within remaining shared deadline.
@@ -230,43 +289,49 @@ class PluginRegistryCompatibilityTest {
                     if (!readExecutor.isTerminated) {
                         val remNanos = deadlineNanos - System.nanoTime()
                         if (remNanos <= 0L) {
-                            failures += AssertionError("Shared cleanup deadline exhausted before daemon stdout reader terminated")
+                            sink.record(AssertionError("Shared cleanup deadline exhausted before daemon stdout reader terminated"))
                         } else if (!readExecutor.awaitTermination(remNanos, TimeUnit.NANOSECONDS)) {
-                            failures += AssertionError("Daemon READY stdout reader thread did not terminate within shared cleanup deadline")
+                            sink.record(AssertionError("Daemon READY stdout reader thread did not terminate within shared cleanup deadline"))
                         }
                     }
                 } catch (t: Throwable) {
-                    failures += t
+                    sink.record(t)
                 }
             }
 
             // 8. Close BufferedReader on the daemon thread under the shared deadline, recording every failure.
             if (extraReader != null) {
                 if (deadlineNanos - System.nanoTime() <= 0L) {
-                    failures += AssertionError("Shared cleanup deadline exhausted before daemon BufferedReader close")
+                    sink.record(AssertionError("Shared cleanup deadline exhausted before daemon BufferedReader close"))
                 } else {
                     val readerCloseFuture = teardownExecutor.submit {
                         try {
                             extraReader.close()
                         } catch (t: Throwable) {
-                            failures += IOException("Failed to close BufferedReader during teardown", t)
+                            sink.record(IOException("Failed to close BufferedReader during teardown", t))
                         }
                     }
-                    awaitBoundedFuture(readerCloseFuture, deadlineNanos, "Daemon BufferedReader close", failures)
+                    awaitBoundedFuture(readerCloseFuture, deadlineNanos, "Daemon BufferedReader close", sink)
                 }
             }
         } finally {
-            teardownExecutor.shutdownNow()
+            try {
+                teardownExecutor.shutdownNow()
+            } catch (t: Throwable) {
+                sink.record(t)
+            }
+            sink.settle(mainFailure)
         }
-        return failures
+        return sink.settle(mainFailure)
     }
 
     private fun destroyProcessTree(proc: Process) {
-        val failures = teardownProcessTree(proc)
-        if (failures.isNotEmpty()) {
-            val error = AssertionError("Process tree teardown failed (${failures.size} error(s))")
-            failures.forEach { error.addSuppressed(it) }
-            throw error
+        val sink = TeardownDiagnosticsSink(
+            summaryMessage = { count -> "Process tree teardown failed ($count error(s))" },
+        )
+        val failure = teardownProcessTree(proc = proc, sink = sink)
+        if (failure != null) {
+            throw failure
         }
     }
 
@@ -301,7 +366,7 @@ class PluginRegistryCompatibilityTest {
             .redirectErrorStream(true)
             .start()
         var grandchildPid: Long = -1L
-        val cleanupFailures = CopyOnWriteArrayList<Throwable>()
+        val cleanupSink = TeardownDiagnosticsSink()
         val readExecutor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "plugin-test-process-stdout-reader").apply {
                 isDaemon = true
@@ -309,6 +374,7 @@ class PluginRegistryCompatibilityTest {
         }
         var procReader: BufferedReader? = null
         var mainFailure: Throwable? = null
+        var settledFailure: Throwable? = null
         try {
             val outputLines = mutableListOf<String>()
             val reader = proc.inputStream.bufferedReader().also { procReader = it }
@@ -340,28 +406,23 @@ class PluginRegistryCompatibilityTest {
             mainFailure = t
         } finally {
             // Delegate all potentially blocking kills, waits, and stream closes under ONE shared teardown deadline,
-            // retaining every daemon close exception or timeout in cleanupFailures (never swallowed).
-            teardownProcessTree(
+            // routing every error (including late post-timeout daemon errors) directly into settledFailure.suppressed.
+            settledFailure = teardownProcessTree(
                 proc = proc,
                 extraPid = grandchildPid,
                 extraReader = procReader,
                 readExecutor = readExecutor,
                 timeoutNanos = TimeUnit.SECONDS.toNanos(5),
-                failures = cleanupFailures,
+                mainFailure = mainFailure,
+                sink = cleanupSink,
             )
         }
-        if (mainFailure != null) {
-            cleanupFailures.forEach { mainFailure.addSuppressed(it) }
-            throw mainFailure
-        }
-        if (cleanupFailures.isNotEmpty()) {
-            val err = AssertionError("Test teardown encountered ${cleanupFailures.size} cleanup failure(s)")
-            cleanupFailures.forEach { err.addSuppressed(it) }
-            throw err
+        if (settledFailure != null) {
+            throw settledFailure
         }
 
         // Verify R4 diagnostics & deadline contracts directly:
-        // (a) daemon close exceptions are captured (never swallowed) and attachable via addSuppressed;
+        // (a) synchronous daemon close exception is captured and attached to final failure's suppressed;
         val fastProc1 = ProcessBuilder(python, "-c", "pass").redirectErrorStream(true).start()
         fastProc1.waitFor(5, TimeUnit.SECONDS)
         val failingReader = object : BufferedReader(StringReader("")) {
@@ -369,64 +430,138 @@ class PluginRegistryCompatibilityTest {
                 throw IOException("simulated daemon close failure")
             }
         }
-        val closeFailureList = teardownProcessTree(
+        val syncCloseSink = TeardownDiagnosticsSink()
+        val syncCloseFailure = teardownProcessTree(
             proc = fastProc1,
             extraReader = failingReader,
             timeoutNanos = TimeUnit.SECONDS.toNanos(2),
+            sink = syncCloseSink,
         )
         assertTrue(
-            "Daemon close exception must be captured and never swallowed",
-            closeFailureList.any { err ->
-                err.message?.contains("Failed to close BufferedReader") == true &&
-                    err.cause?.message == "simulated daemon close failure"
-            },
+            "Daemon close exception must be captured and attached to suppressed",
+            syncCloseFailure != null &&
+                syncCloseSink.snapshot().any { it.cause?.message == "simulated daemon close failure" } &&
+                syncCloseFailure.suppressed.any { it.cause?.message == "simulated daemon close failure" },
         )
 
-        // (b) a blocking close on the daemon closer is strictly bounded by the shared deadline and reported;
-        val fastProc2 = ProcessBuilder(python, "-c", "pass").redirectErrorStream(true).start()
-        fastProc2.waitFor(5, TimeUnit.SECONDS)
-        val unblockClose = CountDownLatch(1)
-        val blockingReader = object : BufferedReader(StringReader("")) {
-            override fun close() {
-                try {
-                    unblockClose.await(10, TimeUnit.SECONDS)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
+        // (b) late daemon close exception arriving AFTER timeout settlement is still attached to targetFailure.suppressed
+        //     (verified with an existing mainFailure AND with null mainFailure -> synthesized summary failure);
+        for (withMainFailure in listOf(true, false)) {
+            val fastProcLate = ProcessBuilder(python, "-c", "pass").redirectErrorStream(true).start()
+            fastProcLate.waitFor(5, TimeUnit.SECONDS)
+            val unblockLateClose = CountDownLatch(1)
+            val lateFailingReader = object : BufferedReader(StringReader("")) {
+                override fun close() {
+                    // Ignore interrupt so close remains blocked past shared deadline, then throw real IOException once released.
+                    val waitEnd = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                    while (true) {
+                        val rem = waitEnd - System.nanoTime()
+                        if (rem <= 0L) break
+                        try {
+                            if (unblockLateClose.await(rem, TimeUnit.NANOSECONDS)) break
+                        } catch (_: InterruptedException) {
+                            // Keep waiting until external release to exercise late post-timeout error path.
+                        }
+                    }
+                    throw IOException("late daemon close IOException after timeout")
                 }
             }
-        }
-        val startNanos = System.nanoTime()
-        val blockingFailures = try {
-            teardownProcessTree(
-                proc = fastProc2,
-                extraReader = blockingReader,
-                timeoutNanos = TimeUnit.MILLISECONDS.toNanos(250),
+            val injectedMain = if (withMainFailure) IllegalStateException("primary test failure") else null
+            val lateSink = TeardownDiagnosticsSink(initialTargetFailure = injectedMain)
+            val startNanos = System.nanoTime()
+            val targetFailure: Throwable?
+            try {
+                targetFailure = teardownProcessTree(
+                    proc = fastProcLate,
+                    extraReader = lateFailingReader,
+                    timeoutNanos = TimeUnit.MILLISECONDS.toNanos(150),
+                    mainFailure = injectedMain,
+                    sink = lateSink,
+                )
+                val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
+                assertTrue("Blocking daemon close must return within shared deadline (elapsed=${elapsedMs}ms)", elapsedMs < 1500L)
+                assertTrue("Settled target failure must exist after timeout", targetFailure != null)
+                if (injectedMain != null) {
+                    assertTrue("Existing mainFailure must be preserved as targetFailure", targetFailure === injectedMain)
+                }
+                assertEquals("Before release, timeout failure must already be attached", 1, targetFailure!!.suppressed.size)
+            } finally {
+                unblockLateClose.countDown()
+            }
+            val waitDaemonDone = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (System.nanoTime() < waitDaemonDone &&
+                (lateSink.snapshot().size < 2 ||
+                    Thread.getAllStackTraces().keys.any { it.name == "plugin-test-process-teardown" && it.isAlive })
+            ) {
+                Thread.sleep(10)
+            }
+
+            assertFalse(
+                "No plugin-test-process-teardown daemon thread should remain alive after release",
+                Thread.getAllStackTraces().keys.any { it.name == "plugin-test-process-teardown" && it.isAlive },
             )
-        } finally {
-            unblockClose.countDown()
+            assertEquals("Sink must retain both timeout and late IOException", 2, lateSink.snapshot().size)
+            assertEquals("targetFailure.suppressed must retain both timeout and late IOException", 2, targetFailure.suppressed.size)
+            assertTrue(
+                "targetFailure.suppressed must contain the timeout AssertionError",
+                targetFailure.suppressed.any { it.message?.contains("BufferedReader close") == true },
+            )
+            assertTrue(
+                "targetFailure.suppressed must contain the late IOException",
+                targetFailure.suppressed.any { it.cause?.message == "late daemon close IOException after timeout" },
+            )
         }
-        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
-        assertTrue("Blocking daemon close must be bounded by shared deadline (elapsed=${elapsedMs}ms)", elapsedMs < 2000L)
+
+        // (c) readExecutor.shutdownNow() throwing an exception is captured without bypassing mainFailure.addSuppressed;
+        val fastProc3 = ProcessBuilder(python, "-c", "pass").redirectErrorStream(true).start()
+        fastProc3.waitFor(5, TimeUnit.SECONDS)
+        val delegateReadExecutor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "plugin-test-shutdownnow-delegate").apply { isDaemon = true }
+        }
+        val throwingReadExecutor = java.lang.reflect.Proxy.newProxyInstance(
+            ExecutorService::class.java.classLoader,
+            arrayOf(ExecutorService::class.java),
+        ) { _, method, args ->
+            if (method.name == "shutdownNow") {
+                delegateReadExecutor.shutdownNow()
+                throw SecurityException("simulated shutdownNow denial")
+            }
+            if (args == null) method.invoke(delegateReadExecutor) else method.invoke(delegateReadExecutor, *args)
+        } as ExecutorService
+        val shutdownMainFailure = IllegalStateException("primary failure before shutdownNow")
+        val shutdownSink = TeardownDiagnosticsSink(initialTargetFailure = shutdownMainFailure)
+        val shutdownSettled = teardownProcessTree(
+            proc = fastProc3,
+            readExecutor = throwingReadExecutor,
+            timeoutNanos = TimeUnit.SECONDS.toNanos(2),
+            mainFailure = shutdownMainFailure,
+            sink = shutdownSink,
+        )
+        assertTrue("mainFailure must be preserved when shutdownNow throws", shutdownSettled === shutdownMainFailure)
         assertTrue(
-            "Blocking daemon close timeout must be recorded in cleanup failures",
-            blockingFailures.any { it.message?.contains("BufferedReader close") == true },
+            "shutdownNow() exception must be captured in sink",
+            shutdownSink.snapshot().any { it is SecurityException && it.message == "simulated shutdownNow denial" },
+        )
+        assertTrue(
+            "shutdownNow() exception must be attached to mainFailure.suppressed",
+            shutdownMainFailure.suppressed.any { it is SecurityException && it.message == "simulated shutdownNow denial" },
         )
 
-        // (c) once shared descendant deadline is exhausted (<= 0ns), alive descendants receive zero extra wait.
+        // (d) once shared descendant deadline is exhausted (<= 0ns), alive descendants receive zero extra wait.
         val sleeperProc = ProcessBuilder(python, "-c", "import time; time.sleep(10)")
             .redirectErrorStream(true)
             .start()
         try {
             val sleeperHandle = requireNotNull(Process::class.java.getMethod("toHandle").invoke(sleeperProc))
-            val expiredFailures = CopyOnWriteArrayList<Throwable>()
+            val expiredSink = TeardownDiagnosticsSink()
             val zeroBudgetStart = System.nanoTime()
             awaitHandlesExitWithinDeadline(
                 handles = listOf(sleeperHandle, sleeperHandle, sleeperHandle),
                 deadlineNanos = System.nanoTime() - 1L,
-                failures = expiredFailures,
+                sink = expiredSink,
             )
             val zeroBudgetElapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - zeroBudgetStart)
-            assertEquals("Each alive handle past deadline must be reported immediately", 3, expiredFailures.size)
+            assertEquals("Each alive handle past deadline must be reported immediately", 3, expiredSink.snapshot().size)
             assertTrue("Exhausted deadline must not grant extra wait (elapsed=${zeroBudgetElapsedMs}ms)", zeroBudgetElapsedMs < 200L)
         } finally {
             destroyProcessTree(sleeperProc)
