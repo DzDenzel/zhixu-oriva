@@ -96,9 +96,6 @@ def _extract_secrets_from_env(env_map, min_len=3):
 def _mixed_percent_regex(secret):
     if not secret or len(secret) < 3:
         return None
-    enc = urllib.parse.quote(secret, safe='')
-    if enc == secret and '+' not in secret and ' ' not in secret:
-        return None
     parts = []
     for ch in secret:
         if ch == ' ':
@@ -529,41 +526,31 @@ def _decode_bytes(raw):
 def _run_git_raw(root, *args, timeout=None, env=None, anonymous=False):
     @contextmanager
     def _env_ctx():
-        if env is None:
-            with isolated_git_env(os.environ, anonymous=anonymous) as iso_env:
+        cfg_key = str(env['GIT_CONFIG_GLOBAL']) if (env is not None and 'GIT_CONFIG_GLOBAL' in env) else None
+        ctx_meta = _CONTROLLED_GIT_CONTEXTS.get(cfg_key) if cfg_key is not None else None
+        if ctx_meta is None:
+            with isolated_git_env(env if env is not None else os.environ, anonymous=anonymous) as iso_env:
                 yield iso_env
-        elif 'GIT_CONFIG_GLOBAL' not in env:
-            with isolated_git_env(env, anonymous=anonymous) as iso_env:
-                yield iso_env
-        else:
-            cfg_key = str(env['GIT_CONFIG_GLOBAL'])
-            ctx_meta = _CONTROLLED_GIT_CONTEXTS.get(cfg_key)
-            if anonymous:
-                if ctx_meta is not None and ctx_meta.get('empty_home') is not None:
-                    yield sanitize_git_env(
-                        env,
-                        empty_gitconfig_path=cfg_key,
-                        empty_home_path=ctx_meta['empty_home'],
-                        allow_controlled_askpass=False,
-                        keep_ssh_env=False,
-                    )
-                else:
-                    with isolated_git_env(env, anonymous=True) as iso_env:
-                        yield iso_env
-            elif ctx_meta is not None:
+        elif anonymous:
+            if ctx_meta.get('empty_home') is not None:
                 yield sanitize_git_env(
                     env,
                     empty_gitconfig_path=cfg_key,
-                    empty_home_path=ctx_meta.get('empty_home'),
-                    allow_controlled_askpass=True,
-                    keep_ssh_env=bool(ctx_meta.get('keep_ssh_env', False)),
+                    empty_home_path=ctx_meta['empty_home'],
+                    allow_controlled_askpass=False,
+                    keep_ssh_env=False,
                 )
             else:
-                yield sanitize_git_env(
-                    env,
-                    empty_gitconfig_path=cfg_key,
-                    allow_controlled_askpass=True,
-                )
+                with isolated_git_env(env, anonymous=True) as iso_env:
+                    yield iso_env
+        else:
+            yield sanitize_git_env(
+                env,
+                empty_gitconfig_path=cfg_key,
+                empty_home_path=ctx_meta.get('empty_home'),
+                allow_controlled_askpass=True,
+                keep_ssh_env=bool(ctx_meta.get('keep_ssh_env', False)),
+            )
 
     effective_timeout = timeout if timeout is not None else DEFAULT_GIT_TIMEOUT_SECONDS
     with _env_ctx() as effective_env:
@@ -670,26 +657,19 @@ def _execution_env_ctx(args, env):
     if not is_git_cmd:
         yield env
         return
-    if 'GIT_CONFIG_GLOBAL' not in env:
-        with isolated_git_env(env, anonymous=False) as iso_env:
-            yield iso_env
+    cfg_key = str(env['GIT_CONFIG_GLOBAL']) if (env is not None and 'GIT_CONFIG_GLOBAL' in env) else None
+    ctx_meta = _CONTROLLED_GIT_CONTEXTS.get(cfg_key) if cfg_key is not None else None
+    if ctx_meta is not None:
+        yield sanitize_git_env(
+            env,
+            empty_gitconfig_path=cfg_key,
+            empty_home_path=ctx_meta.get('empty_home'),
+            allow_controlled_askpass=True,
+            keep_ssh_env=bool(ctx_meta.get('keep_ssh_env', False)),
+        )
     else:
-        cfg_key = str(env['GIT_CONFIG_GLOBAL'])
-        ctx_meta = _CONTROLLED_GIT_CONTEXTS.get(cfg_key)
-        if ctx_meta is not None:
-            yield sanitize_git_env(
-                env,
-                empty_gitconfig_path=cfg_key,
-                empty_home_path=ctx_meta.get('empty_home'),
-                allow_controlled_askpass=True,
-                keep_ssh_env=bool(ctx_meta.get('keep_ssh_env', False)),
-            )
-        else:
-            yield sanitize_git_env(
-                env,
-                empty_gitconfig_path=cfg_key,
-                allow_controlled_askpass=True,
-            )
+        with isolated_git_env(env if env is not None else os.environ, anonymous=False) as iso_env:
+            yield iso_env
 
 
 def execute(args, cwd, env, logfile=None, timeout=None):
@@ -1707,6 +1687,8 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
         part.unlink(missing_ok=True)
         meta_path.unlink(missing_ok=True)
 
+    last_error = None
+    last_stage = None
     try:
         for attempt in range(len(DOWNLOAD_BACKOFF_SECONDS) + 1):
             if part.exists():
@@ -1720,6 +1702,11 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
             remaining = deadline - time.monotonic()
             if remaining <= 0 or aborter.expired:
                 _cleanup_part()
+                if last_error is not None:
+                    raise ReleaseError(
+                        f'Download total timeout ({total_timeout}s) exceeded for {target.name} '
+                        f'during {last_stage or "download"}: {last_error}'
+                    ) from None
                 raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded before starting {target.name}')
             req_timeout = min(download_timeout, remaining)
 
@@ -1840,6 +1827,7 @@ def download_asset(url, target, expected_size=None, expected_sha256=None,
                 cur_stage = 'TLS handshake' if isinstance(exc, ssl.SSLError) else aborter.stage
                 last_error = ReleaseError(redact_secrets(f'Download failed for {target.name} during {cur_stage}: {exc}'))
 
+            last_stage = cur_stage
             if aborter.expired or time.monotonic() >= deadline:
                 _cleanup_part()
                 raise ReleaseError(f'Download total timeout ({total_timeout}s) exceeded for {target.name} during {cur_stage}: {last_error}') from None

@@ -565,23 +565,57 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
             for dropped in ("CUSTOM_APP_TOKEN", "DB_PASS", "PRIVATE_KEY"):
                 self.assertNotIn(dropped, penv)
 
+        # Unregistered external GIT_CONFIG_GLOBAL must NEVER pass through non-anonymous _run_git_raw or execute(['git', ...])
+        ext_cfg = self.root / "external.gitconfig"
+        ext_cfg.write_text("", encoding="utf8")
+        ext_fake_home = self.root / "ext_fake_home"
+        ext_fake_home.mkdir()
+        ext_env = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": str(ext_cfg),
+            "HOME": str(ext_fake_home),
+            "USERPROFILE": str(ext_fake_home),
+        }
+        ext_popen_envs: list[dict[str, str]] = []
+        real_popen_ext = subprocess.Popen
+        def _capturing_ext_popen(cmd, **kw):
+            ext_popen_envs.append(dict(kw.get("env") or {}))
+            return real_popen_ext(cmd, **kw)
+        with patch.object(r.subprocess, "Popen", side_effect=_capturing_ext_popen):
+            rc_raw, _, _, _ = r._run_git_raw(self.root, "--version", env=ext_env, anonymous=False)
+            self.assertEqual(rc_raw, 0)
+            r.execute(["git", "--version"], self.root, ext_env)
+        self.assertEqual(len(ext_popen_envs), 2)
+        for penv in ext_popen_envs:
+            self.assertNotEqual(penv.get("GIT_CONFIG_GLOBAL"), str(ext_cfg))
+            self.assertIn("oriva-git-cfg-", penv.get("GIT_CONFIG_GLOBAL", ""))
+            self.assertTrue(penv.get("GIT_CONFIG_GLOBAL", "").endswith("empty.gitconfig"))
+            for hk in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+                self.assertNotEqual(penv.get(hk), str(ext_fake_home))
+                self.assertIn("oriva-git-cfg-", penv.get(hk, ""))
+
         secret = "synthetic/secret+tok=999"
         short_secret = "pw9"
+        unreserved_secret = "abc1"
         unicode_secret = "密钥=秘密値"
         b64_auth = base64.b64encode(("x-access-token:" + secret).encode("utf8")).decode("ascii")
         pct_upper = r.urllib.parse.quote(secret, safe="")
         pct_lower = pct_upper.replace("%2F", "%2f").replace("%2B", "%2b").replace("%3D", "%3d")
         pct_mixed = pct_upper.replace("%2F", "%2f")  # mixed %2f + %2B + %3D
         unicode_pct_mixed = "%e5%af%86%E9%92%A5%3d%E7%A7%98%e5%af%86%E5%80%A4"
+        unreserved_pct_partial = "%61b%631"
+        short_pct_full = "%70%77%39"
         log = self.root / "leak.log"
         env = os.environ.copy()
         env["CUSTOM_CHILD_SECRET"] = secret
         env["DB_PASS"] = short_secret
+        env["UNRESERVED_KEY"] = unreserved_secret
         env["UNICODE_SECRET"] = unicode_secret
         with self.assertRaises(r.ReleaseError):
             r.execute(
                 [sys.executable, "-c", (
-                    f"import sys; sys.stderr.write('raw={secret} short={short_secret} pct1={pct_upper} pct2={pct_lower} pct3={pct_mixed} "
+                    f"import sys; sys.stderr.write('raw={secret} short={short_secret} spct={short_pct_full} upart={unreserved_pct_partial} "
+                    f"pct1={pct_upper} pct2={pct_lower} pct3={pct_mixed} "
                     f"upct={unicode_pct_mixed} uplain={unicode_secret} "
                     f"Authorization: Bearer {secret} Authorization: Basic {b64_auth} "
                     f"HTTPS://tok@github.com/o/r?X-Amz-Signature=sigsecret#fragsecret "
@@ -590,13 +624,17 @@ class R1R2R3PublishAndProcessTests(unittest.TestCase):
                 self.root, env, log,
             )
         log_text = log.read_text(encoding="utf8")
-        for leaked in (secret, short_secret, unicode_secret, b64_auth, pct_upper, pct_lower, pct_mixed, unicode_pct_mixed, "sigsecret", "fragsecret", "onlyfrag", "tok@"):
+        for leaked in (secret, short_secret, short_pct_full, unreserved_secret, unreserved_pct_partial, unicode_secret, b64_auth, pct_upper, pct_lower, pct_mixed, unicode_pct_mixed, "sigsecret", "fragsecret", "onlyfrag", "tok@"):
             self.assertNotIn(leaked, log_text)
         self.assertIn("[REDACTED]", log_text)
         self.assertIn("/tmp/ssh-agent.sock", r.redact_secrets("/tmp/ssh-agent.sock", extra_secrets=r._extract_secrets_from_env(rich_env)))
         self.assertEqual(
-            r.redact_secrets("url=https://x/%E7%A7%98%e5%af%86%E5%80%A4", extra_secrets=("秘密値",)),
-            "url=https://x/[REDACTED]",
+            r.redact_secrets("url=https://x/%E7%A7%98%e5%af%86%E5%80%A4&k=%61b%631&s=%70%77%39", extra_secrets=("秘密値", "abc1", "pw9")),
+            "url=https://x/[REDACTED]&k=[REDACTED]&s=[REDACTED]",
+        )
+        self.assertEqual(
+            r.redact_secrets("token=%61b%631 full=%70%77%39", extra_secrets=("abc1", "pw9")),
+            "token=[REDACTED] full=[REDACTED]",
         )
 
         # archive_source must route via controlled git runner & redact stderr/error messages
@@ -1413,6 +1451,45 @@ class R4R5VerifyAndDownloadHardeningTests(unittest.TestCase):
         self.assertIn("read stall after sleep", msg2)
         self.assertNotIn("before starting", msg2)
         self.assertFalse(t_sleep_over.with_name("sleep_over.apk.part").exists())
+
+        # 1c. When 1s remains after wake-up check, crossing deadline at next-iteration pre-check MUST preserve previous stage/error!
+        t_cross = self.root / "cross_precheck.apk"
+        t_cross.with_name("cross_precheck.apk.part").write_bytes(payload[:50])
+        r.write_json(
+            t_cross.with_name("cross_precheck.apk.part.meta.json"),
+            {"url": "https://github.com/o/r/releases/download/v2.2.0/cross.apk", "expectedSize": len(payload), "expectedSha256": expected_sha},
+        )
+        now_box[0] = 3000.0
+        post_sleep_calls = [0]
+        in_post_sleep = {"active": False}
+        def _crossing_monotonic():
+            if in_post_sleep["active"]:
+                post_sleep_calls[0] += 1
+                if post_sleep_calls[0] >= 2:  # Call #1 = wake-up check (still 3009.0 / 1s left); Call #2 = iter1 pre-check (3010.5!)
+                    now_box[0] = 3010.5
+            return now_box[0]
+        def _connect_fail_open(req, timeout=None):
+            now_box[0] = 3007.0
+            raise TimeoutError("connect stalled")
+        def _one_sec_left_sleep(sec: float):
+            now_box[0] = 3009.0  # 1.0s left during wake check
+            in_post_sleep["active"] = True
+        with patch.object(r.time, "monotonic", side_effect=_crossing_monotonic):
+            with self.assertRaises(r.ReleaseError) as ctx3:
+                r.download_asset(
+                    "https://github.com/o/r/releases/download/v2.2.0/cross.apk",
+                    t_cross, expected_size=len(payload), expected_sha256=expected_sha,
+                    total_timeout=10.0,
+                    opener=SimpleNamespace(open=_connect_fail_open),
+                    sleep_fn=_one_sec_left_sleep,
+                )
+        msg3 = str(ctx3.exception)
+        self.assertGreaterEqual(post_sleep_calls[0], 2)
+        self.assertIn("during DNS/TCP", msg3)
+        self.assertIn("connect stalled", msg3)
+        self.assertNotIn("before starting", msg3)
+        self.assertFalse(t_cross.with_name("cross_precheck.apk.part").exists())
+        self.assertFalse(t_cross.with_name("cross_precheck.apk.part.meta.json").exists())
 
         # 2. Retryable HTTP 429/503 MUST clear existing .part & .part.meta.json BEFORE next retry (restarting cleanly from byte 0)
         for http_err_code in (429, 503):
