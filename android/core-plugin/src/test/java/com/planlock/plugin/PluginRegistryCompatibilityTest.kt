@@ -161,23 +161,42 @@ class PluginRegistryCompatibilityTest {
         } catch (t: Throwable) {
             mainFailure = t
         } finally {
-            // 1. Kill any descendants first (even when READY PID was never parsed), then force-kill root process under explicit timeout check.
+            // 1. Collect descendant handles (including resolved grandchildPid if known), kill descendants & root, and verify exit within bounded deadline.
+            val phClass = Class.forName("java.lang.ProcessHandle")
+            val destroyForciblyMethod = phClass.getMethod("destroyForcibly")
+            val onExitMethod = phClass.getMethod("onExit")
+            val isAliveMethod = phClass.getMethod("isAlive")
+            val ofMethod = phClass.getMethod("of", Long::class.javaPrimitiveType)
+            val handlesToVerify = mutableListOf<Any>()
+
             try {
-                val phClass = Class.forName("java.lang.ProcessHandle")
-                val destroyForciblyMethod = phClass.getMethod("destroyForcibly")
                 @Suppress("UNCHECKED_CAST")
                 val descStream = Process::class.java.getMethod("descendants").invoke(proc) as java.util.stream.Stream<Any>
-                val descs = mutableListOf<Any>()
-                descStream.use { s -> s.forEach { descs.add(it) } }
-                for (h in descs.asReversed()) {
-                    try {
-                        destroyForciblyMethod.invoke(h)
-                    } catch (t: Throwable) {
-                        cleanupFailures += t
-                    }
-                }
+                descStream.use { s -> s.forEach { handlesToVerify.add(it) } }
             } catch (t: Throwable) {
                 cleanupFailures += t
+            }
+            if (grandchildPid > 0L) {
+                try {
+                    @Suppress("UNCHECKED_CAST")
+                    val opt = ofMethod.invoke(null, grandchildPid) as java.util.Optional<Any>
+                    if (opt.isPresent && !handlesToVerify.contains(opt.get())) {
+                        handlesToVerify.add(opt.get())
+                    }
+                } catch (t: Throwable) {
+                    cleanupFailures += t
+                }
+            }
+
+            for (h in handlesToVerify.asReversed()) {
+                try {
+                    val killed = destroyForciblyMethod.invoke(h) as Boolean
+                    if (!killed && (isAliveMethod.invoke(h) as Boolean)) {
+                        cleanupFailures += AssertionError("ProcessHandle.destroyForcibly() returned false for still-alive descendant")
+                    }
+                } catch (t: Throwable) {
+                    cleanupFailures += t
+                }
             }
             try {
                 if (proc.isAlive) {
@@ -189,40 +208,45 @@ class PluginRegistryCompatibilityTest {
             } catch (t: Throwable) {
                 cleanupFailures += t
             }
-            if (grandchildPid > 0L) {
+            val descDeadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            for (h in handlesToVerify) {
                 try {
-                    val phClass = Class.forName("java.lang.ProcessHandle")
-                    @Suppress("UNCHECKED_CAST")
-                    val opt = phClass.getMethod("of", Long::class.javaPrimitiveType).invoke(null, grandchildPid) as java.util.Optional<Any>
-                    if (opt.isPresent) {
-                        phClass.getMethod("destroyForcibly").invoke(opt.get())
+                    if (isAliveMethod.invoke(h) as Boolean) {
+                        val remMs = maxOf(1L, TimeUnit.NANOSECONDS.toMillis(descDeadlineNanos - System.nanoTime()))
+                        @Suppress("UNCHECKED_CAST")
+                        val exitFuture = onExitMethod.invoke(h) as CompletableFuture<*>
+                        exitFuture.get(remMs, TimeUnit.MILLISECONDS)
+                        if (isAliveMethod.invoke(h) as Boolean) {
+                            cleanupFailures += AssertionError("Descendant process remained alive after teardown")
+                        }
                     }
                 } catch (t: Throwable) {
                     cleanupFailures += t
                 }
             }
-            // 2. Close ONLY the raw inputStream first so any blocked BufferedReader.readLine() unblocks without locking on BufferedReader.close().
-            try {
-                proc.inputStream.close()
-            } catch (t: Throwable) {
-                cleanupFailures += t
+
+            // 2. Never synchronously close proc.inputStream or BufferedReader on test thread (ProcessPipeInputStream/BufferedReader lock can block seconds);
+            // detach a daemon pipe-closer and bound readerExecutor.awaitTermination cleanly within teardown budget.
+            Thread({
+                try {
+                    proc.inputStream.close()
+                } catch (_: Throwable) {
+                }
+                try {
+                    procReader?.close()
+                } catch (_: Throwable) {
+                }
+            }, "plugin-test-stream-closer").apply {
+                isDaemon = true
+                start()
             }
             readExecutor.shutdownNow()
-            var readerTerminated = false
             try {
-                readerTerminated = readExecutor.awaitTermination(1, TimeUnit.SECONDS)
-                if (!readerTerminated) {
+                if (!readExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
                     cleanupFailures += AssertionError("Daemon READY stdout reader thread did not terminate within 1s teardown deadline")
                 }
             } catch (t: Throwable) {
                 cleanupFailures += t
-            }
-            if (readerTerminated) {
-                try {
-                    procReader?.close()
-                } catch (t: Throwable) {
-                    cleanupFailures += t
-                }
             }
         }
         if (mainFailure != null) {

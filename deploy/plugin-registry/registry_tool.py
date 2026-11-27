@@ -547,35 +547,27 @@ def _open_anchored_dir_fd(target_dir: Path, label: str, stop_at: Path | None = N
     """Open a directory descriptor walking segment-by-segment from OS root (/) with O_NOFOLLOW and identity checks."""
     canonical_dir = _resolve_non_symlink_path(target_dir, label, must_exist=True, stop_at=stop_at)
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    if stop_at is not None:
-        canonical_stop = _resolve_non_symlink_path(stop_at, f"trusted root for {label}", must_exist=True)
-        # Always walk from filesystem root (/) down to trusted_root before traversing to target_dir.
-        cur_fd = _open_anchored_dir_fd(canonical_stop, f"trusted root for {label}", stop_at=None)
-        rel_parts = canonical_dir.relative_to(canonical_stop).parts
-    else:
-        if canonical_dir.is_absolute():
-            start = Path(canonical_dir.anchor)
-            rel_parts = canonical_dir.parts[1:]
+    cur_fd = -1
+    next_fd = -1
+    try:
+        if stop_at is not None:
+            canonical_stop = _resolve_non_symlink_path(stop_at, f"trusted root for {label}", must_exist=True)
+            # Always walk from filesystem root (/) down to trusted_root before traversing to target_dir.
+            cur_fd = _open_anchored_dir_fd(canonical_stop, f"trusted root for {label}", stop_at=None)
+            rel_parts = canonical_dir.relative_to(canonical_stop).parts
         else:
-            start = Path.cwd()
-            rel_parts = canonical_dir.parts
-        cur_fd = -1
-        try:
+            if canonical_dir.is_absolute():
+                start = Path(canonical_dir.anchor)
+                rel_parts = canonical_dir.parts[1:]
+            else:
+                start = Path.cwd()
+                rel_parts = canonical_dir.parts
             start_st = _lstat_no_symlink(start, f"anchor start of {label}")
             cur_fd = os.open(start, dir_flags)
             cur_fst = os.fstat(cur_fd)
             if not stat.S_ISDIR(cur_fst.st_mode) or (cur_fst.st_dev, cur_fst.st_ino) != (start_st.st_dev, start_st.st_ino):
                 raise RegistryValidationError(f"Directory anchor identity mismatch for {label}")
-        except OSError as exc:
-            if cur_fd != -1:
-                os.close(cur_fd)
-            raise RegistryValidationError(f"Cannot open anchored directory {label}: {exc}") from exc
-        except BaseException:
-            if cur_fd != -1:
-                os.close(cur_fd)
-            raise
 
-    try:
         for seg in rel_parts:
             if seg in {"", "."}:
                 continue
@@ -585,19 +577,22 @@ def _open_anchored_dir_fd(target_dir: Path, label: str, stop_at: Path | None = N
             next_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
             next_fst = os.fstat(next_fd)
             if (next_fst.st_dev, next_fst.st_ino) != (seg_lst.st_dev, seg_lst.st_ino):
-                os.close(next_fd)
                 raise RegistryValidationError(f"Directory identity changed during traversal for '{seg}' in {label}")
             os.close(cur_fd)
             cur_fd = next_fd
-        return cur_fd
+            next_fd = -1
+        opened_fd = cur_fd
+        cur_fd = -1
+        return opened_fd
     except OSError as exc:
-        if cur_fd != -1:
-            os.close(cur_fd)
         raise RegistryValidationError(f"Cannot open anchored directory {label}: {exc}") from exc
-    except BaseException:
-        if cur_fd != -1:
-            os.close(cur_fd)
-        raise
+    finally:
+        for fd_to_close in (next_fd, cur_fd):
+            if fd_to_close != -1:
+                try:
+                    os.close(fd_to_close)
+                except OSError:
+                    pass
 
 
 def _open_anchored_regular_file(

@@ -1381,6 +1381,28 @@ assert.strictEqual(elements.siteTitle.textContent, '<b>站名</b>');
                     PurePosixPath("/opt/trusted/registry"), "posix symlink test", stop_at=PurePosixPath("/opt/trusted")
                 )
             self.assertEqual(fake_fds, {})
+
+            # Fault injection 1: fstat(next_fd) throws OSError AFTER os.open(next_fd) -> BOTH cur_fd and next_fd must be closed!
+            mock_os.lstat = _fake_lstat
+            fstat_calls = {"n": 0}
+            def _fstat_fail_on_next(fd):
+                fstat_calls["n"] += 1
+                if fstat_calls["n"] == 2:
+                    raise OSError("injected fstat error on next_fd")
+                return _fake_fstat(fd)
+            mock_os.fstat = _fstat_fail_on_next
+            with self.assertRaisesRegex(registry_tool.RegistryValidationError, "injected fstat error"):
+                registry_tool._open_anchored_dir_fd(PurePosixPath("/opt/trusted/registry"), "posix fstat fail test")
+            self.assertEqual(fake_fds, {})
+
+            # Fault injection 2: relative_to raises ValueError AFTER opening stop_at cur_fd -> cur_fd must be closed!
+            mock_os.fstat = _fake_fstat
+            with patch.object(PurePosixPath, "relative_to", side_effect=ValueError("injected relative_to error")):
+                with self.assertRaisesRegex(ValueError, "injected relative_to error"):
+                    registry_tool._open_anchored_dir_fd(
+                        PurePosixPath("/opt/trusted/registry"), "posix rel fail test", stop_at=PurePosixPath("/opt/trusted")
+                    )
+            self.assertEqual(fake_fds, {})
         self.assertEqual(opened_calls[0], ("/", None))
         self.assertEqual([c[0] for c in opened_calls[:4]], ["/", "opt", "trusted", "registry"])
         self.assertTrue(all(fd is not None for _, fd in opened_calls[1:4]))
