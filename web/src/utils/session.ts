@@ -92,9 +92,9 @@ function decodeBase64Url(segment: string): string | null {
 }
 
 /**
- * 严格校验三段式 Base64URL JWT 结构与有限正数 exp（Astra R1 v1.4）：
- * - 必须精确 3 段且每段均匹配 ^[A-Za-z0-9_-]+$；
- * - header 与 payload 必须均可解码并解析为合法 JSON 对象；
+ * 严格校验三段式 Base64URL JWT 结构与有限正数 exp（Astra R1 v1.5）：
+ * - 必须精确 3 段且每段均通过 Base64URL 解码（严格拒收 length % 4 === 1 与空解码）；
+ * - header 与 payload 必须均可解析为合法 JSON 对象，signature 解码字节长度 > 0；
  * - payload.exp 必须为有限正数（< Number.MAX_SAFE_INTEGER）；无 exp 或非 JWT 一律返回 null。
  */
 export function parseStrictJwtMetadata(token: string): StrictJwtMetadata | null {
@@ -103,16 +103,15 @@ export function parseStrictJwtMetadata(token: string): StrictJwtMetadata | null 
     return null;
   }
   const [headerSeg, payloadSeg, sigSeg] = parts;
-  if (
-    !BASE64URL_SEGMENT_PATTERN.test(headerSeg) ||
-    !BASE64URL_SEGMENT_PATTERN.test(payloadSeg) ||
-    !BASE64URL_SEGMENT_PATTERN.test(sigSeg)
-  ) {
-    return null;
-  }
   const headerDecoded = decodeBase64Url(headerSeg);
   const payloadDecoded = decodeBase64Url(payloadSeg);
-  if (headerDecoded === null || payloadDecoded === null) {
+  const sigDecoded = decodeBase64Url(sigSeg);
+  if (
+    headerDecoded === null ||
+    payloadDecoded === null ||
+    sigDecoded === null ||
+    sigDecoded.length === 0
+  ) {
     return null;
   }
   try {

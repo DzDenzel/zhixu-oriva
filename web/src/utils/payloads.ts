@@ -432,8 +432,50 @@ function parseScheduleRuleObject(raw?: string | null): Record<string, unknown> |
   }
 }
 
+function toPositiveWeekdayList(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const unique = new Set<number>();
+  for (const item of value) {
+    const n = Number(item);
+    if (Number.isInteger(n) && n >= 1 && n <= 7) {
+      unique.add(n);
+    }
+  }
+  return Array.from(unique).sort((a, b) => a - b);
+}
+
 /**
- * 构建编辑后的日程重复规则（Astra R4 v1.3）：
+ * 无论 repeatRule 是否被界面改脏，出站日程规则若仍使用历史 days 别名（缺省/空 weekdays 或残留 days 键），
+ * 均统一规范为后端 ScheduleRules.java 要求的 weekdays 键并完整保留全部非 UI 扩展字段（Astra R4 v1.5）。
+ */
+function normalizeOutboundScheduleRepeatRule(raw?: string | null): string | null {
+  if (raw === null || raw === undefined || raw.trim() === '') {
+    return raw ?? null;
+  }
+  const obj = parseScheduleRuleObject(raw);
+  if (!obj) {
+    return raw;
+  }
+  const type = typeof obj.type === 'string' ? obj.type.trim().toLowerCase() : '';
+  if (type !== 'weekly') {
+    return raw;
+  }
+  const existingWeekdays = toPositiveWeekdayList(obj.weekdays);
+  if (existingWeekdays.length > 0 && !('days' in obj)) {
+    return raw;
+  }
+  const legacyDays = toPositiveWeekdayList(obj.days);
+  const normalizedWeekdays = existingWeekdays.length > 0 ? existingWeekdays : legacyDays;
+  if (normalizedWeekdays.length === 0) {
+    return raw;
+  }
+  const { days: _legacyDays, weekdays: _oldWeekdays, ...rest } = obj;
+  return JSON.stringify({ ...rest, type: 'weekly', weekdays: normalizedWeekdays });
+}
+
+/**
+ * 构建编辑后的日程重复规则（Astra R4 v1.5）：
+ * - preserve 透传时同步执行历史 days -> weekdays 规范化；
  * - 切为 none 返回 null；切为不同 type 时按新类型洁净契约生成（不残留旧类型专属键）；
  * - 保持相同 type（如修改 weekly 曜日或同类型刷新）时，以目标基底解析出的对象（普通保存用原始规则，
  *   1409 冲突重试用 serverLatest.repeatRule）做浅拷贝保留全部服务端扩展字段（如 interval/endDate/tz/customExt），
@@ -445,7 +487,7 @@ function buildEditedScheduleRepeatRule(
 ): string | null {
   const effectiveBaseRaw = baseRule !== undefined ? baseRule : form.originalRepeatRule;
   if (form.repeatMode === 'preserve') {
-    return effectiveBaseRaw ?? null;
+    return normalizeOutboundScheduleRepeatRule(effectiveBaseRaw ?? null);
   }
   if (form.repeatMode === 'none') return null;
 
@@ -648,7 +690,7 @@ export function buildScheduleUpsertPayload(
         : (base.remindAdvanceMin ?? null),
       repeatRule: dirty.has('repeatRule')
         ? buildEditedScheduleRepeatRule(form, base.repeatRule ?? null)
-        : (base.repeatRule ?? null),
+        : normalizeOutboundScheduleRepeatRule(base.repeatRule ?? null),
       linkedPlanId: dirty.has('linkedPlanId')
         ? form.linkedPlanId
           ? Number(form.linkedPlanId)

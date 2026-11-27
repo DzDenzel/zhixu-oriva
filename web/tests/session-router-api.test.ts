@@ -19,15 +19,15 @@ import {
 
 /** 动态构造测试用三段式 Base64URL JWT（避免静态测试夹具中出现字面 eyJ 命中发布扫描器） */
 function makeTestJwt(expSec: number, sub = 'u1'): string {
-  const toB64Url = (obj: Record<string, unknown>) =>
-    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  return `${toB64Url({ alg: 'HS256', typ: 'JWT' })}.${toB64Url({ sub, exp: expSec })}.testsig_${sub}`;
+  const encodeB64Url = (raw: string) =>
+    btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `${encodeB64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))}.${encodeB64Url(JSON.stringify({ sub, exp: expSec }))}.${encodeB64Url(`testsig:${sub}`)}`;
 }
 
 function makeTestJwtWithoutExp(sub = 'noexp'): string {
-  const toB64Url = (obj: Record<string, unknown>) =>
-    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  return `${toB64Url({ alg: 'HS256', typ: 'JWT' })}.${toB64Url({ sub })}.testsig_${sub}`;
+  const encodeB64Url = (raw: string) =>
+    btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `${encodeB64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))}.${encodeB64Url(JSON.stringify({ sub }))}.${encodeB64Url(`testsig:${sub}`)}`;
 }
 
 function futureExpSec(offset = 3600): number {
@@ -129,12 +129,21 @@ describe('session & deviceUid lifecycle (B3)', () => {
     );
     expect(readSessionToken()).toBeNull();
 
-    // 3) Invalid Base64URL characters in signature segment -> rejected
-    const badSigJwt = `${makeTestJwt(futureExpSec(), 'u-badsig').split('.').slice(0, 2).join('.')}.bad+sig/==`;
-    expect(writeSessionTokenDetailed(badSigJwt)).toEqual({
-      persisted: false,
-      reason: 'invalid_token',
-    });
+    // 3) Invalid Base64URL characters or undecodable 4k+1 length in signature segment -> rejected on write & cold-start read
+    const prefix = makeTestJwt(futureExpSec(), 'u-badsig').split('.').slice(0, 2).join('.');
+    for (const invalidSig of ['bad+sig/==', 'x', 'abcde']) {
+      const badSigJwt = `${prefix}.${invalidSig}`;
+      expect(writeSessionTokenDetailed(badSigJwt)).toEqual({
+        persisted: false,
+        reason: 'invalid_token',
+      });
+      window.sessionStorage.setItem(TOKEN_SESSION_KEY, badSigJwt);
+      window.localStorage.setItem(
+        `${LEASE_KEY_PREFIX}${digestTokenNonSecret(badSigJwt)}`,
+        JSON.stringify({ exp: futureExpSec() }),
+      );
+      expect(readSessionToken()).toBeNull();
+    }
 
     // ApiClient.setToken MUST NOT admit invalid/missing-exp tokens into memoryToken
     const client = createApiClient();

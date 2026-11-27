@@ -20,10 +20,10 @@ import {
 import { resetSessionGuardForTest, writeSessionToken } from '../src/utils/session';
 
 function makeValidTestJwt(sub = 'view-u'): string {
-  const toB64Url = (obj: Record<string, unknown>) =>
-    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const encodeB64Url = (raw: string) =>
+    btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const exp = Math.floor(Date.now() / 1000) + 3600;
-  return `${toB64Url({ alg: 'HS256', typ: 'JWT' })}.${toB64Url({ sub, exp })}.viewsig_${sub}`;
+  return `${encodeB64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))}.${encodeB64Url(JSON.stringify({ sub, exp }))}.${encodeB64Url(`viewsig:${sub}`)}`;
 }
 
 async function flushUi(): Promise<void> {
@@ -953,6 +953,140 @@ describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 tru
     expect('days' in secondRule).toBe(false);
     expect(putCalls[1].body.locationLat).toBe(39.9042);
     expect(putCalls[1].body.locationLon).toBe(116.4074);
+
+    resetSessionGuardForTest();
+  });
+
+  it('normalizes legacy days to weekdays on both initial PUT and 1409 overwrite even when only title is edited (R4 v1.5)', async () => {
+    resetSessionGuardForTest();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    expect(writeSessionToken(makeValidTestJwt('sched-title-only-ui'))).toBe(true);
+
+    const initialSched: ScheduleItem = {
+      id: 82,
+      userId: 1,
+      title: '遗留仅改标题',
+      startDate: '2026-12-01',
+      endDate: '2026-12-01',
+      startTime: '09:00:00',
+      endTime: '10:00:00',
+      allDay: false,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        days: [2, 4],
+        interval: 3,
+        customExt: 'legacy-v1',
+      }),
+      status: 1,
+      version: 2,
+    };
+    const serverLatestSched: ScheduleItem = {
+      ...initialSched,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        days: [2, 5],
+        interval: 4,
+        customExt: 'mobile-v3',
+        skipHolidays: true,
+      }),
+      version: 3,
+    };
+
+    let getCount = 0;
+    const putCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/v1/schedules') {
+        getCount += 1;
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            message: 'ok',
+            data: [getCount === 1 ? initialSched : serverLatestSched],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (method === 'GET' && url === '/api/v1/plans') {
+        return new Response(JSON.stringify({ code: 0, message: 'ok', data: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'PUT' && url.startsWith('/api/v1/schedules/82')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        putCalls.push({ url, body });
+        if (putCalls.length === 1) {
+          return new Response(JSON.stringify({ code: 1409, message: '版本冲突', data: null }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            message: 'ok',
+            data: { ...serverLatestSched, ...body, version: 4 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ code: 1003, message: 'not found', data: null }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const realApi = createApiClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    render(<SchedulesPage api={realApi} onNotify={() => {}} />, container);
+    await flushUi();
+
+    const editBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '编辑');
+    expect(editBtn).toBeDefined();
+    editBtn?.click();
+    await flushUi();
+
+    // Edit ONLY the title input; do NOT touch repeatRule controls
+    const titleInput = container.querySelector('form input[type="text"]') as HTMLInputElement;
+    expect(titleInput).not.toBeNull();
+    titleInput.value = '仅修改标题后保存';
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flushUi();
+
+    container.querySelector('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flushUi();
+
+    expect(putCalls).toHaveLength(1);
+    const firstRule = JSON.parse(String(putCalls[0].body.repeatRule ?? '{}')) as Record<string, unknown>;
+    expect(firstRule).toEqual({
+      type: 'weekly',
+      weekdays: [2, 4],
+      interval: 3,
+      customExt: 'legacy-v1',
+    });
+    expect('days' in firstRule).toBe(false);
+
+    const overwriteBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('以我的草稿覆盖最新版本'),
+    );
+    expect(overwriteBtn).toBeDefined();
+    overwriteBtn?.click();
+    await flushUi();
+
+    expect(putCalls).toHaveLength(2);
+    expect(putCalls[1].url).toContain('baseVersion=3');
+    expect(putCalls[1].body.title).toBe('仅修改标题后保存');
+    const secondRule = JSON.parse(String(putCalls[1].body.repeatRule ?? '{}')) as Record<string, unknown>;
+    expect(secondRule).toEqual({
+      type: 'weekly',
+      weekdays: [2, 5],
+      interval: 4,
+      customExt: 'mobile-v3',
+      skipHolidays: true,
+    });
+    expect('days' in secondRule).toBe(false);
 
     resetSessionGuardForTest();
   });
