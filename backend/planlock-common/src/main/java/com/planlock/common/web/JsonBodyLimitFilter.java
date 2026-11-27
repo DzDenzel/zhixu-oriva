@@ -268,7 +268,7 @@ public class JsonBodyLimitFilter extends OncePerRequestFilter {
     }
 
     boolean isProtectedApiRoute(String path) {
-        if (!pathMatcher.match("/api/v1/**", path)) {
+        if (!pathMatcher.match("/api/**", path)) {
             return false;
         }
         if (hasSuspiciousPublicPathToken(path)) {

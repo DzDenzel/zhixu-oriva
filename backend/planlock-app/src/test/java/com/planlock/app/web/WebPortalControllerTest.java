@@ -81,8 +81,7 @@ class WebPortalControllerTest {
             DeploymentMetadataService.class,
             SetupService.class,
             SetupController.class,
-            WebPortalController.class,
-            ApiFallbackController.class
+            WebPortalController.class
     })
     static class Config {
         @Bean JdbcTemplate jdbcTemplate() { return mock(JdbcTemplate.class); }
@@ -192,26 +191,10 @@ class WebPortalControllerTest {
         deploymentRow.put("initialized", true);
         List<String> accepts = List.of("", "application/json", "text/html", "text/html,application/json;q=0.8", "*/*");
 
-        // Unauthenticated unknown /api/v1/** preserves pre-auth contract (200 JSON 1001, never 500 HTML).
-        for (String unknownApi : List.of("/api/v1/not-exists", "/api/v1/me/unknown")) {
-            for (String accept : accepts) {
-                var req = get(unknownApi);
-                if (!accept.isEmpty()) {
-                    req = req.header("Accept", accept);
-                }
-                var res = mvc.perform(req)
-                        .andExpect(status().isOk())
-                        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                        .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()))
-                        .andReturn()
-                        .getResponse();
-                assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("<html", "<!doctype");
-            }
-        }
-
-        // Authenticated unknown /api/v1/** returns deterministic 404 JSON 1003 across all Accept headers.
+        // In bare @EnableWebMvc (without Boot ResourceHttpRequestHandler), unmapped paths trigger NoHandlerFoundException -> 404 JSON.
+        // Full Spring Boot pre-auth 1001 vs authenticated 404 matrix is verified in WebPortalBootIntegrationTest.
         String token = jwtUtil.generate(1L, 10L);
-        for (String unknownApi : List.of("/api/v1/not-exists", "/api/v1/me/unknown")) {
+        for (String unknownApi : List.of("/api/v1/not-exists", "/api/v1/me/unknown", "/api/unknown")) {
             for (String accept : accepts) {
                 var req = get(unknownApi).header("Authorization", "Bearer " + token);
                 if (!accept.isEmpty()) {
@@ -220,6 +203,7 @@ class WebPortalControllerTest {
                 var res = mvc.perform(req)
                         .andExpect(status().isNotFound())
                         .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                        .andExpect(header().string("Cache-Control", "no-store"))
                         .andExpect(jsonPath("$.code").value(ErrorCode.NOT_FOUND.getCode()))
                         .andReturn()
                         .getResponse();

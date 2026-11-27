@@ -115,16 +115,22 @@ public class AuthService {
 
     static String maskAccount(String email, String phone) {
         if (email != null && !email.isBlank()) {
+            if (containsForbiddenInvisibleOrSpace(email.trim())) {
+                return "***";
+            }
             return maskEmail(email.trim());
         }
         if (phone != null && !phone.isBlank()) {
+            if (containsForbiddenInvisibleOrSpace(phone.trim())) {
+                return "***";
+            }
             return maskPhone(phone.trim());
         }
         return null;
     }
 
     private static String maskEmail(String trimmed) {
-        if (containsControlOrWhitespace(trimmed)) {
+        if (containsForbiddenInvisibleOrSpace(trimmed)) {
             return "***";
         }
         int firstAt = trimmed.indexOf('@');
@@ -152,47 +158,68 @@ public class AuthService {
     }
 
     private static String maskPhone(String trimmed) {
-        if (containsControlOrWhitespace(trimmed)) {
+        if (containsForbiddenInvisibleOrSpace(trimmed)) {
             return "***";
         }
-        if (!trimmed.matches("\\+?[0-9][0-9-]*[0-9]|\\+?[0-9]")) {
+        // 严禁连续分隔符或首尾连字符，仅允许可选前导 '+' 与单连字符分隔的数字组
+        if (!trimmed.matches("\\+?[0-9]+(?:-[0-9]+)*")) {
             return "***";
         }
-        int[] cps = trimmed.codePoints().toArray();
-        int len = cps.length;
-        if (len <= 4) {
+        String digits = trimmed.replace("+", "").replace("-", "");
+        int digitLen = digits.length();
+        if (digitLen < 1 || digitLen > 15) {
+            return "***";
+        }
+        if (digitLen <= 4) {
             return "****";
         }
-        if (len <= 8) {
-            return sliceCodePoints(cps, 0, 1) + "****" + sliceCodePoints(cps, len - 2, len);
+        if (digitLen <= 8) {
+            return digits.substring(0, 1) + "****" + digits.substring(digitLen - 2);
         }
-        return sliceCodePoints(cps, 0, 3) + "****" + sliceCodePoints(cps, len - 4, len);
+        return digits.substring(0, 3) + "****" + digits.substring(digitLen - 4);
     }
 
-    private static boolean containsControlOrWhitespace(String value) {
-        return value.codePoints().anyMatch(cp -> Character.isISOControl(cp) || Character.isWhitespace(cp));
+    private static boolean containsForbiddenInvisibleOrSpace(String value) {
+        return value.codePoints().anyMatch(cp -> {
+            if (Character.isISOControl(cp) || Character.isWhitespace(cp) || Character.isSpaceChar(cp)) {
+                return true;
+            }
+            int type = Character.getType(cp);
+            return type == Character.FORMAT
+                    || type == Character.CONTROL
+                    || type == Character.LINE_SEPARATOR
+                    || type == Character.PARAGRAPH_SEPARATOR
+                    || type == Character.SURROGATE
+                    || type == Character.PRIVATE_USE
+                    || type == Character.UNASSIGNED;
+        });
     }
 
     private static boolean isSafeEmailDomain(String domain) {
-        if (domain.isEmpty() || domain.length() > 253 || domain.startsWith(".") || domain.endsWith(".")
-                || domain.contains("..")) {
+        if (domain.isEmpty() || domain.length() > 253) {
             return false;
         }
-        if (!domain.contains(".")) {
+        String[] labels = domain.split("\\.", -1);
+        if (labels.length < 2) {
             return false;
         }
-        for (int i = 0; i < domain.length(); i++) {
-            char c = domain.charAt(i);
-            boolean ok = (c >= 'a' && c <= 'z')
-                    || (c >= 'A' && c <= 'Z')
-                    || (c >= '0' && c <= '9')
-                    || c == '.'
-                    || c == '-';
-            if (!ok) {
+        for (String label : labels) {
+            if (label.isEmpty() || label.length() > 63 || label.startsWith("-") || label.endsWith("-")) {
                 return false;
             }
+            for (int i = 0; i < label.length(); i++) {
+                char c = label.charAt(i);
+                boolean ok = (c >= 'a' && c <= 'z')
+                        || (c >= 'A' && c <= 'Z')
+                        || (c >= '0' && c <= '9')
+                        || c == '-';
+                if (!ok) {
+                    return false;
+                }
+            }
         }
-        return true;
+        String tld = labels[labels.length - 1];
+        return tld.length() >= 2 && tld.chars().anyMatch(Character::isLetter);
     }
 
     private static String sliceCodePoints(int[] cps, int startInclusive, int endExclusive) {

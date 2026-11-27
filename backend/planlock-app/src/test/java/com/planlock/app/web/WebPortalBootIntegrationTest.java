@@ -36,7 +36,10 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -44,14 +47,17 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * 真实 Spring Boot 自动配置 + MyBatis {@code @MapperScan} 全栈集成测试（关闭 B-DEF-01 / B-DEF-02 / B-DEF-03 / A1）：
+ * 真实 Spring Boot 自动配置 + MyBatis {@code @MapperScan} 全栈集成测试（关闭 B-DEF-01/02/03 & A1 & R1~R3）：
  * <ol>
  *   <li>验证真实 {@code PlanLockApplication} 下 {@code @MapperScan(annotationClass = Mapper.class)} 绝不劫持
  *       {@code DeploymentMetadataProvider} SPI 接口，且所有 {@code @Mapper} 均完成真实 MyBatis 绑定；</li>
- *   <li>验证真实 Boot 自动配置（含 {@code ResourceHttpRequestHandler}、{@code JsonBodyLimitFilter}、
- *       {@code AuthInterceptor}、{@code ApiFallbackController}、{@code GlobalExceptionHandler}）下
- *       全 {@code Accept} 矩阵返回确定性 JSON 与正确静态资源服务；</li>
- *   <li>验证未初始化/已初始化 {@code GET /setup} 全 {@code Accept} 矩阵不再产生 500 或缺失 {@code no-store}。</li>
+ *   <li>验证 R1 统一匿名防枚举边界：全部真实公开端点匿名可达；其余任意未认证 {@code /api/**}（含 v1、非 v1 及
+ *       {@code /api/v1/plugins/*} 未知子路径）全 {@code Accept} 矩阵均恒定返回 {@code 200 JSON 1001 + no-store}；</li>
+ *   <li>验证 R2 无通配抢占下的原生 MVC 语义：已知路由错误 HTTP 方法返回 {@code 405 + Allow + JSON + no-store}，
+ *       {@code OPTIONS}/{@code HEAD} 语义完好，已认证未知 {@code /api/**} 经 {@code NoResourceFoundException}
+ *       返回 {@code 404 JSON 1003 + no-store}，静态 {@code /setup-assets/*} 保持 200；</li>
+ *   <li>验证 R3 {@code /setup} RFC 9110 {@code Accept} 优先级协商（含 {@code text/html;q=0, *&#47;*;q=0.8}、
+ *       重复 Accept 头、非法 q 值与初始化后恒定 410）。</li>
  * </ol>
  */
 @SpringBootTest(
@@ -135,17 +141,35 @@ class WebPortalBootIntegrationTest {
     }
 
     @Test
-    void realSpringBootUnknownApiMatrixAndStaticResourcesHoldAcrossAllAcceptHeaders() throws Exception {
+    void anonymousApiAntiEnumerationAndPublicEndpointsHoldAcrossAllAcceptHeaders() throws Exception {
         List<String> accepts = List.of("", "application/json", "text/html", "text/html,application/json;q=0.8", "*/*");
 
-        // Static assets must remain reachable under real Boot ResourceHttpRequestHandler.
-        mvc.perform(get("/setup-assets/setup.css"))
-                .andExpect(status().isOk());
-        mvc.perform(get("/setup-assets/setup.js"))
-                .andExpect(status().isOk());
+        // Public static assets remain 200.
+        mvc.perform(get("/setup-assets/setup.css")).andExpect(status().isOk());
+        mvc.perform(get("/setup-assets/setup.js")).andExpect(status().isOk());
 
-        // Unauthenticated requests to known or unknown /api/v1/** return deterministic 200 JSON 1001 across all Accept headers.
-        for (String path : List.of("/api/v1/me", "/api/v1/not-exists", "/api/v1/me/unknown")) {
+        // Public real API endpoints remain anonymously reachable (never blocked with 1001).
+        mvc.perform(get("/api/v1/health"))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.version").value("2.2.0"));
+        mvc.perform(get("/api/v1/plugins/catalog/official"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sourceId").value("official"));
+        mvc.perform(get("/api/v1/plugins/catalog/third-party"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sourceId").value("third-party"));
+        mvc.perform(head("/api/v1/health"))
+                .andExpect(header().string("Cache-Control", "no-store"));
+
+        // R1: ALL unauthenticated /api/** (v1, non-v1, unknown plugin subpaths) return uniform 200 JSON 1001 + no-store.
+        for (String path : List.of(
+                "/api/v1/me",
+                "/api/v1/not-exists",
+                "/api/v1/me/unknown",
+                "/api/unknown",
+                "/api/v2/secret",
+                "/api/v1/plugins/unknown",
+                "/api/v1/plugins/catalog/unknown")) {
             for (String accept : accepts) {
                 var req = get(path);
                 if (!accept.isEmpty()) {
@@ -154,6 +178,7 @@ class WebPortalBootIntegrationTest {
                 var res = mvc.perform(req)
                         .andExpect(status().isOk())
                         .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                        .andExpect(header().string("Cache-Control", "no-store"))
                         .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()))
                         .andReturn()
                         .getResponse();
@@ -161,18 +186,69 @@ class WebPortalBootIntegrationTest {
             }
         }
 
-        // Unauthenticated JSON body request with Accept: text/html hits JsonBodyLimitFilter and still returns JSON 1001.
-        mvc.perform(post("/api/v1/not-exists")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .header("Accept", "text/html")
-                        .content("{\"probe\":true}"))
-                .andExpect(status().isOk())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()));
+        // Unauthenticated JSON body requests to non-v1 or plugin unknown routes hit JsonBodyLimitFilter -> JSON 1001.
+        for (String path : List.of("/api/v1/not-exists", "/api/unknown", "/api/v1/plugins/unknown")) {
+            mvc.perform(post(path)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .header("Accept", "text/html")
+                            .content("{\"probe\":true}"))
+                    .andExpect(status().isOk())
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                    .andExpect(jsonPath("$.code").value(ErrorCode.UNAUTHORIZED.getCode()));
+        }
+    }
 
-        // Authenticated unknown /api/** returns deterministic 404 JSON 1003 across all Accept headers (never HTML 404).
+    @Test
+    void methodNotAllowedPreservesAllowHeaderOptionsHeadWorkAndAuthenticatedUnknownApiReturnsJson404() throws Exception {
+        List<String> accepts = List.of("", "application/json", "text/html", "text/html,application/json;q=0.8", "*/*");
         String token = jwtUtil.generate(1L, 10L);
-        for (String path : List.of("/api/v1/not-exists", "/api/v1/me/unknown", "/api/v1/plugins/not-exists", "/api/unknown")) {
+
+        // R2: Known public POST-only route called with GET returns 405 + non-empty Allow: POST + JSON (even for Accept: text/html).
+        for (String accept : List.of("", "application/json", "text/html")) {
+            var req = get("/api/v1/auth/login");
+            if (!accept.isEmpty()) {
+                req = req.header("Accept", accept);
+            }
+            var res = mvc.perform(req)
+                    .andExpect(status().isMethodNotAllowed())
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andReturn()
+                    .getResponse();
+            assertThat(res.getHeader("Allow")).contains("POST");
+            assertThat(res.getContentAsString(StandardCharsets.UTF_8)).doesNotContain("<html", "<!doctype");
+        }
+
+        // R2: Known protected GET-only route called with DELETE returns 405 + Allow containing GET.
+        var meDeleteRes = mvc.perform(delete("/api/v1/me")
+                        .header("Authorization", "Bearer " + token)
+                        .header("Accept", "text/html"))
+                .andExpect(status().isMethodNotAllowed())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andReturn()
+                .getResponse();
+        assertThat(meDeleteRes.getHeader("Allow")).contains("GET");
+
+        // R2: OPTIONS semantics preserved on real endpoints.
+        var loginOptions = mvc.perform(options("/api/v1/auth/login"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse();
+        assertThat(loginOptions.getHeader("Allow")).contains("POST");
+
+        var meOptions = mvc.perform(options("/api/v1/me").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse();
+        assertThat(meOptions.getHeader("Allow")).contains("GET");
+
+        // R2: Authenticated unknown /api/** (v1, non-v1, unknown plugin paths) return deterministic 404 JSON 1003 + no-store.
+        for (String path : List.of(
+                "/api/v1/not-exists",
+                "/api/v1/me/unknown",
+                "/api/v1/plugins/unknown",
+                "/api/unknown")) {
             for (String accept : accepts) {
                 var req = get(path).header("Authorization", "Bearer " + token);
                 if (!accept.isEmpty()) {
@@ -182,6 +258,7 @@ class WebPortalBootIntegrationTest {
                         .andExpect(status().isNotFound())
                         .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                         .andExpect(header().string("Cache-Control", "no-store"))
+                        .andExpect(header().string("X-Content-Type-Options", "nosniff"))
                         .andExpect(jsonPath("$.code").value(ErrorCode.NOT_FOUND.getCode()))
                         .andReturn()
                         .getResponse();
@@ -191,10 +268,15 @@ class WebPortalBootIntegrationTest {
     }
 
     @Test
-    void setupContentNegotiationReturnsDeterministic410WhenInitializedAnd406ForJsonWhenPending() throws Exception {
-        // Initialized: every Accept header receives deterministic 410 + Cache-Control: no-store + JSON (never 500).
+    void setupRfc9110AcceptPriorityNegotiationAndInitialized410Hold() throws Exception {
+        // Initialized: every Accept variant (including complex q=0 + wildcard) receives deterministic 410 JSON + no-store.
         deploymentRow.put("initialized", true);
-        for (String accept : List.of("", "text/html", "application/json", "text/html,application/json;q=0.8", "*/*")) {
+        for (String accept : List.of(
+                "",
+                "text/html",
+                "application/json",
+                "text/html;q=0, */*;q=0.8",
+                "*/*")) {
             var req = get("/setup");
             if (!accept.isEmpty()) {
                 req = req.header("Accept", accept);
@@ -205,14 +287,38 @@ class WebPortalBootIntegrationTest {
                     .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
         }
 
-        // Uninitialized: HTML / wildcard gets 200 text/html; JSON-only Accept gets 406 (never 500).
+        // Pending: HTML / text/* / */* / mixed q>0 accept HTML.
         deploymentRow.put("initialized", false);
-        mvc.perform(get("/setup").header("Accept", "text/html"))
-                .andExpect(status().isOk())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_HTML))
-                .andExpect(header().string("Cache-Control", "no-store"));
+        for (String accept : List.of("", "text/html", "text/*", "*/*", "application/json;q=0.9, text/html;q=0.5")) {
+            var req = get("/setup");
+            if (!accept.isEmpty()) {
+                req = req.header("Accept", accept);
+            }
+            mvc.perform(req)
+                    .andExpect(status().isOk())
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_HTML))
+                    .andExpect(header().string("Cache-Control", "no-store"));
+        }
 
-        mvc.perform(get("/setup").header("Accept", "application/json"))
+        // R3: Explicit q=0 on text/html or text/* MUST NOT be overridden by broader */*, plus invalid q & JSON-only -> 406.
+        for (String rejectedAccept : List.of(
+                "application/json",
+                "text/html;q=0, */*;q=0.8",
+                "text/*;q=0, */*;q=0.9",
+                "text/html;q=0",
+                "text/html;q=1.5",
+                "text/html;q=abc",
+                "invalid-media-type")) {
+            mvc.perform(get("/setup").header("Accept", rejectedAccept))
+                    .andExpect(status().isNotAcceptable())
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
+        }
+
+        // R3: Duplicate Accept headers where exact text/html;q=0 conflicts with */* -> 406.
+        mvc.perform(get("/setup")
+                        .header("Accept", "text/html;q=0")
+                        .header("Accept", "*/*"))
                 .andExpect(status().isNotAcceptable())
                 .andExpect(header().string("Cache-Control", "no-store"))
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));

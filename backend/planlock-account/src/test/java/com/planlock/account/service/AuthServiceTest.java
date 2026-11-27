@@ -477,19 +477,33 @@ class AuthServiceTest {
         assertThat(guestProfile.isDeploymentEnabled()).isFalse();
         assertThat(guestProfile.getVersion()).isEqualTo("2.2.0");
 
-        // Masking edge cases: normal, 8-digit phone, Unicode/Emoji code points, malformed/control inputs.
+        // Masking edge cases (R4): normal, 8-digit phone, Unicode/Emoji, format controls, NBSP, domain labels, separator-dense phone.
         assertThat(AuthService.maskAccount("a@b.co", null)).isEqualTo("*@b.co");
         assertThat(AuthService.maskAccount("ab@b.co", null)).isEqualTo("a*@b.co");
         assertThat(AuthService.maskAccount("alex@b.co", null)).isEqualTo("a***@b.co");
         assertThat(AuthService.maskAccount("😀🎉abc@example.com", null)).isEqualTo("😀🎉***c@example.com");
         assertThat(AuthService.maskAccount("a@b@c.com", null)).isEqualTo("***");
         assertThat(AuthService.maskAccount("bad\nuser@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user\u200Bname@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user\u202Ename@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user\u00A0name@example.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("\uFEFFuser@example.com", null)).isEqualTo("***");
         assertThat(AuthService.maskAccount("user@bad..com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user@-bad.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user@bad-.com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user@" + "a".repeat(64) + ".com", null)).isEqualTo("***");
+        assertThat(AuthService.maskAccount("user@example.123", null)).isEqualTo("***");
         assertThat(AuthService.maskAccount("user@localhost", null)).isEqualTo("***");
         assertThat(AuthService.maskAccount(null, "13800138000")).isEqualTo("138****8000");
+        assertThat(AuthService.maskAccount(null, "138-0013-8000")).isEqualTo("138****8000");
         assertThat(AuthService.maskAccount(null, "12345678")).isEqualTo("1****78");
+        assertThat(AuthService.maskAccount(null, "1-2-3-4-5-6-7-8")).isEqualTo("1****78");
         assertThat(AuthService.maskAccount(null, "123456")).isEqualTo("1****56");
         assertThat(AuthService.maskAccount(null, "1234")).isEqualTo("****");
+        assertThat(AuthService.maskAccount(null, "138--00138000")).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "-13800138000")).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "1234567890123456")).isEqualTo("***");
+        assertThat(AuthService.maskAccount(null, "138\u00A000138000")).isEqualTo("***");
         assertThat(AuthService.maskAccount(null, "not-a-phone")).isEqualTo("***");
         assertThat(AuthService.maskAccount(null, "138\u000012345678")).isEqualTo("***");
 
