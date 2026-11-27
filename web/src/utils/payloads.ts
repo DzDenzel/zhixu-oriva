@@ -467,13 +467,9 @@ function buildEditedScheduleRepeatRule(
       ? Array.from(new Set(form.repeatWeekdays)).sort((a, b) => a - b)
       : parseScheduleWeekdays(null, form.startDate);
     if (sameType && baseObj) {
-      // 保留扩展字段；若基底同时用 days 别名且无 weekdays，仅覆盖实际存在的周几键
-      const usesDaysAlias = !Array.isArray(baseObj.weekdays) && Array.isArray(baseObj.days);
-      return JSON.stringify(
-        usesDaysAlias
-          ? { ...baseObj, type: 'weekly', days }
-          : { ...baseObj, type: 'weekly', weekdays: days },
-      );
+      // 保留全部服务端非 UI 扩展字段，同时清除旧别名 days，始终规范输出后端 ScheduleRules.java 唯一认可的 weekdays 字段
+      const { days: _legacyDays, ...rest } = baseObj;
+      return JSON.stringify({ ...rest, type: 'weekly', weekdays: days });
     }
     return JSON.stringify({ type: 'weekly', weekdays: days });
   }

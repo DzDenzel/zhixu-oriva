@@ -22,7 +22,7 @@ import {
   clearSessionToken,
   getOrCreateDeviceUid,
   readSessionToken,
-  writeSessionToken,
+  writeSessionTokenDetailed,
   type ClearSessionResult,
 } from '../utils/session';
 
@@ -91,11 +91,30 @@ export function createApiClient(options: ApiClientOptions = {}) {
   function setToken(token: string | null): ClearSessionResult {
     const previousToken = memoryToken;
     sessionGeneration += 1;
-    memoryToken = token;
-    if (token) {
-      writeSessionToken(token);
-      return { storageCleared: true, revocationPersisted: false };
+    if (token !== null) {
+      const writeRes = writeSessionTokenDetailed(token);
+      if (
+        writeRes.reason === 'invalid_token' ||
+        writeRes.reason === 'expired_token' ||
+        writeRes.reason === 'revoked_token'
+      ) {
+        // 结构不合法、已过期或已撤销的令牌严禁进入内存会话
+        memoryToken = null;
+        return {
+          storageCleared: false,
+          revocationPersisted: false,
+          durableRevocationPersisted: false,
+        };
+      }
+      // persisted（含正向 lease）或仅浏览器存储只读退回当前内存会话（storage_failed）
+      memoryToken = token.trim();
+      return {
+        storageCleared: true,
+        revocationPersisted: false,
+        durableRevocationPersisted: false,
+      };
     }
+    memoryToken = null;
     return clearSessionToken(previousToken ?? undefined);
   }
 
@@ -267,6 +286,9 @@ export function createApiClient(options: ApiClientOptions = {}) {
         }
       }
       setToken(result.token);
+      if (!getToken()) {
+        throw new ApiError(ERROR_UNAUTHORIZED, '服务端返回了无效、已过期或已撤销的会话令牌', 401);
+      }
       return result;
     },
 

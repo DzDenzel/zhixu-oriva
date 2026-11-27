@@ -1,7 +1,7 @@
 import { render } from 'preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
-import { ApiError, type ApiClient } from '../src/api/client';
+import { ApiError, createApiClient, type ApiClient } from '../src/api/client';
 import { JournalPage } from '../src/pages/JournalPage';
 import { LoginPage } from '../src/pages/LoginPage';
 import { PlansPage } from '../src/pages/PlansPage';
@@ -18,6 +18,13 @@ import {
   withScheduleField,
 } from '../src/utils/payloads';
 import { resetSessionGuardForTest, writeSessionToken } from '../src/utils/session';
+
+function makeValidTestJwt(sub = 'view-u'): string {
+  const toB64Url = (obj: Record<string, unknown>) =>
+    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  return `${toB64Url({ alg: 'HS256', typ: 'JWT' })}.${toB64Url({ sub, exp })}.viewsig_${sub}`;
+}
 
 async function flushUi(): Promise<void> {
   await Promise.resolve();
@@ -364,7 +371,7 @@ describe('B6 & B7 payload fidelity: custom dates, multi-weekday, strategy 1409 &
       skipHolidays: true,
     });
 
-    // Also verify days-alias weekly rule preserves extension fields and updates days key
+    // Legacy days-alias weekly rule MUST preserve extension fields, drop legacy `days`, and output canonical `weekdays`
     const schedDaysAlias: ScheduleItem = {
       ...schedOrig,
       id: 62,
@@ -377,12 +384,14 @@ describe('B6 & B7 payload fidelity: custom dates, multi-weekday, strategy 1409 &
     };
     let aliasForm = withScheduleField(scheduleFormFromItem(schedDaysAlias), 'repeatMode', 'weekly', 'repeatRule');
     aliasForm = withScheduleField(aliasForm, 'repeatWeekdays', [1, 3, 5], 'repeatRule');
-    expect(JSON.parse(buildScheduleUpsertPayload(aliasForm).repeatRule ?? '{}')).toEqual({
+    const canonicalOut = JSON.parse(buildScheduleUpsertPayload(aliasForm).repeatRule ?? '{}');
+    expect(canonicalOut).toEqual({
       type: 'weekly',
-      days: [1, 3, 5],
+      weekdays: [1, 3, 5],
       interval: 2,
       customExt: 'mobile-v1',
     });
+    expect('days' in canonicalOut).toBe(false);
 
     // Switching schedule rule to daily or none produces clean new-type contract (no leftover weekly/ext keys)
     const dailyForm = withScheduleField(schedForm, 'repeatMode', 'daily', 'repeatRule');
@@ -729,7 +738,7 @@ describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 tru
       resetSessionGuardForTest();
       window.localStorage.clear();
       window.sessionStorage.clear();
-      writeSessionToken(`expired-cold-start-${statusCase}`);
+      expect(writeSessionToken(makeValidTestJwt(`cold-${statusCase}`))).toBe(true);
       window.history.replaceState(null, '', '/today');
 
       const fetchSpy = vi.spyOn(window, 'fetch').mockResolvedValue(
@@ -752,6 +761,200 @@ describe('Core views: XSS neutralization, 1409 conflict reload/merge, and B5 tru
     }
     resetSessionGuardForTest();
     window.sessionStorage.clear();
+  });
+
+  it('displays honest close-tab/window warning on App logout when storage and window.name writes fail (R1 v1.4)', async () => {
+    resetSessionGuardForTest();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    const jwt = makeValidTestJwt('logout-warn');
+    expect(writeSessionToken(jwt)).toBe(true);
+    window.history.replaceState(null, '', '/today');
+
+    const mockApi = baseClientStub({
+      getToken: () => jwt,
+      getMe: vi.fn(async () => ({
+        userId: 1,
+        deviceId: 10,
+        accountMasked: 'ow***@example.com',
+        userType: 'OWNER',
+        guest: false,
+        deviceName: 'Web',
+        devicePlatform: 'web',
+        instanceLabel: '书房主机',
+        deploymentEnabled: true,
+        version: '2.2.0',
+      })),
+      getToday: vi.fn(async () => ({
+        date: '2026-11-27',
+        executions: [],
+        violationCount: 0,
+        unlockCount: 0,
+      })),
+      listPlans: vi.fn(async () => []),
+      listSchedules: vi.fn(async () => []),
+      pullSyncMetadata: vi.fn(async () => ({ planTypes: [] })),
+      clearSession: vi.fn(() => ({
+        storageCleared: false,
+        revocationPersisted: false,
+        durableRevocationPersisted: false,
+      })),
+    });
+
+    render(<App apiClient={mockApi} initialPath="/today" />, container);
+    await flushUi();
+
+    const logoutBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === '退出登录',
+    );
+    expect(logoutBtn).toBeDefined();
+    logoutBtn?.click();
+    await flushUi();
+
+    expect(container.textContent).toContain('请立即关闭当前标签页或浏览器窗口');
+    expect(container.textContent).not.toContain('不可逆');
+    resetSessionGuardForTest();
+  });
+
+  it('renders real SchedulesPage UI -> edits legacy days weekly rule -> handles 1409 conflict -> sends canonical weekdays + latest server extensions on second PUT (R4 v1.4)', async () => {
+    resetSessionGuardForTest();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    expect(writeSessionToken(makeValidTestJwt('sched-1409-ui'))).toBe(true);
+
+    const initialSched: ScheduleItem = {
+      id: 81,
+      userId: 1,
+      title: '周常研讨',
+      startDate: '2026-12-01',
+      endDate: '2026-12-01',
+      startTime: '14:00:00',
+      endTime: '15:30:00',
+      allDay: false,
+      location: '会议室A',
+      locationLat: 31.2304,
+      locationLon: 121.4737,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        days: [1, 3],
+        interval: 2,
+        customExt: 'mobile-v1',
+      }),
+      status: 1,
+      version: 5,
+    };
+    const serverLatestSched: ScheduleItem = {
+      ...initialSched,
+      locationLat: 39.9042,
+      locationLon: 116.4074,
+      repeatRule: JSON.stringify({
+        type: 'weekly',
+        days: [1, 3],
+        interval: 2,
+        customExt: 'mobile-v2',
+        skipHolidays: true,
+      }),
+      version: 6,
+    };
+
+    let getSchedulesCount = 0;
+    const putCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/v1/schedules') {
+        getSchedulesCount += 1;
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            message: 'ok',
+            data: [getSchedulesCount === 1 ? initialSched : serverLatestSched],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (method === 'GET' && url === '/api/v1/plans') {
+        return new Response(JSON.stringify({ code: 0, message: 'ok', data: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'PUT' && url.startsWith('/api/v1/schedules/81')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        putCalls.push({ url, body });
+        if (putCalls.length === 1) {
+          return new Response(JSON.stringify({ code: 1409, message: '版本冲突', data: null }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            message: 'ok',
+            data: { ...serverLatestSched, ...body, version: 7 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ code: 1003, message: 'not found', data: null }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const realApi = createApiClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    render(<SchedulesPage api={realApi} onNotify={() => {}} />, container);
+    await flushUi();
+
+    // 1) Open edit modal
+    const editBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '编辑');
+    expect(editBtn).toBeDefined();
+    editBtn?.click();
+    await flushUi();
+
+    // 2) Switch repeat select to weekly -> toggle Friday (周五) so weekdays becomes [1, 3, 5]
+    const repeatSelect = container.querySelector('select') as HTMLSelectElement;
+    repeatSelect.value = 'weekly';
+    repeatSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushUi();
+
+    const friBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '周五');
+    expect(friBtn).toBeDefined();
+    friBtn?.click();
+    await flushUi();
+
+    // 3) Submit form -> first PUT hits 1409 -> reloads serverLatestSched -> ConflictModal opens
+    container.querySelector('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flushUi();
+
+    expect(putCalls).toHaveLength(1);
+    expect(putCalls[0].url).toContain('baseVersion=5');
+    expect(container.textContent).toContain('已在其他设备修改');
+
+    // 4) Click overwrite button in ConflictModal -> triggers second PUT with baseVersion=6
+    const overwriteBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('以我的草稿覆盖最新版本'),
+    );
+    expect(overwriteBtn).toBeDefined();
+    overwriteBtn?.click();
+    await flushUi();
+
+    expect(putCalls).toHaveLength(2);
+    expect(putCalls[1].url).toContain('baseVersion=6');
+    const secondRule = JSON.parse(String(putCalls[1].body.repeatRule ?? '{}')) as Record<string, unknown>;
+    expect(secondRule).toEqual({
+      type: 'weekly',
+      weekdays: [1, 3, 5],
+      interval: 2,
+      customExt: 'mobile-v2',
+      skipHolidays: true,
+    });
+    expect('days' in secondRule).toBe(false);
+    expect(putCalls[1].body.locationLat).toBe(39.9042);
+    expect(putCalls[1].body.locationLon).toBe(116.4074);
+
+    resetSessionGuardForTest();
   });
 
   it('synchronously invalidates stale official view/request on click switch to third-party tab (R2 v1.2)', async () => {

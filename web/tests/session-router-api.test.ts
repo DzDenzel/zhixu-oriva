@@ -14,13 +14,24 @@ import {
   TOKEN_SESSION_KEY,
   WINDOW_NAME_REVOKED_PREFIX,
   writeSessionToken,
+  writeSessionTokenDetailed,
 } from '../src/utils/session';
 
-/** 动态构造测试用三段式 JWT（避免静态测试夹具中出现字面 eyJ 命中发布扫描器） */
+/** 动态构造测试用三段式 Base64URL JWT（避免静态测试夹具中出现字面 eyJ 命中发布扫描器） */
 function makeTestJwt(expSec: number, sub = 'u1'): string {
   const toB64Url = (obj: Record<string, unknown>) =>
     btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   return `${toB64Url({ alg: 'HS256', typ: 'JWT' })}.${toB64Url({ sub, exp: expSec })}.testsig_${sub}`;
+}
+
+function makeTestJwtWithoutExp(sub = 'noexp'): string {
+  const toB64Url = (obj: Record<string, unknown>) =>
+    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `${toB64Url({ alg: 'HS256', typ: 'JWT' })}.${toB64Url({ sub })}.testsig_${sub}`;
+}
+
+function futureExpSec(offset = 3600): number {
+  return Math.floor(Date.now() / 1000) + offset;
 }
 
 describe('session & deviceUid lifecycle (B3)', () => {
@@ -43,13 +54,15 @@ describe('session & deviceUid lifecycle (B3)', () => {
     expect(window.localStorage.getItem(DEVICE_UID_KEY)).toBe(first);
   });
 
-  it('stores JWT strictly in sessionStorage with positive lease and never re-reads stale token if removeItem fails', () => {
-    expect(writeSessionToken('jwt-token-xyz')).toBe(true);
-    expect(readSessionToken()).toBe('jwt-token-xyz');
-    expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe('jwt-token-xyz');
+  it('stores strict JWT in sessionStorage with positive lease and rolls back sessionStorage if lease write fails (R1 v1.4)', () => {
+    const jwt1 = makeTestJwt(futureExpSec(), 'u-first');
+    const jwt2 = makeTestJwt(futureExpSec(), 'u-second');
+    expect(writeSessionToken(jwt1)).toBe(true);
+    expect(readSessionToken()).toBe(jwt1);
+    expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe(jwt1);
     expect(window.localStorage.getItem(TOKEN_SESSION_KEY)).toBeNull();
     expect(
-      window.localStorage.getItem(`${LEASE_KEY_PREFIX}${digestTokenNonSecret('jwt-token-xyz')}`),
+      window.localStorage.getItem(`${LEASE_KEY_PREFIX}${digestTokenNonSecret(jwt1)}`),
     ).not.toBeNull();
 
     // Simulate Storage.removeItem throwing on sessionStorage while setItem still works -> empty-string overwrite clears token
@@ -63,23 +76,81 @@ describe('session & deviceUid lifecycle (B3)', () => {
     });
     const result = clearSessionToken();
     expect(result.storageCleared).toBe(true);
+    expect(result.durableRevocationPersisted).toBe(true);
     expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBe('');
     expect(readSessionToken()).toBeNull();
     removeSpy.mockRestore();
 
-    // Writing a brand new token creates a new lease and lifts the fence
-    expect(writeSessionToken('jwt-new-session')).toBe(true);
-    expect(readSessionToken()).toBe('jwt-new-session');
+    // If localStorage lease write fails, writeSessionToken MUST roll back sessionStorage (no orphan token!)
+    const origSet = Storage.prototype.setItem;
+    const leaseFailSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      val: string,
+    ) {
+      if (this === window.localStorage && key.startsWith(LEASE_KEY_PREFIX)) {
+        throw new Error('localStorage quota exceeded');
+      }
+      return origSet.call(this, key, val);
+    });
+    const writeFail = writeSessionTokenDetailed(jwt2);
+    expect(writeFail).toEqual({ persisted: false, reason: 'storage_failed' });
+    expect(window.sessionStorage.getItem(TOKEN_SESSION_KEY)).toBeNull();
+    leaseFailSpy.mockRestore();
+
+    // Writing a brand new strict JWT creates a new lease and lifts the fence
+    expect(writeSessionToken(jwt2)).toBe(true);
+    expect(readSessionToken()).toBe(jwt2);
   });
 
-  it('rejects orphan sessionStorage tokens lacking a positive lease and enforces fail-closed on storage/window.name errors (R1 v1.3)', () => {
-    // 1) Orphan token manually placed in sessionStorage without positive lease => fail-closed null
-    window.sessionStorage.setItem(TOKEN_SESSION_KEY, 'orphan-token-no-lease');
+  it('rejects non-3-part opaque tokens, JWTs missing exp, invalid Base64URL segments, and orphan tokens on cold start (R1 v1.4)', () => {
+    // 1) Non-3-part opaque string -> rejected on write, read, and ApiClient.setToken (never admitted to memory!)
+    expect(writeSessionTokenDetailed('opaque-not-a-jwt')).toEqual({
+      persisted: false,
+      reason: 'invalid_token',
+    });
+    window.sessionStorage.setItem(TOKEN_SESSION_KEY, 'opaque-not-a-jwt');
+    window.localStorage.setItem(
+      `${LEASE_KEY_PREFIX}${digestTokenNonSecret('opaque-not-a-jwt')}`,
+      JSON.stringify({ exp: futureExpSec() }),
+    );
+    expect(readSessionToken()).toBeNull();
+
+    // 2) 3-part JWT missing exp -> rejected on write, read, and ApiClient.setToken!
+    const jwtNoExp = makeTestJwtWithoutExp('u-noexp');
+    expect(writeSessionTokenDetailed(jwtNoExp)).toEqual({
+      persisted: false,
+      reason: 'invalid_token',
+    });
+    window.sessionStorage.setItem(TOKEN_SESSION_KEY, jwtNoExp);
+    window.localStorage.setItem(
+      `${LEASE_KEY_PREFIX}${digestTokenNonSecret(jwtNoExp)}`,
+      JSON.stringify({ exp: futureExpSec() }),
+    );
+    expect(readSessionToken()).toBeNull();
+
+    // 3) Invalid Base64URL characters in signature segment -> rejected
+    const badSigJwt = `${makeTestJwt(futureExpSec(), 'u-badsig').split('.').slice(0, 2).join('.')}.bad+sig/==`;
+    expect(writeSessionTokenDetailed(badSigJwt)).toEqual({
+      persisted: false,
+      reason: 'invalid_token',
+    });
+
+    // ApiClient.setToken MUST NOT admit invalid/missing-exp tokens into memoryToken
+    const client = createApiClient();
+    client.setToken('opaque-not-a-jwt');
+    expect(client.getToken()).toBeNull();
+    client.setToken(jwtNoExp);
+    expect(client.getToken()).toBeNull();
+
+    // 4) Orphan valid-structure JWT manually placed in sessionStorage without positive lease => fail-closed null
+    const orphanJwt = makeTestJwt(futureExpSec(), 'orphan-u');
+    window.sessionStorage.setItem(TOKEN_SESSION_KEY, orphanJwt);
     expect(readSessionToken()).toBeNull();
     expect(createApiClient().getToken()).toBeNull();
 
-    // 2) Valid token written with lease works, until window.name or localStorage fails
-    const validJwt = makeTestJwt(Math.floor(Date.now() / 1000) + 3600, 'valid-u');
+    // 5) Valid JWT written with lease works, until window.name or localStorage fails
+    const validJwt = makeTestJwt(futureExpSec(), 'valid-u');
     expect(writeSessionToken(validJwt)).toBe(true);
     expect(readSessionToken()).toBe(validJwt);
 
@@ -101,9 +172,12 @@ describe('session & deviceUid lifecycle (B3)', () => {
     expect(readSessionToken()).toBeNull();
     getSpy.mockRestore();
 
-    // Expired JWT => rejected on cold start even if present in sessionStorage
+    // Expired JWT => rejected on write and cold start even if present in sessionStorage
     const expiredJwt = makeTestJwt(Math.floor(Date.now() / 1000) - 120, 'expired-u');
-    expect(writeSessionToken(expiredJwt)).toBe(false);
+    expect(writeSessionTokenDetailed(expiredJwt)).toEqual({
+      persisted: false,
+      reason: 'expired_token',
+    });
     window.sessionStorage.setItem(TOKEN_SESSION_KEY, expiredJwt);
     window.localStorage.setItem(
       `${LEASE_KEY_PREFIX}${digestTokenNonSecret(expiredJwt)}`,
@@ -194,6 +268,76 @@ describe('session & deviceUid lifecycle (B3)', () => {
     expect(readSessionToken()).toBeNull();
     expect(createApiClient().getToken()).toBeNull();
   });
+
+  it('reports honest false flags when both storage and window.name fail and uses ALL-AND aggregation across multiple tokens (R1 v1.4)', () => {
+    const tok1 = makeTestJwt(futureExpSec(), 'multi-1');
+    const tok2 = makeTestJwt(futureExpSec(), 'multi-2');
+    expect(writeSessionToken(tok1)).toBe(true);
+    expect(writeSessionToken(tok2)).toBe(true);
+    // Now sessionStorage holds tok2 while memory fallback passes tok1 -> 2 distinct tokens to revoke!
+
+    // Case A: All storage writes AND window.name setter fail -> storageCleared=false, revocationPersisted=false, durableRevocationPersisted=false
+    const origNameDesc = Object.getOwnPropertyDescriptor(window, 'name');
+    Object.defineProperty(window, 'name', {
+      configurable: true,
+      get: () => '',
+      set: () => {
+        throw new Error('window.name locked');
+      },
+    });
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('remove locked');
+    });
+    const setSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('set locked');
+    });
+
+    const totalFail = clearSessionToken(tok1);
+    expect(totalFail).toEqual({
+      storageCleared: false,
+      revocationPersisted: false,
+      durableRevocationPersisted: false,
+    });
+
+    // Case B: Partial failure across 2 tokens (tok1 succeeds in localStorage, tok2 fails in localStorage + window.name) -> MUST aggregate with && as false!
+    const d2 = digestTokenNonSecret(tok2);
+    removeSpy.mockRestore();
+    setSpy.mockRestore();
+    const origRemove = Storage.prototype.removeItem;
+    const origSet = Storage.prototype.setItem;
+    const partialRemoveSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (this === window.sessionStorage || key.endsWith(d2)) {
+        throw new Error('partial remove failure for tok2');
+      }
+      return origRemove.call(this, key);
+    });
+    const partialSetSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      val: string,
+    ) {
+      if (this === window.sessionStorage || key.endsWith(d2)) {
+        throw new Error('partial set failure for tok2');
+      }
+      return origSet.call(this, key, val);
+    });
+
+    const partialRes = clearSessionToken(tok1);
+    expect(partialRes.storageCleared).toBe(false);
+    expect(partialRes.durableRevocationPersisted).toBe(false);
+    expect(partialRes.revocationPersisted).toBe(false);
+
+    partialRemoveSpy.mockRestore();
+    partialSetSpy.mockRestore();
+    if (origNameDesc) {
+      Object.defineProperty(window, 'name', origNameDesc);
+    } else {
+      delete (window as unknown as Record<string, unknown>).name;
+    }
+  });
 });
 
 describe('SPA explicit 9-route contract', () => {
@@ -222,7 +366,9 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
   });
 
   it('drops in-flight export response after logout and prevents old 401/1001 from clearing a new session', async () => {
-    writeSessionToken('session-A');
+    const jwtA = makeTestJwt(futureExpSec(), 'session-A');
+    const jwtB = makeTestJwt(futureExpSec(), 'session-B');
+    expect(writeSessionToken(jwtA)).toBe(true);
     const onUnauthorized = vi.fn();
 
     let resolveExport!: (res: Response) => void;
@@ -250,7 +396,7 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
 
     // User logs out and logs into session-B before those responses return
     api.clearSession();
-    api.setToken('session-B');
+    api.setToken(jwtB);
 
     // Old export finishes -> MUST reject with StaleSessionError (never download)
     resolveExport(new Response('{"old":true}', { status: 200 }));
@@ -264,11 +410,12 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
       }),
     );
     await expect(staleMePromise).rejects.toBeInstanceOf(StaleSessionError);
-    expect(api.getToken()).toBe('session-B');
+    expect(api.getToken()).toBe(jwtB);
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
   it('sends web-<UUID> deviceUid and falls back to windows platform if backend rejects web', async () => {
+    const loginJwt = makeTestJwt(futureExpSec(), 'login-ok');
     const sentBodies: Array<Record<string, unknown>> = [];
     const mockFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
@@ -284,15 +431,15 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
         );
       }
       return new Response(
-        JSON.stringify({ code: 0, message: 'ok', data: { token: 'jwt-ok', userId: 7, deviceId: 12 } }),
+        JSON.stringify({ code: 0, message: 'ok', data: { token: loginJwt, userId: 7, deviceId: 12 } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     });
 
     const api = createApiClient({ fetchImpl: mockFetch as unknown as typeof fetch });
     const auth = await api.login('owner@example.com', 'secret123');
-    expect(auth.token).toBe('jwt-ok');
-    expect(readSessionToken()).toBe('jwt-ok');
+    expect(auth.token).toBe(loginJwt);
+    expect(readSessionToken()).toBe(loginJwt);
     expect(sentBodies).toHaveLength(2);
     expect(sentBodies[0].platform).toBe('web');
     expect(sentBodies[1].platform).toBe('windows');
@@ -300,7 +447,7 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
   });
 
   it('clears sessionStorage token and triggers onUnauthorized on business code 1001', async () => {
-    writeSessionToken('stale-jwt');
+    expect(writeSessionToken(makeTestJwt(futureExpSec(), 'stale-u'))).toBe(true);
     const onUnauthorized = vi.fn();
     const mockFetch = vi.fn(async () =>
       new Response(JSON.stringify({ code: 1001, message: '未认证', data: null }), {
@@ -321,7 +468,7 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
   });
 
   it('surfaces 1409 version conflict as ApiError with isConflict=true', async () => {
-    writeSessionToken('valid-jwt');
+    expect(writeSessionToken(makeTestJwt(futureExpSec(), 'conflict-u'))).toBe(true);
     const mockFetch = vi.fn(async () =>
       new Response(
         JSON.stringify({ code: 1409, message: '版本冲突（其他设备有更改）', data: null }),
@@ -346,7 +493,7 @@ describe('API client generation isolation, 1001 auto-logout, public catalog, and
   });
 
   it('passes IANA timezone to rhythm endpoint and fetches public plugin catalog WITHOUT Bearer header', async () => {
-    writeSessionToken('valid-jwt');
+    expect(writeSessionToken(makeTestJwt(futureExpSec(), 'rhythm-u'))).toBe(true);
     const seenHeaders: Array<HeadersInit | undefined> = [];
     const requestedUrls: string[] = [];
     const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -124,9 +124,11 @@ export function App({ apiClient, initialPath }: AppProps) {
     setLoginNotice(
       result.storageCleared
         ? '您已安全退出当前浏览器会话。'
-        : result.revocationPersisted
-          ? '已清除当前页面会话并记录不可逆撤销标记；浏览器存储清理受限，建议随后关闭本标签页。'
-          : '已清除当前页面会话；浏览器存储受限，请关闭本标签页以确保旧凭据不再留存。',
+        : result.durableRevocationPersisted
+          ? '已退出当前页面会话并撤销本地会话租约；浏览器会话存储清理受限，建议随后关闭本标签页。'
+          : result.revocationPersisted
+            ? '已清除当前页面内存会话并写入当前标签页临时退出标记；受限于浏览器存储权限，跨导航可能重置该标记，请立即关闭当前标签页或浏览器窗口以确保退出生效。'
+            : '已清除当前页面内存会话；浏览器存储与窗口标记均写入受限，请立即关闭当前标签页或浏览器窗口以确保退出生效。',
     );
     navigateTo('/login', true);
   }

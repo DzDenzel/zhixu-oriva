@@ -1,15 +1,13 @@
 /**
- * 会话与设备标识管理（对齐 ADR-022 D2 & REQ-041 W2 & Astra B3 / R1 v1.3 终轮收口）：
+ * 会话与设备标识管理（对齐 ADR-022 D2 & REQ-041 W2 & Astra B3 / R1 v1.4 终轮收口）：
  * - JWT 原文仅存放在单标签作用域的 sessionStorage，绝不写入 localStorage、window.name 或 cookie；
- * - 彻底废弃跨标签共享读改写数组（revokedSet）与固定容量 FIFO 淘汰，改为：
- *   1) 每令牌独立正向租约键（oriva_web_lease_v1:<digest> = {"exp":<sec>}）；
- *   2) 每令牌独立撤销键（oriva_web_revoked_v1:<digest> = {"exp":<sec>}），GC 仅允许清理已明确过期项
- *      （nowSec > exp + EXPIRY_SKEW_SEC），绝不因数量上限淘汰任何未过期凭据的撤销记录；
- *   3) 同标签页持久化 window.name fail-closed 撤销标记（__ORIVA_REVOKED_V1__:[...]），
- *      即使 sessionStorage 与 localStorage 同时写入失败，同标签刷新仍可拒收旧令牌；
- * - clearSessionToken(fallbackToken?) 即使在 sessionStorage.getItem 抛异常时仍使用调用方内存令牌补齐撤销证据；
- * - 冷启动 readSessionToken() 严格执行正向 fail-closed 校验：仅在 sessionStorage/localStorage/window.name 读取与解析无异常、
- *   JWT 未过期、未被 revoked 键或 window.name 撤销且存在对应有效 lease 租约时才恢复会话，彻底杜绝空证据或孤儿旧会话恢复。
+ * - 严格 JWT 结构与有限有效期门禁：持久化写入与冷启动恢复均强制校验三段合法 Base64URL（header.payload.signature）、
+ *   header 与 payload 均为合法 JSON 对象且 payload.exp 为有限正数且未过期；任何非 JWT、缺段或缺少/非有限/已过期 exp
+ *   均严禁写入正向租约且严禁被冷启动恢复；
+ * - 独立每令牌持久化租约（oriva_web_lease_v1:<digest>）与仅按 exp 过期 GC 的独立撤销键（oriva_web_revoked_v1:<digest>），
+ *   零共享数组、零 FIFO 淘汰；writeSessionToken 若写 lease 失败会立即回滚清理 sessionStorage 防止留下孤儿令牌；
+ * - clearSessionToken(fallbackToken?) 对所有待撤销令牌采用全通过（&&）聚合 storageCleared / revocationPersisted /
+ *   durableRevocationPersisted，绝不因部分成功误报全通过。
  */
 
 export const TOKEN_SESSION_KEY = 'oriva.web.session.token';
@@ -21,15 +19,15 @@ export const DEVICE_UID_KEY = 'oriva.web.deviceUid';
 export const THEME_KEY = 'oriva.web.theme';
 
 const EXPIRY_SKEW_SEC = 60;
-const MAX_EXP_SEC = Number.MAX_SAFE_INTEGER;
+const FALLBACK_OPAQUE_REVOCATION_TTL_SEC = 365 * 24 * 3600;
 const WEB_UID_PATTERN = /^web-[A-Za-z0-9-]{8,64}$/;
 const DIGEST_HEX_PATTERN = /^[0-9a-f]{16}$/;
+const BASE64URL_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 let sessionInvalidated = false;
 const rejectedStaleTokens = new Set<string>();
 
-interface TokenMetadata {
-  hasJwtExp: boolean;
+interface StrictJwtMetadata {
   expSec: number;
 }
 
@@ -40,6 +38,24 @@ interface StoredExpRecord {
 interface WindowNameRevokedEntry {
   d: string;
   exp: number;
+}
+
+export type WriteSessionReason =
+  | 'persisted'
+  | 'invalid_token'
+  | 'expired_token'
+  | 'revoked_token'
+  | 'storage_failed';
+
+export interface WriteSessionResult {
+  persisted: boolean;
+  reason: WriteSessionReason;
+}
+
+export interface ClearSessionResult {
+  storageCleared: boolean;
+  revocationPersisted: boolean;
+  durableRevocationPersisted: boolean;
 }
 
 function nowEpochSeconds(): number {
@@ -61,10 +77,14 @@ export function digestTokenNonSecret(token: string): string {
 }
 
 function decodeBase64Url(segment: string): string | null {
+  if (!BASE64URL_SEGMENT_PATTERN.test(segment)) {
+    return null;
+  }
   try {
     const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
-    const padLen = (4 - (normalized.length % 4)) % 4;
-    const padded = normalized + '='.repeat(padLen);
+    const rem = normalized.length % 4;
+    if (rem === 1) return null;
+    const padded = rem === 0 ? normalized : normalized + '='.repeat(4 - rem);
     return atob(padded);
   } catch {
     return null;
@@ -72,38 +92,59 @@ function decodeBase64Url(segment: string): string | null {
 }
 
 /**
- * 解析令牌结构与有效期（秒级时间戳）：
- * - 三段式 JWT：校验 payload JSON；若含 exp 字段则必须为正有限数，否则判畸形（返回 null）；
- * - 非三段式测试/不透明凭据：保守赋值为 MAX_EXP_SEC（永不自动 GC 淘汰）。
+ * 严格校验三段式 Base64URL JWT 结构与有限正数 exp（Astra R1 v1.4）：
+ * - 必须精确 3 段且每段均匹配 ^[A-Za-z0-9_-]+$；
+ * - header 与 payload 必须均可解码并解析为合法 JSON 对象；
+ * - payload.exp 必须为有限正数（< Number.MAX_SAFE_INTEGER）；无 exp 或非 JWT 一律返回 null。
  */
-function parseTokenMetadata(token: string): TokenMetadata | null {
+export function parseStrictJwtMetadata(token: string): StrictJwtMetadata | null {
   const parts = token.split('.');
-  if (parts.length === 3) {
-    if (!parts[0] || !parts[1] || !parts[2]) return null;
-    const decoded = decodeBase64Url(parts[1]);
-    if (decoded === null) return null;
-    try {
-      const payload: unknown = JSON.parse(decoded);
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-        return null;
-      }
-      const expRaw = (payload as Record<string, unknown>).exp;
-      if (expRaw === undefined) {
-        return { hasJwtExp: false, expSec: MAX_EXP_SEC };
-      }
-      if (typeof expRaw !== 'number' || !Number.isFinite(expRaw) || expRaw <= 0) {
-        return null;
-      }
-      return { hasJwtExp: true, expSec: Math.floor(expRaw) };
-    } catch {
+  if (parts.length !== 3) {
+    return null;
+  }
+  const [headerSeg, payloadSeg, sigSeg] = parts;
+  if (
+    !BASE64URL_SEGMENT_PATTERN.test(headerSeg) ||
+    !BASE64URL_SEGMENT_PATTERN.test(payloadSeg) ||
+    !BASE64URL_SEGMENT_PATTERN.test(sigSeg)
+  ) {
+    return null;
+  }
+  const headerDecoded = decodeBase64Url(headerSeg);
+  const payloadDecoded = decodeBase64Url(payloadSeg);
+  if (headerDecoded === null || payloadDecoded === null) {
+    return null;
+  }
+  try {
+    const headerObj: unknown = JSON.parse(headerDecoded);
+    const payloadObj: unknown = JSON.parse(payloadDecoded);
+    if (
+      !headerObj ||
+      typeof headerObj !== 'object' ||
+      Array.isArray(headerObj) ||
+      !payloadObj ||
+      typeof payloadObj !== 'object' ||
+      Array.isArray(payloadObj)
+    ) {
       return null;
     }
+    const expRaw = (payloadObj as Record<string, unknown>).exp;
+    if (
+      typeof expRaw !== 'number' ||
+      !Number.isFinite(expRaw) ||
+      expRaw <= 0 ||
+      expRaw >= Number.MAX_SAFE_INTEGER
+    ) {
+      return null;
+    }
+    return { expSec: Math.floor(expRaw) };
+  } catch {
+    return null;
   }
-  return { hasJwtExp: false, expSec: MAX_EXP_SEC };
 }
 
 function isExpiredForGc(expSec: number, nowSec: number): boolean {
-  return expSec < MAX_EXP_SEC && nowSec > expSec + EXPIRY_SKEW_SEC;
+  return expSec < Number.MAX_SAFE_INTEGER && nowSec > expSec + EXPIRY_SKEW_SEC;
 }
 
 function parseExpRecord(raw: string): StoredExpRecord | null {
@@ -111,7 +152,14 @@ function parseExpRecord(raw: string): StoredExpRecord | null {
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     const exp = (parsed as Record<string, unknown>).exp;
-    if (typeof exp !== 'number' || !Number.isFinite(exp) || exp <= 0) return null;
+    if (
+      typeof exp !== 'number' ||
+      !Number.isFinite(exp) ||
+      exp <= 0 ||
+      exp >= Number.MAX_SAFE_INTEGER
+    ) {
+      return null;
+    }
     return { exp: Math.floor(exp) };
   } catch {
     return null;
@@ -156,6 +204,9 @@ function readWindowNameRevocations(): { ok: boolean; entries: WindowNameRevokedE
   try {
     if (typeof window === 'undefined') return { ok: true, entries: [] };
     const raw = window.name;
+    if (typeof raw !== 'string') {
+      return { ok: false, entries: [] };
+    }
     if (!raw || !raw.startsWith(WINDOW_NAME_REVOKED_PREFIX)) {
       return { ok: true, entries: [] };
     }
@@ -174,7 +225,8 @@ function readWindowNameRevocations(): { ok: boolean; entries: WindowNameRevokedE
         !DIGEST_HEX_PATTERN.test(rec.d) ||
         typeof rec.exp !== 'number' ||
         !Number.isFinite(rec.exp) ||
-        rec.exp <= 0
+        rec.exp <= 0 ||
+        rec.exp >= Number.MAX_SAFE_INTEGER
       ) {
         return { ok: false, entries: [] };
       }
@@ -211,7 +263,7 @@ function recordWindowNameRevocation(digest: string, expSec: number): boolean {
 function isDigestRevokedInWindowName(digest: string): boolean {
   const state = readWindowNameRevocations();
   if (!state.ok) {
-    // window.name 撤销数据损坏 => 严格 fail-closed
+    // window.name 读取异常或数据损坏 => 严格 fail-closed
     return true;
   }
   return state.entries.some((entry) => entry.d === digest);
@@ -233,7 +285,7 @@ function clearAllSessionPersistenceForTest(): void {
     // ignore
   }
   try {
-    if (typeof window !== 'undefined' && window.name.startsWith(WINDOW_NAME_REVOKED_PREFIX)) {
+    if (typeof window !== 'undefined' && typeof window.name === 'string' && window.name.startsWith(WINDOW_NAME_REVOKED_PREFIX)) {
       window.name = '';
     }
   } catch {
@@ -284,8 +336,8 @@ export function buildWebDeviceName(): string {
 }
 
 /**
- * 冷启动严格正向 fail-closed 恢复（Astra R1 v1.3）：
- * 仅在同时满足全部条件时返回 sessionStorage 中的 JWT，任意异常/缺失租约/过期/撤销均拒收返回 null。
+ * 冷启动严格正向 fail-closed 恢复（Astra R1 v1.4）：
+ * 仅在同时满足全部条件时返回 sessionStorage 中的 JWT，任意非 JWT/无 exp/过期/撤销/缺少有效正向租约/读写异常均拒收返回 null。
  */
 export function readSessionToken(): string | null {
   if (sessionInvalidated) {
@@ -299,16 +351,16 @@ export function readSessionToken(): string | null {
       return null;
     }
 
-    const meta = parseTokenMetadata(token);
+    const meta = parseStrictJwtMetadata(token);
     if (!meta) return null;
     const nowSec = nowEpochSeconds();
-    if (meta.hasJwtExp && nowSec >= meta.expSec) {
+    if (nowSec >= meta.expSec) {
       return null;
     }
 
     const digest = digestTokenNonSecret(token);
 
-    // 1) 同标签页 window.name 撤销校验（损坏则 fail-closed）
+    // 1) 同标签页 window.name 撤销校验（读异常或损坏均 fail-closed）
     if (isDigestRevokedInWindowName(digest)) {
       return null;
     }
@@ -319,16 +371,13 @@ export function readSessionToken(): string | null {
       return null;
     }
 
-    // 3) 必须存在有效的正向会话租约凭证（彻底杜绝孤儿 token 或持久化写失败后的空证据恢复）
+    // 3) 必须存在有效的有限期正向会话租约凭证（与 JWT exp 一致且未过期）
     const leaseRaw = window.localStorage.getItem(`${LEASE_KEY_PREFIX}${digest}`);
     if (leaseRaw === null) {
       return null;
     }
     const lease = parseExpRecord(leaseRaw);
-    if (!lease) {
-      return null;
-    }
-    if (lease.exp < MAX_EXP_SEC && nowSec >= lease.exp) {
+    if (!lease || lease.exp !== meta.expSec || nowSec >= lease.exp) {
       return null;
     }
 
@@ -339,59 +388,86 @@ export function readSessionToken(): string | null {
 }
 
 /**
- * 持久化新会话（Astra R1 v1.3）：
- * 仅在 JWT 合法未过期、未被撤销，且 sessionStorage 写入与 localStorage 独立正向租约写入均明确成功回读后，
- * 才解除当前标签页内存失效栅栏；绝不修改或删除其他令牌的撤销键与租约键。
+ * 持久化新会话并返回明确原因（Astra R1 v1.4）：
+ * - 区分 invalid_token / expired_token / revoked_token / storage_failed；
+ * - 若 localStorage 正向 lease 写入失败，立即回滚清理 sessionStorage，绝不留下无租约孤儿令牌。
  */
-export function writeSessionToken(token: string): boolean {
+export function writeSessionTokenDetailed(token: string): WriteSessionResult {
   const normalized = token.trim();
-  if (!normalized || normalized === REVOKED_TOKEN_SENTINEL) return false;
-  if (rejectedStaleTokens.has(normalized)) return false;
+  if (!normalized || normalized === REVOKED_TOKEN_SENTINEL) {
+    return { persisted: false, reason: 'invalid_token' };
+  }
 
-  const meta = parseTokenMetadata(normalized);
-  if (!meta) return false;
+  const meta = parseStrictJwtMetadata(normalized);
+  if (!meta) {
+    return { persisted: false, reason: 'invalid_token' };
+  }
   const nowSec = nowEpochSeconds();
-  if (meta.hasJwtExp && nowSec >= meta.expSec) return false;
+  if (nowSec >= meta.expSec) {
+    return { persisted: false, reason: 'expired_token' };
+  }
 
+  if (rejectedStaleTokens.has(normalized)) {
+    return { persisted: false, reason: 'revoked_token' };
+  }
   const digest = digestTokenNonSecret(normalized);
-  if (isDigestRevokedInWindowName(digest)) return false;
+  if (isDigestRevokedInWindowName(digest)) {
+    return { persisted: false, reason: 'revoked_token' };
+  }
 
   try {
     if (window.localStorage.getItem(`${REVOKED_KEY_PREFIX}${digest}`) !== null) {
-      return false;
+      return { persisted: false, reason: 'revoked_token' };
     }
+  } catch {
+    return { persisted: false, reason: 'storage_failed' };
+  }
+
+  let wroteSessionStorage = false;
+  try {
     window.sessionStorage.setItem(TOKEN_SESSION_KEY, normalized);
     const confirmedToken = window.sessionStorage.getItem(TOKEN_SESSION_KEY);
     if (confirmedToken !== normalized) {
-      return false;
+      return { persisted: false, reason: 'storage_failed' };
     }
+    wroteSessionStorage = true;
+
     const leaseKey = `${LEASE_KEY_PREFIX}${digest}`;
     const leaseValue = JSON.stringify({ exp: meta.expSec });
     window.localStorage.setItem(leaseKey, leaseValue);
     if (window.localStorage.getItem(leaseKey) !== leaseValue) {
-      return false;
+      // 回滚 sessionStorage 防止残留无租约孤儿
+      try {
+        window.sessionStorage.removeItem(TOKEN_SESSION_KEY);
+      } catch {
+        // ignore rollback failure
+      }
+      return { persisted: false, reason: 'storage_failed' };
     }
 
     gcExpiredSessionKeys(nowSec);
     sessionInvalidated = false;
-    return true;
+    return { persisted: true, reason: 'persisted' };
   } catch {
-    return false;
+    if (wroteSessionStorage) {
+      try {
+        window.sessionStorage.removeItem(TOKEN_SESSION_KEY);
+      } catch {
+        // ignore rollback failure
+      }
+    }
+    return { persisted: false, reason: 'storage_failed' };
   }
 }
 
-export interface ClearSessionResult {
-  storageCleared: boolean;
-  revocationPersisted: boolean;
+export function writeSessionToken(token: string): boolean {
+  return writeSessionTokenDetailed(token).persisted;
 }
 
 /**
- * 原子化清除会话（Astra R1 v1.3）：
- * 1) 即使 sessionStorage.getItem 抛异常，亦通过 fallbackToken（调用方内存 JWT）补齐撤销目标；
- * 2) 立即激活内存失效栅栏并记录旧令牌集合；
- * 3) 尝试清除 sessionStorage（removeItem 失败则覆写空串/哨兵）；
- * 4) 对每个待撤销令牌删除其独立 lease 租约、写入独立 revoked 键（含 exp，绝不 FIFO 驱逐），
- *    并追加至同标签持久化的 window.name 撤销列表；绝不删除其他令牌的租约或撤销键。
+ * 原子化清除会话（Astra R1 v1.4）：
+ * - 对所有待撤销令牌（fallbackToken 与 sessionStorage 现存值）统一按全通过（&&）聚合
+ *   revocationPersisted 与 durableRevocationPersisted，任一令牌未持久化撤销均诚实上报 false。
  */
 export function clearSessionToken(fallbackToken?: string): ClearSessionResult {
   const tokensToRevoke = new Set<string>();
@@ -444,11 +520,22 @@ export function clearSessionToken(fallbackToken?: string): ClearSessionResult {
     }
   }
 
-  let revocationPersisted = false;
+  if (tokensToRevoke.size === 0) {
+    return {
+      storageCleared: cleared,
+      revocationPersisted: false,
+      durableRevocationPersisted: false,
+    };
+  }
+
+  const nowSec = nowEpochSeconds();
+  let allDurable = true;
+  let allAnyPersisted = true;
+
   for (const tok of tokensToRevoke) {
     const digest = digestTokenNonSecret(tok);
-    const meta = parseTokenMetadata(tok);
-    const expSec = meta ? meta.expSec : MAX_EXP_SEC;
+    const meta = parseStrictJwtMetadata(tok);
+    const expSec = meta ? meta.expSec : nowSec + FALLBACK_OPAQUE_REVOCATION_TTL_SEC;
 
     let leaseRemoved = false;
     try {
@@ -470,12 +557,17 @@ export function clearSessionToken(fallbackToken?: string): ClearSessionResult {
     }
 
     const windowNameRecorded = recordWindowNameRevocation(digest, expSec);
-    if (leaseRemoved || revokedWritten || windowNameRecorded) {
-      revocationPersisted = true;
-    }
+    const tokDurable = leaseRemoved || revokedWritten;
+    const tokAny = tokDurable || windowNameRecorded;
+    allDurable = allDurable && tokDurable;
+    allAnyPersisted = allAnyPersisted && tokAny;
   }
 
-  return { storageCleared: cleared, revocationPersisted };
+  return {
+    storageCleared: cleared,
+    revocationPersisted: allAnyPersisted,
+    durableRevocationPersisted: allDurable,
+  };
 }
 
 /** 仅供单元测试在用例间重置模块级内存栅栏；preservePersistedState=true 用于模拟同标签页面刷新 */

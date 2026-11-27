@@ -104,12 +104,18 @@ export function formatRepeatRule(rule?: PlanRepeatRule | null): string {
 export function formatScheduleRepeat(raw?: string | null): string {
   if (!raw) return '单次';
   try {
-    const parsed = JSON.parse(raw) as { type?: string; weekdays?: number[]; day?: number; month?: number };
+    const parsed = JSON.parse(raw) as {
+      type?: string;
+      weekdays?: number[];
+      days?: number[];
+      day?: number;
+      month?: number;
+    };
     switch (parsed.type) {
       case 'daily':
         return '每天';
       case 'weekly':
-        return formatRepeatRule({ type: 'weekly', weekdays: parsed.weekdays });
+        return formatRepeatRule({ type: 'weekly', weekdays: parsed.weekdays ?? parsed.days });
       case 'monthly':
         return `每月 ${parsed.day ?? 1} 日`;
       case 'yearly':
